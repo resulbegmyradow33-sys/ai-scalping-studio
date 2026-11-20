@@ -11,7 +11,9 @@ the pipeline looks past the current bar:
 * no statistic is taken over the whole frame.
 
 ``valid_from`` is the first row at which every window is warm (60 bars), and
-``X[valid_from:]`` contains no NaN.
+``X[valid_from:]`` contains no NaN. The raw ATR(14) is exposed next to ``X`` as
+``FeatureFrame.atr`` so the simulator can size stops in price units; it is not
+part of the normalised matrix.
 """
 
 from __future__ import annotations
@@ -147,14 +149,18 @@ class FeatureFrame:
     """Feature matrix plus the raw market data each row was built from.
 
     ``X`` is ``(T, F)`` ``float32``; ``ohlc`` is ``(T, 4)`` open/high/low/close
-    and ``spread`` is the bid/ask spread, both in price units. ``valid_from``
-    indexes the first fully warm row.
+    and ``spread`` is the bid/ask spread, both in price units. ``atr`` is the
+    raw causal ATR(14) of the M1 bars, also in price units, kept outside ``X``
+    because the normalised matrix cannot express the stop distance the
+    simulator needs for slippage, stops and targets. ``valid_from`` indexes the
+    first fully warm row.
     """
 
     X: np.ndarray
     ts: np.ndarray
     ohlc: np.ndarray
     spread: np.ndarray
+    atr: np.ndarray
     valid_from: int
     columns: list[str] = field(default_factory=list)
 
@@ -361,6 +367,7 @@ def _empty_frame() -> FeatureFrame:
         ts=np.zeros(0, dtype="datetime64[us]"),
         ohlc=np.zeros((0, 4), dtype=np.float64),
         spread=np.zeros(0, dtype=np.float64),
+        atr=np.zeros(0, dtype=np.float64),
         valid_from=0,
         columns=list(FEATURE_COLUMNS),
     )
@@ -410,6 +417,7 @@ def build_features(df: pl.DataFrame) -> FeatureFrame:
         ts=frame["ts"].to_numpy(),
         ohlc=frame.select("open", "high", "low", "close").to_numpy(),
         spread=frame["spread"].to_numpy(),
+        atr=work["_atr14"].to_numpy().astype(np.float64, copy=True),
         valid_from=min(WARMUP, frame.height),
         columns=list(FEATURE_COLUMNS),
     )

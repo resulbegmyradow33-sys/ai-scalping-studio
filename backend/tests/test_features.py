@@ -246,6 +246,9 @@ def test_feature_frame_fields(day: pl.DataFrame) -> None:
     assert isinstance(f.columns, list)
     assert f.ohlc.shape == (day.height, 4)
     assert f.spread.shape == (day.height,)
+    assert f.atr.shape == (day.height,)
+    assert f.atr.dtype == np.float64
+    assert (f.atr[f.valid_from :] > 0).all()
     assert f.ts.shape == (day.height,)
     assert f.ts[0] == np.datetime64("2026-01-05T00:00:00.000000")
     assert np.issubdtype(f.ts.dtype, np.datetime64)
