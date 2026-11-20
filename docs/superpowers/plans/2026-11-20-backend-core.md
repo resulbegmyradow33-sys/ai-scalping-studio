@@ -613,7 +613,7 @@ git commit -m "feat: paper broker with spread, slippage, commission and SL/TP fi
   - `.allow_new(account: AccountState, ts: datetime) -> tuple[bool, str | None]` reasons: `None`, `"daily_loss_limit"`, `"max_positions"`, `"lot_too_small"`
   - `.must_force_close(bars_in_trade: int) -> bool`
   - `.sl_tp(entry: float, side: Side, atr: float) -> tuple[float, float]` with 1.0×ATR SL, 2.0×ATR TP.
-  - Internal: `_daily_anchor_utc(ts) -> date` using 17:00 UTC boundary.
+  - Internal: `session_anchor(ts) -> date` (public — Task 10 uses it to roll `day_start_equity`) using the 17:00 UTC boundary.
 
 - [ ] **Step 1: Write the failing test**
 
