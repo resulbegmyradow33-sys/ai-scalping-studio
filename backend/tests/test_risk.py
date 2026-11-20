@@ -162,28 +162,29 @@ def test_max_positions_blocks_and_clears():
 def test_allow_new_blocks_a_blown_account():
     e = engine()
     ts = datetime(2026, 1, 5, 10, tzinfo=UTC)
+    # A zero equity on a real base is a 100% loss, not a sizing problem.
+    assert e.allow_new(st(equity=0.0, day_start=10_000), ts) == (False, "daily_loss_limit")
+    assert e.allow_new(st(equity=-500.0, day_start=10_000), ts) == (False, "daily_loss_limit")
+    # No measurable base: nothing can be sized or compared.
     assert e.allow_new(st(equity=0.0, day_start=0.0), ts) == (False, "lot_too_small")
+    assert e.allow_new(st(equity=100.0, day_start=-1.0), ts) == (False, "lot_too_small")
 
 
 def test_session_anchor_uses_the_1700_utc_boundary():
-    assert RiskEngine._daily_anchor_utc(datetime(2026, 1, 5, 16, 59, tzinfo=UTC)) == date(
-        2026, 1, 4
-    )
-    assert RiskEngine._daily_anchor_utc(datetime(2026, 1, 5, 17, 0, tzinfo=UTC)) == date(2026, 1, 5)
+    e = engine()
+    assert e.session_anchor(datetime(2026, 1, 5, 16, 59, tzinfo=UTC)) == date(2026, 1, 4)
+    assert e.session_anchor(datetime(2026, 1, 5, 17, 0, tzinfo=UTC)) == date(2026, 1, 5)
     # 00:30 UTC still belongs to the session that opened the previous afternoon.
-    assert RiskEngine._daily_anchor_utc(datetime(2026, 1, 6, 0, 30, tzinfo=UTC)) == date(2026, 1, 5)
+    assert e.session_anchor(datetime(2026, 1, 6, 0, 30, tzinfo=UTC)) == date(2026, 1, 5)
 
 
 def test_session_anchor_normalises_to_utc():
+    e = engine()
     plus_three = timezone(timedelta(hours=3))
-    assert RiskEngine._daily_anchor_utc(datetime(2026, 1, 5, 20, 0, tzinfo=plus_three)) == date(
-        2026, 1, 5
-    )
-    assert RiskEngine._daily_anchor_utc(datetime(2026, 1, 5, 19, 59, tzinfo=plus_three)) == date(
-        2026, 1, 4
-    )
+    assert e.session_anchor(datetime(2026, 1, 5, 20, 0, tzinfo=plus_three)) == date(2026, 1, 5)
+    assert e.session_anchor(datetime(2026, 1, 5, 19, 59, tzinfo=plus_three)) == date(2026, 1, 4)
     with pytest.raises(ValueError):
-        RiskEngine._daily_anchor_utc(datetime(2026, 1, 5, 10, 0))
+        e.session_anchor(datetime(2026, 1, 5, 10, 0))
 
 
 def test_allow_new_rejects_a_naive_timestamp():

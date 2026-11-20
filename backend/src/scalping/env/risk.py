@@ -6,9 +6,10 @@ snapshot, never a risk override, so a caller cannot loosen a limit per trade.
 
 Session anchor
 --------------
-``_daily_anchor_utc`` returns the ``date`` the 17:00 roll belongs to: a bar at
+``session_anchor`` returns the ``date`` the 17:00 roll belongs to: a bar at
 or after 17:00 UTC belongs to that calendar day, a bar before 17:00 UTC belongs
-to the previous one. The design calls for the New York 17:00 roll; v1 uses
+to the previous one. It is the single boundary the Simulator uses to roll
+``day_start_equity``. The design calls for the New York 17:00 roll; v1 uses
 17:00 UTC as a fixed approximation and ignores US daylight saving, which shifts
 the true roll by one hour for part of the year.
 
@@ -147,18 +148,21 @@ class RiskEngine:
     def allow_new(self, account: AccountState, ts: datetime) -> tuple[bool, str | None]:
         """Decide whether a new position may open at ``ts``.
 
-        Checks run in this order: a non-positive equity base
-        (``"lot_too_small"``, nothing can be sized or measured), the daily loss
-        limit at or beyond ``daily_loss_pct`` (``"daily_loss_limit"``), then the
-        position count (``"max_positions"``). The account snapshot is never
-        mutated.
+        Checks run in this order: a non-positive ``day_start_equity``
+        (``"lot_too_small"``: nothing can be measured or sized), the daily loss
+        limit at or beyond ``daily_loss_pct`` (``"daily_loss_limit"``; zero or
+        negative equity on a real base is a total loss, not a sizing failure),
+        then the position count (``"max_positions"``). The account snapshot is
+        never mutated.
         """
-        # ``ts`` names the session the snapshot is anchored to; validating it
-        # here keeps a naive timestamp from silently shifting the 17:00 boundary.
-        self._daily_anchor_utc(ts)
+        # The snapshot is expected to be anchored to the session ``ts`` names.
+        # Computing the anchor validates ts (aware, normalised to UTC) and makes
+        # the session boundary explicit; the gate itself needs only the equity
+        # pair, because the caller rolls ``day_start_equity`` on this boundary.
+        self.session_anchor(ts)
         _check_finite("account.equity", account.equity)
         _check_finite("account.day_start_equity", account.day_start_equity)
-        if account.equity <= 0 or account.day_start_equity <= 0:
+        if account.day_start_equity <= 0:
             return False, "lot_too_small"
 
         loss_pct = (account.day_start_equity - account.equity) / account.day_start_equity
@@ -190,15 +194,16 @@ class RiskEngine:
 
     # --- session -----------------------------------------------------------
 
-    @staticmethod
-    def _daily_anchor_utc(ts: datetime) -> date:
+    def session_anchor(self, ts: datetime) -> date:
         """Return the 17:00 UTC FX-day ``ts`` belongs to.
 
-        v1 approximates the New York 17:00 roll with a fixed 17:00 UTC boundary
-        and ignores daylight saving, so the anchor is the date of the most
-        recent 17:00 UTC boundary: ``ts`` at or after 17:00 anchors to its own
-        date, earlier than that to the previous date. A naive datetime is
-        rejected rather than silently read as local time.
+        This is the one session boundary in the backend: Task 10 rolls
+        ``day_start_equity`` when this anchor changes. v1 approximates the New
+        York 17:00 roll with a fixed 17:00 UTC boundary and ignores daylight
+        saving, so the anchor is the date of the most recent 17:00 UTC boundary:
+        ``ts`` at or after 17:00 anchors to its own date, earlier than that to
+        the previous date. A naive datetime is rejected rather than silently
+        read as local time.
         """
         if ts.tzinfo is None or ts.utcoffset() is None:
             raise ValueError(f"ts must be timezone-aware, got {ts!r}")
