@@ -865,7 +865,7 @@ def test_short_data_does_not_crash():
 def test_equity_drop_terminates_episode():
     env = make_env()
     env.reset(seed=1)
-    env.sim.broker._force_balance(8_000)  # test hook
+    env.sim._force_equity(8_000)  # test hook on the Simulator
     _, _, term, _, _ = env.step(0)
     assert term
 ```
