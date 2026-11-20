@@ -520,8 +520,8 @@ git commit -m "feat: dukascopy tick provider with backoff and cache"
   - `.mark(bar: Bar) -> float` (unrealized PnL, no mutation of balance)
   - `.update(bar: Bar) -> Trade | None` — checks SL/TP using **bar high/low**, gap fills at `bar.open`, charges commission on close
   - `.close(bar: Bar, reason: str) -> Trade`
-  - `.state(balance: float) -> AccountState`
-  - Invariants: `equity == balance + unrealized`; costs = entry half-spread + exit half-spread + commission + slippage.
+  - `.state(balance: float, day_start_equity: float | None = None) -> AccountState` — the broker does **not** own the session anchor; `day_start_equity` comes from the Simulator/RiskEngine (17:00 boundary lives there), defaulting to `balance`.
+  - Invariants: `equity == balance + unrealized`; `costs = entry half-spread + slippage + commission + exit half-spread **only on quote exits**`. Trigger exits (SL/TP) fill at the bar's series price and report zero exit spread.
 
 - [ ] **Step 1: Write the failing test**
 
