@@ -132,3 +132,32 @@ def test_zero_field_rows_are_skipped(tmp_path):
     )
     df = CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", None, None)
     assert df.height == 2
+
+
+def test_mixed_width_file_reports_line_and_widths():
+    with pytest.raises(DataError, match="line 2") as info:
+        CsvProvider(FIX.with_name("mixed_width.csv"), tz_offset_hours=3).fetch(
+            "XAUUSD", None, None
+        )
+    assert "expected 6" in str(info.value)
+    assert "found 8" in str(info.value)
+
+
+def test_narrowing_width_file_reports_line(tmp_path):
+    path = tmp_path / "narrowing.csv"
+    path.write_text(
+        "2026.01.05 10:00,1,2,0.5,1.5,1.4,1.6,10\n2026.01.05 10:01,1,2,0.5,1.5,10\n"
+    )
+    with pytest.raises(DataError, match="line 2") as info:
+        CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", None, None)
+    assert "expected 8" in str(info.value)
+    assert "found 6" in str(info.value)
+
+
+def test_crossed_quotes_are_rejected(tmp_path):
+    path = tmp_path / "crossed.csv"
+    # bid_close 1.6 is above ask_close 1.4, so the spread would be negative.
+    path.write_text("2026.01.05 10:00,1.0,2.0,0.5,1.5,1.6,1.4,10\n")
+    with pytest.raises(DataError, match="line 1") as info:
+        CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", None, None)
+    assert info.value.column == "spread"

@@ -206,11 +206,23 @@ class CsvProvider(DataProvider):
     def _parse_records(self) -> list[_Record]:
         text = self.path.read_text(encoding="utf-8")
         records: list[_Record] = []
+        columns: tuple[str, ...] | None = None
+        width = 0
+        layout_line = 0
         for line_number, raw in enumerate(text.splitlines(), start=1):
             if not raw.strip():
                 continue
             fields = [field.strip() for field in raw.split(",")]
-            columns = self._canonical_columns(len(fields), line_number)
+            if columns is None:
+                # The first data row fixes the layout; later rows must match.
+                columns = self._canonical_columns(len(fields), line_number)
+                width, layout_line = len(fields), line_number
+            elif len(fields) != width:
+                raise DataError(
+                    line_number,
+                    f"expected {width} comma-separated fields (layout set on line "
+                    f"{layout_line}), found {len(fields)}",
+                )
             record = _Record(line=line_number, ts=datetime.min, volume=0)
             for column, value in zip(columns, fields, strict=True):
                 if column == "ts":
@@ -273,6 +285,12 @@ class CsvProvider(DataProvider):
             for record in records:
                 bid = record.prices["bid_close"]
                 ask = record.prices["ask_close"]
+                if ask < bid:
+                    raise DataError(
+                        record.line,
+                        f"ask {ask} is below bid {bid}; crossed quote",
+                        "spread",
+                    )
                 bids.append(bid)
                 asks.append(ask)
                 spreads.append(ask - bid)

@@ -70,7 +70,13 @@ class DataProvider(Protocol):
 
     Providers are cheap to construct and stateless between calls; ``fetch``
     returns a frame conforming to :data:`BAR_SCHEMA` covering ``[start, end]``.
-    A ``None`` bound means "unbounded" on that side.
+
+    ``start`` and ``end`` are ``datetime | None``. ``None`` means unbounded on
+    that side, which a file-backed provider (CSV, parquet) honours by serving
+    whatever its source covers. A provider that can only generate a finite
+    window has nothing to fall back on, so it raises ``ValueError`` for a
+    ``None`` bound; :class:`~scalping.data.synthetic.SyntheticProvider` is one
+    such provider and needs both bounds.
     """
 
     name: str

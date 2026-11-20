@@ -149,3 +149,16 @@ def test_spread_is_ask_minus_bid():
 def test_start_price_must_be_finite(bad_price):
     with pytest.raises(ValueError, match="start_price"):
         SyntheticProvider(start_price=bad_price)
+
+
+def test_fetch_requires_both_bounds():
+    # The protocol documents None as unbounded, but a generator has no source
+    # range to fall back on, so it must reject a missing bound explicitly.
+    provider = SyntheticProvider()
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    with pytest.raises(ValueError, match="start and end"):
+        provider.fetch("XAUUSD", None, None)
+    with pytest.raises(ValueError, match="start and end"):
+        provider.fetch("XAUUSD", start, None)
+    with pytest.raises(ValueError, match="start and end"):
+        provider.fetch("XAUUSD", None, start)
