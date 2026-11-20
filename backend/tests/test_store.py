@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 import polars as pl
+import pytest
 
 from scalping.data.base import BAR_SCHEMA
 from scalping.data.resample import resample
@@ -114,3 +116,57 @@ def test_provider_survives_store_roundtrip(tmp_path):
     s = ParquetStore(tmp_path)
     s.write("XAUUSD", "M1", bars(3).with_columns(pl.lit("dukascopy").alias("provider")))
     assert s.read("XAUUSD", "M1")["provider"].unique().to_list() == ["dukascopy"]
+
+
+def test_read_normalizes_partitions_with_divergent_schemas(tmp_path):
+    s = ParquetStore(tmp_path)
+    feb = bars(1).with_columns(
+        pl.lit(datetime(2026, 2, 1, tzinfo=UTC)).alias("ts"),
+        pl.lit("synthetic").alias("provider"),
+    )
+    s.write("XAUUSD", "M1", feb)
+    # Hand-written partition: no provider column, plus a stray extra column.
+    raw = pl.DataFrame(
+        {
+            "ts": [datetime(2026, 1, 5, 10, 0, tzinfo=UTC)],
+            "open": [1.0],
+            "high": [1.5],
+            "low": [0.5],
+            "close": [1.0],
+            "bid_close": [0.9],
+            "ask_close": [1.1],
+            "spread": [0.2],
+            "volume": [1],
+            "legacy_source": ["old-export"],
+        }
+    )
+    raw_path = tmp_path / "XAUUSD" / "M1" / "2026" / "01.parquet"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw.write_parquet(raw_path)
+
+    out = s.read("XAUUSD", "M1")
+
+    assert out.height == 2
+    assert out.columns == list(BAR_SCHEMA)
+    assert out["provider"].to_list() == ["unknown", "synthetic"]
+
+
+def test_failed_write_leaves_previous_partition_intact(tmp_path, monkeypatch):
+    s = ParquetStore(tmp_path)
+    s.write("XAUUSD", "M1", bars(3))
+    path = tmp_path / "XAUUSD" / "M1" / "2026" / "01.parquet"
+    before = path.read_bytes()
+
+    def failing_write(self, file, **kwargs):
+        Path(file).write_bytes(b"truncated")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(pl.DataFrame, "write_parquet", failing_write)
+    with pytest.raises(OSError, match="disk full"):
+        s.write("XAUUSD", "M1", bars(5))
+
+    assert path.read_bytes() == before
+    assert not list(path.parent.glob("*.tmp"))
+    out = s.read("XAUUSD", "M1")
+    assert out.height == 3
+    assert out["close"].to_list() == [1.5, 2.5, 3.5]

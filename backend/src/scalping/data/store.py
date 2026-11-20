@@ -11,6 +11,8 @@ reports ``0`` even though the partition file may be refreshed.
 
 from __future__ import annotations
 
+import os
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -42,6 +44,24 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 def _empty() -> pl.DataFrame:
     return pl.DataFrame(schema=BAR_SCHEMA)
+
+
+def _write_atomic(frame: pl.DataFrame, path: Path) -> None:
+    """Write ``frame`` to ``path`` without ever truncating the live file.
+
+    The frame goes to a sibling temp file first and is moved onto ``path`` with
+    an atomic replace, so an interrupt or full disk mid-write leaves the previous
+    partition readable (the temp file is removed either way).
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        frame.write_parquet(tmp)
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class ParquetStore:
@@ -110,8 +130,7 @@ class ParquetStore:
                 .sort("ts")
             )
             if not existing.equals(merged):
-                path.parent.mkdir(parents=True, exist_ok=True)
-                merged.write_parquet(path)
+                _write_atomic(merged, path)
             added += merged.height - existing.height
         return added
 
@@ -133,12 +152,12 @@ class ParquetStore:
         paths = self._partitions(symbol, timeframe, start, end)
         if not paths:
             return _empty()
-        frame = pl.concat([pl.read_parquet(path) for path in paths])
+        frame = pl.concat([self._read_partition(path) for path in paths])
         if start is not None:
             frame = frame.filter(pl.col("ts") >= start)
         if end is not None:
             frame = frame.filter(pl.col("ts") <= end)
-        return conform_bars(frame).sort("ts")
+        return frame.sort("ts")
 
     def coverage(self, symbol: str, timeframe: str = "M1") -> Coverage:
         """First/last timestamp and row count across every partition."""

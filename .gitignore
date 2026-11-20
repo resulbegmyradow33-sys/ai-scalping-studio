@@ -8,14 +8,14 @@ __pycache__/
 
 # data & artifacts (root-anchored: backend/src/scalping/data is source code)
 /data/
-runs/
+/runs/
 *.parquet
 .env
 
 # node
 node_modules/
 .next/
-out/
+/out/
 frontend/coverage/
 frontend/test-results/
 frontend/playwright-report/
