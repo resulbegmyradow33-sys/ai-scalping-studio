@@ -5,9 +5,11 @@ The public feed serves one LZMA-compressed ``.bi5`` file per UTC hour::
     https://datafeed.dukascopy.com/datafeed/{symbol}/{year}/{month-1:02d}/{day:02d}/{hour:02d}h_ticks.bi5
 
 Each decompressed record is 20 bytes big-endian
-``(ms_offset:u32, ask:u32, bid:u32, ask_vol:f32, bid_vol:f32)``. Prices are
-stored in thousandths of a price unit, so a raw ``2351234`` is ``2351.234``.
-``ms_offset`` is milliseconds since the top of the cached hour.
+``(ms_offset:u32, ask:u32, bid:u32, ask_vol:f32, bid_vol:f32)``. Integer prices
+are quoted in points; :data:`POINT_DIVISORS` maps a symbol to its point divisor
+(``1000`` for the metals), and a symbol without an entry is rejected at use
+instead of silently returning prices that are off by a factor of ten or a
+hundred. ``ms_offset`` is milliseconds since the top of the cached hour.
 
 The endpoint rate-limits aggressively (HTTP 429 from a single machine is
 normal) and occasionally returns 503. Both are retried with a delay of
@@ -16,11 +18,14 @@ reported as :class:`DataUnavailable`. A 404 means there is no file for that
 hour and yields an empty frame without retrying. Any other status fails
 immediately, because retrying a 403 cannot help.
 
-A successful hour is cached at ``{cache_dir}/{symbol}/{yyyymmdd}/{hh}.parquet``
-before it is returned. HTTP 200 with a zero-byte body means the market was
-closed for that hour; the empty frame is cached too, so a closed hour is not
-requested again. A 404 is *not* cached because it can also mean a mistyped
-symbol, and caching would hide the mistake until the cache is cleared.
+A fully elapsed hour is cached at
+``{cache_dir}/{symbol}/{yyyymmdd}/{hh}.parquet`` before it is returned. HTTP
+200 with a zero-byte body means the market was closed; the empty frame is
+cached too, so a closed hour is not requested again. A 404 for an elapsed hour
+is cached the same way, because Dukascopy answers most weekend/holiday hours
+with 404 and re-requesting them would hammer a rate-limited host. The current
+and any future hour are never written to the cache: a partial hour would
+freeze forever, and a 404 there may still turn into data.
 """
 
 from __future__ import annotations
@@ -31,10 +36,11 @@ import os
 import struct
 import tempfile
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from math import isfinite
 from pathlib import Path
-from typing import Final
+from typing import Final, Self
 
 import httpx
 import polars as pl
@@ -42,6 +48,7 @@ import polars as pl
 from scalping.data.base import BAR_COLUMNS, BAR_SCHEMA, DataProvider, conform_bars
 
 __all__ = [
+    "POINT_DIVISORS",
     "PROVIDER_NAME",
     "DataUnavailable",
     "DukascopyProvider",
@@ -51,6 +58,11 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 PROVIDER_NAME: Final[str] = "dukascopy"
+
+#: Integer price fields are measured in 1/`divisor` of a price unit. Only
+#: symbols listed here can be fetched; adding a 5-digit FX pair means adding
+#: ``100000`` (or its actual divisor) rather than relying on a default.
+POINT_DIVISORS: Final[dict[str, int]] = {"XAUUSD": 1000, "XAGUSD": 1000}
 
 #: Public tick endpoint; ``month`` in the path is zero-based (January is ``00``).
 BASE_URL: Final[str] = "https://datafeed.dukascopy.com/datafeed"
@@ -68,6 +80,26 @@ _LZMA_PROPERTIES: Final[int] = 0x5D
 def _sleep(seconds: float) -> None:
     """Backoff indirection so tests can record the schedule without waiting."""
     time.sleep(seconds)
+
+
+def _utc_now() -> datetime:
+    """Default clock; injectable so cacheability never depends on the wall clock."""
+    return datetime.now(UTC)
+
+
+def _point_divisor(symbol: str) -> int:
+    """Return the validated point divisor for ``symbol``.
+
+    Refusing an unknown symbol is deliberate: dividing a 5-digit FX quote by
+    the metals' ``1000`` would return a price that is two orders of magnitude
+    wrong with no error, which is worse than failing the fetch.
+    """
+    try:
+        return POINT_DIVISORS[symbol]
+    except KeyError:
+        raise ValueError(
+            f"unsupported symbol {symbol!r}: add its point divisor to POINT_DIVISORS"
+        ) from None
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -109,10 +141,16 @@ def _decompress(payload: bytes) -> bytes:
 def decode_ticks(payload: bytes) -> list[dict]:
     """Decode one hour's 20-byte big-endian tick records into dicts.
 
-    Prices are scaled by ``1/1000``; volumes stay as the feed's ``f32`` value.
+    Prices are scaled by ``1/1000`` to match the metals feed; the provider
+    itself scales with the symbol's validated :data:`POINT_DIVISORS` entry.
     An empty payload decodes to ``[]``. A trailing partial record is rejected
     rather than silently dropped, because it means the file is corrupt.
     """
+    return _decode_ticks(payload, 1000)
+
+
+def _decode_ticks(payload: bytes, divisor: int) -> list[dict]:
+    """Decode records, scaling integer prices by ``1/divisor``."""
     if not payload:
         return []
     if len(payload) % _RECORD.size:
@@ -123,8 +161,8 @@ def decode_ticks(payload: bytes) -> list[dict]:
     return [
         {
             "ms": ms,
-            "ask": ask / 1000.0,
-            "bid": bid / 1000.0,
+            "ask": ask / divisor,
+            "bid": bid / divisor,
             "ask_vol": ask_vol,
             "bid_vol": bid_vol,
         }
@@ -150,11 +188,18 @@ class DataUnavailable(RuntimeError):
 class DukascopyProvider(DataProvider):
     """Serve M1 bars from Dukascopy's public hourly tick files.
 
-    ``cache_dir`` holds one parquet file per fetched hour. ``client`` lets a
-    caller (or a test) supply an ``httpx.Client``; without one the provider
-    creates its own and closes it in :meth:`close`. ``max_retries`` counts the
-    attempts *after* the first request, so the default of 5 yields at most six
-    requests per hour with delays of ``1, 2, 4, 8, 16`` seconds.
+    ``cache_dir`` holds one parquet file per fully elapsed hour. ``client``
+    lets a caller (or a test) supply an ``httpx.Client``; without one the
+    provider creates its own. Either way the client belongs to the provider
+    while it is open: :meth:`close` (and ``with``) closes it.
+    ``max_retries`` counts the attempts *after* the first request, so the
+    default of 5 yields at most six requests per hour with delays of
+    ``1, 2, 4, 8, 16`` seconds. ``now`` is the clock used to decide whether an
+    hour has elapsed; tests inject a fixed one rather than depend on wall time.
+
+    ``symbol`` is an optional up-front check: when given, an unsupported
+    instrument fails at construction. Every call that names a symbol validates
+    it as well, against :data:`POINT_DIVISORS`.
 
     ``fetch`` requires both bounds and covers ``[start, end]`` inclusive,
     walking hour by hour and dropping bars outside the requested window.
@@ -168,23 +213,33 @@ class DukascopyProvider(DataProvider):
         client: httpx.Client | None = None,
         max_retries: int = 5,
         base_delay: float = 1.0,
+        now: Callable[[], datetime] = _utc_now,
+        symbol: str | None = None,
     ) -> None:
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
         if not isfinite(base_delay) or base_delay < 0:
             raise ValueError("base_delay must be a finite non-negative number")
+        if symbol is not None:
+            _point_divisor(symbol)
         self.cache_dir = Path(cache_dir)
         self.max_retries = int(max_retries)
         self.base_delay = float(base_delay)
+        self.symbol = symbol
+        self._now = now
         self._client = client or httpx.Client(
             timeout=_REQUEST_TIMEOUT, headers={"User-Agent": _USER_AGENT}
         )
-        self._owns_client = client is None
 
     def close(self) -> None:
-        """Close the internally created client; a caller-supplied one is left open."""
-        if self._owns_client:
-            self._client.close()
+        """Close the underlying HTTP client, whether injected or owned."""
+        self._client.close()
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
 
     # --- fetching ------------------------------------------------------
     def fetch(
@@ -195,6 +250,7 @@ class DukascopyProvider(DataProvider):
     ) -> pl.DataFrame:
         if not symbol:
             raise ValueError("symbol must be non-empty")
+        _point_divisor(symbol)
         if start is None or end is None:
             raise ValueError("DukascopyProvider needs an explicit start and end")
         start, end = _as_utc(start), _as_utc(end)
@@ -212,10 +268,13 @@ class DukascopyProvider(DataProvider):
     def _fetch_hour(self, symbol: str, hour_utc: datetime) -> pl.DataFrame:
         """Return one UTC hour of M1 bars, from cache when it is present.
 
-        A freshly downloaded hour is written to the cache before returning,
-        including an empty hour. A 404 returns an empty frame and leaves the
-        cache untouched.
+        The cache is written only when the hour has fully elapsed
+        (``hour_end <= now``). That covers a downloaded hour, an empty 200, and
+        a 404, so closed weekend/holiday hours are remembered. A partial or
+        future hour is returned but never stored: caching it would freeze
+        incomplete data forever.
         """
+        divisor = _point_divisor(symbol)
         hour = _as_utc(hour_utc).replace(minute=0, second=0, microsecond=0)
         path = self._cache_path(symbol, hour)
         if path.exists():
@@ -223,10 +282,16 @@ class DukascopyProvider(DataProvider):
 
         payload = self._download(symbol, hour)
         if payload is None:
-            return _empty()
-        frame = self._hour_bars(hour, decode_ticks(_decompress(payload)))
-        _write_atomic(frame, path)
+            frame = _empty()
+        else:
+            frame = self._hour_bars(hour, _decode_ticks(_decompress(payload), divisor))
+        if self._is_cacheable(hour):
+            _write_atomic(frame, path)
         return frame
+
+    def _is_cacheable(self, hour: datetime) -> bool:
+        """An hour is cacheable once its last instant is at or before ``now``."""
+        return hour + timedelta(hours=1) <= _as_utc(self._now())
 
     def _download(self, symbol: str, hour: datetime) -> bytes | None:
         """Fetch one hour, retrying 429/503; ``None`` means a 404 (no file)."""
@@ -268,8 +333,6 @@ class DukascopyProvider(DataProvider):
 
     # --- paths ---------------------------------------------------------
     def _cache_path(self, symbol: str, hour: datetime) -> Path:
-        if not symbol or symbol in {".", ".."} or "/" in symbol or os.sep in symbol:
-            raise ValueError(f"symbol must be a plain name, got {symbol!r}")
         return self.cache_dir / symbol / f"{hour:%Y%m%d}" / f"{hour:%H}.parquet"
 
     @staticmethod

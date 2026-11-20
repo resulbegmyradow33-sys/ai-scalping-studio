@@ -6,7 +6,7 @@ can open a socket, so the suite is safe to run when the feed is rate-limited.
 
 import lzma
 import struct
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -14,6 +14,10 @@ import pytest
 from scalping.data import dukascopy
 from scalping.data.base import BAR_SCHEMA, conform_bars
 from scalping.data.dukascopy import DataUnavailable, DukascopyProvider, decode_ticks
+
+HOUR = datetime(2026, 1, 5, 10, tzinfo=UTC)
+#: Fixed clock after HOUR has fully elapsed so cache decisions are deterministic.
+PAST = datetime(2026, 1, 6, tzinfo=UTC)
 
 
 def test_decode_ticks_known_record():
@@ -34,14 +38,16 @@ def test_retries_on_429_then_succeeds(tmp_path):
         return httpx.Response(200, content=b"")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    p = DukascopyProvider(tmp_path, client=client, base_delay=0.01)
+    p = DukascopyProvider(tmp_path, client=client, base_delay=0.01, now=lambda: PAST)
     p._fetch_hour("XAUUSD", datetime(2026, 1, 5, 10, tzinfo=UTC))
     assert calls["n"] == 3
 
 
 def test_gives_up_after_max_retries(tmp_path):
     client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(429)))
-    p = DukascopyProvider(tmp_path, client=client, max_retries=2, base_delay=0.01)
+    p = DukascopyProvider(
+        tmp_path, client=client, max_retries=2, base_delay=0.01, now=lambda: PAST
+    )
     with pytest.raises(DataUnavailable):
         p._fetch_hour("XAUUSD", datetime(2026, 1, 5, 10, tzinfo=UTC))
 
@@ -54,7 +60,7 @@ def test_cache_prevents_second_request(tmp_path):
         return httpx.Response(200, content=b"")
 
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    p = DukascopyProvider(tmp_path, client=client, base_delay=0.01)
+    p = DukascopyProvider(tmp_path, client=client, base_delay=0.01, now=lambda: PAST)
     p._fetch_hour("XAUUSD", datetime(2026, 1, 5, 10, tzinfo=UTC))
     p._fetch_hour("XAUUSD", datetime(2026, 1, 5, 10, tzinfo=UTC))
     assert calls["n"] == 1
@@ -70,10 +76,8 @@ def _ticks(*records: tuple[int, int, int, float, float]) -> bytes:
 def _provider(tmp_path, handler, **kwargs) -> DukascopyProvider:
     client = httpx.Client(transport=httpx.MockTransport(handler))
     kwargs.setdefault("base_delay", 0.01)
+    kwargs.setdefault("now", lambda: PAST)
     return DukascopyProvider(tmp_path, client=client, **kwargs)
-
-
-HOUR = datetime(2026, 1, 5, 10, tzinfo=UTC)
 
 
 # --- decoding --------------------------------------------------------------
@@ -175,7 +179,7 @@ def test_503_is_retryable(tmp_path):
     assert calls["n"] == 2
 
 
-def test_404_returns_empty_without_retry_and_is_not_cached(tmp_path):
+def test_404_returns_empty_without_retry(tmp_path):
     calls = {"n": 0}
 
     def handler(request):
@@ -188,7 +192,136 @@ def test_404_returns_empty_without_retry_and_is_not_cached(tmp_path):
     assert calls["n"] == 1
     assert frame.is_empty()
     assert frame.schema == BAR_SCHEMA
+
+
+def test_404_for_elapsed_hour_is_negatively_cached(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    path = tmp_path / "XAUUSD" / "20260105" / "10.parquet"
+    p = _provider(tmp_path, handler)
+    first = p._fetch_hour("XAUUSD", HOUR)
+    second = p._fetch_hour("XAUUSD", HOUR)
+
+    assert calls["n"] == 1
+    assert first.is_empty() and second.is_empty()
+    assert path.exists()
+    assert second.schema == BAR_SCHEMA
+
+
+def test_404_for_current_hour_is_not_cached(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    now = HOUR + timedelta(minutes=30)
+    p = _provider(tmp_path, handler, now=lambda: now)
+    p._fetch_hour("XAUUSD", HOUR)
+    p._fetch_hour("XAUUSD", HOUR)
+
+    assert calls["n"] == 2
     assert not (tmp_path / "XAUUSD" / "20260105" / "10.parquet").exists()
+
+
+def test_404_for_future_hour_is_not_cached(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(404)
+
+    now = HOUR - timedelta(hours=1)
+    p = _provider(tmp_path, handler, now=lambda: now)
+    p._fetch_hour("XAUUSD", HOUR)
+    p._fetch_hour("XAUUSD", HOUR)
+
+    assert calls["n"] == 2
+    assert not (tmp_path / "XAUUSD" / "20260105" / "10.parquet").exists()
+
+
+def test_in_progress_hour_is_returned_but_not_cached(tmp_path):
+    calls = {"n": 0}
+    payload = _ticks((0, 2_351_500, 2_351_000, 1.0, 2.0))
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, content=payload)
+
+    now = HOUR + timedelta(minutes=30)
+    p = _provider(tmp_path, handler, now=lambda: now)
+    first = p._fetch_hour("XAUUSD", HOUR)
+    second = p._fetch_hour("XAUUSD", HOUR)
+
+    assert calls["n"] == 2
+    assert first.height == 1
+    assert second.equals(first)
+    assert not (tmp_path / "XAUUSD" / "20260105" / "10.parquet").exists()
+
+
+def test_hour_that_just_elapsed_is_cached(tmp_path):
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        return httpx.Response(200, content=b"")
+
+    now = HOUR + timedelta(hours=1)  # hour_end <= now
+    p = _provider(tmp_path, handler, now=lambda: now)
+    p._fetch_hour("XAUUSD", HOUR)
+    p._fetch_hour("XAUUSD", HOUR)
+
+    assert calls["n"] == 1
+    assert (tmp_path / "XAUUSD" / "20260105" / "10.parquet").exists()
+
+
+def test_unsupported_symbol_is_rejected(tmp_path):
+    p = _provider(tmp_path, lambda request: httpx.Response(200, content=b""))
+
+    with pytest.raises(ValueError, match="unsupported symbol"):
+        p._fetch_hour("EURUSD", HOUR)
+    with pytest.raises(ValueError, match="unsupported symbol"):
+        p.fetch("EURUSD", HOUR, HOUR)
+    with pytest.raises(ValueError, match="unsupported symbol"):
+        DukascopyProvider(tmp_path, symbol="EURUSD")
+
+
+def test_supported_symbols_have_a_point_divisor(tmp_path):
+    assert dukascopy.POINT_DIVISORS["XAUUSD"] == 1000
+    assert dukascopy.POINT_DIVISORS["XAGUSD"] == 1000
+
+    p = _provider(tmp_path, lambda request: httpx.Response(200, content=b""), symbol="XAGUSD")
+    assert p._fetch_hour("XAGUSD", HOUR).is_empty()
+
+
+def test_hour_bars_use_the_validated_point_divisor(tmp_path, monkeypatch):
+    monkeypatch.setitem(dukascopy.POINT_DIVISORS, "XAUUSD", 100)
+    payload = _ticks((0, 2_351_500, 2_351_000, 1.0, 2.0))
+
+    p = _provider(tmp_path, lambda request: httpx.Response(200, content=payload))
+    frame = p._fetch_hour("XAUUSD", HOUR)
+
+    assert frame["ask_close"].to_list() == [pytest.approx(23515.0)]
+    assert frame["bid_close"].to_list() == [pytest.approx(23510.0)]
+
+
+def test_context_manager_closes_injected_client(tmp_path):
+    class RecordingClient:
+        def __init__(self):
+            self.closed = 0
+
+        def close(self):
+            self.closed += 1
+
+    client = RecordingClient()
+    with DukascopyProvider(tmp_path, client=client) as p:
+        assert p.name == "dukascopy"
+
+    assert client.closed == 1
 
 
 def test_other_statuses_fail_immediately(tmp_path):
