@@ -211,9 +211,10 @@ git commit -m "feat: domain types and yaml settings"
 ### Task 3: Parquet store and resampling
 
 **Files:**
-- Create: `backend/src/scalping/data/__init__.py`, `backend/src/scalping/data/store.py`, `backend/src/scalping/data/resample.py`, `backend/tests/test_store.py`
+- Create: `backend/src/scalping/data/__init__.py`, `backend/src/scalping/data/base.py`, `backend/src/scalping/data/store.py`, `backend/src/scalping/data/resample.py`, `backend/tests/test_store.py`
 
 **Interfaces:**
+- Produces (in `data/base.py`): `BAR_SCHEMA` (the single canonical M1 schema, including `provider: str`) and the `DataProvider` Protocol (`name: str`, `fetch(symbol, start, end) -> pl.DataFrame`). Later providers import both from here.
 - Produces:
   - `ParquetStore(root: Path)`; `.write(symbol: str, timeframe: str, df: pl.DataFrame) -> int` (rows written, dedups by `ts`)
   - `.read(symbol: str, timeframe: str, start: datetime | None = None, end: datetime | None = None) -> pl.DataFrame` sorted ascending, empty schema-correct frame when no data
@@ -297,6 +298,7 @@ git commit -m "feat: partitioned parquet store and resampling"
 - Create: `backend/src/scalping/data/base.py`, `backend/src/scalping/data/synthetic.py`, `backend/tests/test_synthetic.py`
 
 **Interfaces:**
+- Consumes: `BAR_SCHEMA`, `DataProvider` from `data/base.py` (created in Task 3).
 - Produces:
   - `DataProvider` Protocol: `name: str`; `fetch(symbol: str, start: datetime, end: datetime) -> pl.DataFrame` (BAR_SCHEMA, UTC, M1)
   - `SyntheticProvider(seed: int = 7, start_price: float = 2350.0, vol_regimes: bool = True)`
@@ -362,7 +364,7 @@ git commit -m "feat: deterministic synthetic M1 provider"
 ### Task 5: CSV provider with timezone normalization
 
 **Files:**
-- Create: `backend/src/scalping/data/csv_provider.py`, `backend/tests/test_csv_provider.py`, `backend/tests/fixtures/xauusd_gmt3.csv`
+- Create: `backend/src/scalping/data/csv_provider.py`, `backend/tests/test_csv_provider.py`, `backend/tests/fixtures/xauusd_gmt3.csv`, `backend/tests/fixtures/dupes.csv`, `backend/tests/fixtures/bad_float.csv`
 
 **Interfaces:**
 - Consumes: `DataProvider`, `BAR_SCHEMA`
@@ -545,8 +547,8 @@ def test_long_entry_charges_half_spread_and_commission():
     pos = b.open(Side.LONG, 1.0, TS, bid=2350.0, ask=2350.20, sl=2348.0, tp=2354.0, strategy="mom")
     assert pos.entry_price == pytest.approx(2350.20)
     trade = b.close(bar(2352.0, 2353.0, 2351.0, 2352.0), "manual")
-    # 1 lot = 100oz, +1.80 move, minus spread on exit (0.10) and 7 commission
-    assert trade.pnl == pytest.approx(100 * 1.80 - 10 - 7)
+    # long enters at ask 2350.20, exits at bid 2352.00 -> +1.80 * 100oz, minus $7 round-turn commission
+    assert trade.pnl == pytest.approx(100 * 1.80 - 7)
 
 def test_sl_hit_intrabar_closes_at_sl():
     b = make()
@@ -582,7 +584,7 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement**
 
-Entry price for LONG = `ask + slippage`, SHORT = `bid - slippage`; exit mirrored. PnL = `(exit - entry) * size * lot * side`. Commission `= commission_per_lot * lot * 2` charged once at close (round turn). Ambiguity rule: if a bar's range contains both SL and TP, SL fills first (conservative). Gap rule: if `open` is beyond SL, fill at `open`.
+Entry price for LONG = `ask + slippage`, SHORT = `bid - slippage`; exit mirrored (LONG exits at `bid`, SHORT at `ask`). Commission is charged **only** from `CostConfig.commission_per_lot` (never `ContractSpec`) as a round turn `commission_per_lot * lot`. PnL = `(exit - entry) * size * lot * side` minus commission. Ambiguity rule: if a bar's range contains both SL and TP, SL fills first (conservative). Gap rule: if `open` is beyond SL, fill at `open`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -942,7 +944,7 @@ def test_metrics_known_answer():
     assert m.net_profit == 0 and m.profit_factor == 0 and m.max_drawdown == 0
 
 def test_walkforward_splits_do_not_overlap():
-    f, df = make(days=240)
+    f, df = make(days=420)
     splits = walkforward_split(df)
     assert len(splits) >= 3
     for s in splits:
@@ -990,6 +992,7 @@ git commit -m "feat: backtest engine, metrics and walk-forward splits"
   - `create_app(data_root: Path | None = None, settings_path: Path | None = None, runs_root: Path | None = None) -> FastAPI`
   - `GET /api/health -> {"status":"ok","version":str,"device":str}`
   - `GET /api/data/status -> {"symbol":str,"rows":int,"first_ts":str|None,"last_ts":str|None,"providers":[str]}`
+  - `POST /api/data/download {provider: "synthetic"|"csv"|"dukascopy", symbol, start, end, seed?: int, path?: str, tz_offset?: int} -> 200 {"rows": int}` (senkron; dukascopy uzun sürerse 202 + job id, v1'de senkron yeterli)
   - `POST /api/sim/start {speed: float, mode: "replay"} -> {"session_id":str}`
   - `POST /api/sim/control {action: "pause"|"resume"|"stop"|"reset"} -> {"ok":bool}`
   - `WS /ws/sim` messages: `{"seq":int,"type":"bar|decision|trade_open|trade_close|risk_blocked|equity|episode_end","payload":{...}}`
@@ -1032,6 +1035,15 @@ def test_ws_sends_sequenced_messages(client, seed_data):
 def test_control_stop(client, seed_data):
     client.post("/api/sim/start", json={"speed": 0, "mode": "replay"})
     assert client.post("/api/sim/control", json={"action": "stop"}).json()["ok"] is True
+
+def test_synthetic_download_then_status(client):
+    body = {"provider": "synthetic", "symbol": "XAUUSD", "seed": 7,
+            "start": "2026-01-05T00:00:00Z", "end": "2026-01-07T00:00:00Z"}
+    r = client.post("/api/data/download", json=body)
+    assert r.status_code == 200 and r.json()["rows"] > 0
+    status = client.get("/api/data/status", params={"symbol": "XAUUSD"}).json()
+    assert status["rows"] == r.json()["rows"]
+    assert status["providers"] == ["synthetic"]
 ```
 
 `seed_data` is a pytest fixture in `backend/tests/conftest.py` that writes 2 days of synthetic M1 into the app's store.
@@ -1048,7 +1060,7 @@ App factory takes `data_root: Path | None` and `settings_path: Path | None`. Run
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `cd backend && uv run pytest tests/test_api.py -v`
-Expected: PASS (5 passed)
+Expected: PASS (6 passed)
 
 - [ ] **Step 5: Commit**
 
