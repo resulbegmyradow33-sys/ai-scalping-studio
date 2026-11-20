@@ -1,0 +1,27 @@
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# data & artifacts
+data/
+runs/
+*.parquet
+.env
+
+# node
+node_modules/
+.next/
+out/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+
+# superpowers scratch
+.superpowers/
+.worktrees/
+
+.DS_Store
