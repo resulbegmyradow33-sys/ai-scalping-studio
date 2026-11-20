@@ -23,21 +23,33 @@ __all__ = [
 
 
 class Side(IntEnum):
-    """Position direction. Values are signed so ``side * price_diff`` works."""
+    """Position direction. Values are signed so ``side * distance`` scales a price distance."""
 
     FLAT = 0
     LONG = 1
     SHORT = -1
 
-    def __mul__(self, other: int) -> Side:
-        if not isinstance(other, int):
-            raise TypeError(f"Side can only be multiplied by an int, got {type(other).__name__}")
-        try:
-            return Side(int(self) * other)
-        except ValueError as exc:
-            raise ValueError(f"unsupported Side arithmetic: {int(self)} * {other}") from exc
+    def __mul__(self, other: object) -> Side | float | int:  # type: ignore[override]
+        """Scale the side by a number.
 
-    def __rmul__(self, other: int) -> Side:
+        ``side * 1``, ``side * -1`` and ``side * 0`` return a ``Side`` member, so
+        sign flips stay typed. Any other int/float returns plain numeric
+        arithmetic (``Side.SHORT * 2.0 == -2.0``). Non-numeric operands raise
+        ``TypeError``; returning ``NotImplemented`` here would silently fall back
+        to ``str`` repetition because ``Side`` subclasses ``int``.
+
+        The wider return type than ``int.__mul__`` is intentional.
+        """
+        if not isinstance(other, (int, float)):
+            raise TypeError(
+                f"Side can only be multiplied by a number, got {type(other).__name__}"
+            )
+        product = int(self) * other
+        if other in (0, 1, -1):
+            return Side(int(product))
+        return product
+
+    def __rmul__(self, other: object) -> Side | float | int:  # type: ignore[override]
         return self * other
 
 

@@ -38,6 +38,24 @@ def test_side_arithmetic():
     assert Side.FLAT * -1 is Side.FLAT
 
 
+def test_side_scales_numeric_distance():
+    assert Side.LONG * 1.5 == 1.5
+    assert Side.SHORT * 2.0 == -2.0
+    assert Side.LONG * 2 == 2
+    # Same result with the number on the left.
+    assert 1.5 * Side.LONG == 1.5
+    assert 2.0 * Side.SHORT == -2.0
+    # The shape Task 8's sl_tp uses: entry - side * atr.
+    entry, atr = 2350.0, 1.0
+    assert entry - Side.LONG * atr == 2349.0
+    assert entry - Side.SHORT * atr == 2351.0
+
+
+def test_side_rejects_non_numeric_operand():
+    with pytest.raises(TypeError):
+        Side.LONG * "1.5"
+
+
 def test_settings_load_yaml(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text("contract:\n  initial_balance: 5000\nrisk:\n  risk_pct: 0.01\n", encoding="utf-8")
