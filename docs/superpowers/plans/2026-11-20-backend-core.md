@@ -560,7 +560,7 @@ def test_sl_hit_intrabar_closes_at_sl():
 def test_tp_hit_before_sl_when_bar_contains_both():
     b = make()
     b.open(Side.SHORT, 1.0, TS, 2350.0, 2350.20, sl=2352.0, tp=2347.0, strategy="rev")
-    trade = b.update(bar(2350.0, 2346.0, 2353.0, 2351.0))
+    trade = b.update(bar(2350.0, 2353.0, 2346.0, 2351.0))
     assert trade is None or trade.reason == "sl"  # conservative: SL wins ambiguity
 
 def test_gap_through_sl_fills_at_open():
