@@ -70,8 +70,11 @@ class DataProvider(Protocol):
 
     Providers are cheap to construct and stateless between calls; ``fetch``
     returns a frame conforming to :data:`BAR_SCHEMA` covering ``[start, end]``.
+    A ``None`` bound means "unbounded" on that side.
     """
 
     name: str
 
-    def fetch(self, symbol: str, start: datetime, end: datetime) -> pl.DataFrame: ...
+    def fetch(
+        self, symbol: str, start: datetime | None = None, end: datetime | None = None
+    ) -> pl.DataFrame: ...

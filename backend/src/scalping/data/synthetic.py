@@ -79,7 +79,8 @@ class SyntheticProvider(DataProvider):
 
     ``fetch`` covers ``[start, end]`` inclusive, aligned to whole UTC minutes:
     a timestamp with seconds is rounded up to the next minute, and Saturdays
-    and Sundays are dropped. Bars are continuous (each open equals the prior
+    and Sundays are dropped. Both bounds are required; the generator has no
+    natural start or end to fall back on. Bars are continuous (each open equals the prior
     close) and quoted with ``close`` as the mid price.
     """
 
@@ -94,9 +95,16 @@ class SyntheticProvider(DataProvider):
         self.start_price = float(start_price)
         self.vol_regimes = bool(vol_regimes)
 
-    def fetch(self, symbol: str, start: datetime, end: datetime) -> pl.DataFrame:
+    def fetch(
+        self,
+        symbol: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> pl.DataFrame:
         if not symbol:
             raise ValueError("symbol must be non-empty")
+        if start is None or end is None:
+            raise ValueError("SyntheticProvider needs an explicit start and end")
         start, end = _as_utc(start), _as_utc(end)
         if end < start:
             return _empty()
