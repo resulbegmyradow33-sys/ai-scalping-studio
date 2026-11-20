@@ -4,7 +4,7 @@ With a 100 oz contract and 1.00 lot a 0.01 price move is $1, so every expected
 value below can be recomputed from the quoted prices.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,7 +13,6 @@ from scalping.env.broker import PaperBroker
 from scalping.types import Bar, Side
 
 TS = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
-NEXT_DAY = datetime(2026, 1, 6, 10, 0, tzinfo=UTC)
 
 
 def bar(o, h, l, c, spread=0.20, ts=TS):
@@ -204,7 +203,7 @@ def test_state_reports_bars_in_trade_and_closed_trades():
     assert st.equity == pytest.approx(10_223.0)
 
 
-def test_day_pnl_anchors_on_first_state_of_the_utc_day():
+def test_state_uses_the_callers_day_anchor():
     b = make()
     b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
     st = b.state(10_000.0)
@@ -212,11 +211,73 @@ def test_day_pnl_anchors_on_first_state_of_the_utc_day():
     assert st.day_pnl == pytest.approx(0.0)
 
     b.close(bar(2352.0, 2353.0, 2351.0, 2352.0), "manual")
-    st = b.state(10_173.0)
+    # Task 8/10 owns the 17:00 session anchor and passes it in explicitly.
+    st = b.state(10_173.0, day_start_equity=10_000.0)
     assert st.day_start_equity == pytest.approx(10_000.0)
     assert st.day_pnl == pytest.approx(173.0)
 
-    b.mark(bar(2352.0, 2353.0, 2351.0, 2352.0, ts=NEXT_DAY))
+    # The broker keeps no day state: the default anchor is the given balance.
     st = b.state(10_173.0)
     assert st.day_start_equity == pytest.approx(10_173.0)
     assert st.day_pnl == pytest.approx(0.0)
+
+
+def test_trigger_exit_costs_exclude_exit_spread():
+    b = make()
+    b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2349.0, tp=2354.0, strategy="mom")
+    trade = b.update(bar(2350.0, 2350.5, 2348.5, 2349.5))
+    # The fill is at the SL level, not across the quote: entry half-spread $10 + $7.
+    assert trade.reason == "sl"
+    assert trade.costs == pytest.approx(17.0)
+    assert trade.pnl == pytest.approx(-127.0)
+
+
+def test_timeout_close_is_a_trigger_exit():
+    b = make()
+    b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
+    trade = b.close(bar(2351.0, 2352.0, 2350.5, 2351.5), "timeout")
+    assert trade.reason == "timeout"
+    assert trade.costs == pytest.approx(17.0)
+    assert trade.pnl == pytest.approx(100 * (2351.5 - 2350.20) - 7)  # $123
+
+
+def test_quote_exit_costs_include_exit_spread_and_reconcile_with_pnl():
+    b = make()
+    b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
+    trade = b.close(bar(2352.0, 2353.0, 2351.0, 2352.0), "manual")
+    # Entry half-spread $10 + exit half-spread $10 + $7 commission.
+    assert trade.costs == pytest.approx(27.0)
+    entry_mid = (2350.0 + 2350.20) / 2
+    exit_mid = (2352.0 + 2352.20) / 2
+    # Costs (including commission) bridge the fill PnL back to the mid-to-mid move.
+    assert trade.pnl + trade.costs == pytest.approx(100 * (exit_mid - entry_mid))
+
+
+def test_rejected_open_does_not_advance_the_clock():
+    b = make()
+    b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
+    b.close(bar(2352.0, 2353.0, 2351.0, 2352.0), "manual")
+
+    later = TS + timedelta(minutes=5)
+    with pytest.raises(ValueError, match="sl < entry < tp"):
+        b.open(Side.LONG, 1.0, later, 2350.0, 2350.20, sl=2360.0, tp=2340.0, strategy="mom")
+
+    # If the rejected order had run _observe(later), this older timestamp would raise.
+    pos = b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
+    assert pos.entry_ts == TS
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_cost_fields_must_be_finite(bad):
+    with pytest.raises(ValueError, match="commission_per_lot"):
+        PaperBroker(ContractSpec(), CostConfig(commission_per_lot=bad))
+    with pytest.raises(ValueError, match="slippage_atr_frac"):
+        PaperBroker(ContractSpec(), CostConfig(slippage_atr_frac=bad))
+
+
+def test_contract_size_must_be_positive_and_finite():
+    with pytest.raises(ValueError, match="size"):
+        PaperBroker(ContractSpec(size=0.0), CostConfig())
+    with pytest.raises(ValueError, match="size"):
+        PaperBroker(ContractSpec(size=float("nan")), CostConfig())
+

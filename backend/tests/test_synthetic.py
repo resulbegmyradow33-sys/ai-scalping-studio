@@ -48,16 +48,17 @@ def test_schema_and_provider_literal():
     assert (df["ts"].dt.nanosecond() == 0).all()
 
 
-def test_prices_positive_continuous_and_mid_quoted():
+def test_prices_positive_continuous_and_bid_quoted():
     df = SyntheticProvider().fetch("XAUUSD", START, END)
     for col in ("open", "high", "low", "close", "bid_close", "ask_close"):
         assert (df[col] > 0).all()
         assert np.isfinite(df[col].to_numpy()).all()
-    # Candles chain into one continuous path and quotes straddle the close.
+    # Candles chain into one continuous path; quotes are bid-side, as in Dukascopy.
     assert np.allclose(df["open"][1:].to_numpy(), df["close"][:-1].to_numpy(), rtol=0, atol=1e-9)
+    assert np.allclose(df["bid_close"].to_numpy(), df["close"].to_numpy(), rtol=0, atol=1e-9)
     assert np.allclose(
-        df["close"].to_numpy(),
-        (df["bid_close"] + df["ask_close"]).to_numpy() / 2,
+        df["ask_close"].to_numpy(),
+        df["close"].to_numpy() + df["spread"].to_numpy(),
         rtol=0,
         atol=1e-9,
     )

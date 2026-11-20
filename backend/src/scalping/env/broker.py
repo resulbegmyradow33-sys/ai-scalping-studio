@@ -10,21 +10,25 @@ Accounting contract
 * ``Trade.pnl`` is fill-to-fill PnL times contract size and lot, minus the
   round-turn commission. Spread and slippage are already embedded in the fill
   prices, so ``pnl`` must never be reduced by ``Trade.costs`` again.
-* ``Trade.costs`` is a reporting breakdown only: entry half-spread + exit
-  half-spread + slippage + commission, in account currency.
-* The broker does not own the balance. ``state(balance)`` receives it from the
-  caller (the simulator); ``update`` and ``close`` return trades whose ``pnl``
-  the caller applies to its own balance.
+* ``Trade.costs`` is a reporting breakdown only: entry half-spread + slippage +
+  commission, plus the exit half-spread for quote exits. Trigger exits
+  (``sl``, ``tp``, ``timeout``) fill at a level and report no exit spread.
+  Costs are embedded in the fill prices, so they must never be subtracted from
+  ``pnl`` again.
+* The broker does not own the balance. ``state(balance, day_start_equity=None)``
+  receives both from the caller (the simulator), which owns the 17:00 session
+  anchor; ``update`` and ``close`` return trades whose ``pnl`` the caller
+  applies to its own balance.
 * ``bars_in_trade`` counts ``update`` calls while a position is open. ``open``
   and any close reset it; ``mark`` never advances it.
-* The day anchor resets when the UTC calendar date of the observed bars
-  changes. ``day_start_equity`` is the equity reported by the first ``state``
-  call on that date.
+
+Known v1 approximation: synthetic and stored OHLC come from the bid side, so a
+SHORT's SL/TP triggers (which execute on the ask) are one spread optimistic.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 from math import isfinite
 
 from scalping.types import (
@@ -38,6 +42,9 @@ from scalping.types import (
 )
 
 __all__ = ["PaperBroker"]
+
+#: Exit reasons that fill at a level rather than across the quoted spread.
+_TRIGGER_REASONS = frozenset({"sl", "tp", "timeout"})
 
 
 def _check_finite(name: str, value: float) -> None:
@@ -57,10 +64,16 @@ class PaperBroker:
         _check_finite("atr", atr)
         if atr < 0:
             raise ValueError(f"atr must be >= 0, got {atr!r}")
-        if costs.slippage_atr_frac < 0:
-            raise ValueError("slippage_atr_frac must be >= 0")
-        if costs.commission_per_lot < 0:
-            raise ValueError("commission_per_lot must be >= 0")
+        if not isfinite(contract.size) or contract.size <= 0:
+            raise ValueError(f"contract.size must be finite and > 0, got {contract.size!r}")
+        if not isfinite(costs.slippage_atr_frac) or costs.slippage_atr_frac < 0:
+            raise ValueError(
+                f"slippage_atr_frac must be finite and >= 0, got {costs.slippage_atr_frac!r}"
+            )
+        if not isfinite(costs.commission_per_lot) or costs.commission_per_lot < 0:
+            raise ValueError(
+                f"commission_per_lot must be finite and >= 0, got {costs.commission_per_lot!r}"
+            )
         self.contract = contract
         self.costs = costs
         self.atr = float(atr)
@@ -71,9 +84,6 @@ class PaperBroker:
         self._bars_in_trade = 0
         self._trades_closed = 0
         self._last_ts: datetime | None = None
-        self._day: date | None = None
-        self._state_day: date | None = None
-        self._day_start_equity: float | None = None
 
     @property
     def position(self) -> Position | None:
@@ -104,7 +114,6 @@ class PaperBroker:
             _check_finite(name, value)
         if bid > ask:
             raise ValueError(f"bid must be <= ask, got bid={bid!r} ask={ask!r}")
-        self._observe(ts)
 
         slippage = self._slippage_per_unit()
         if side is Side.LONG:
@@ -120,6 +129,8 @@ class PaperBroker:
                     f"SHORT needs tp < entry < sl, got tp={tp!r} entry={entry!r} sl={sl!r}"
                 )
 
+        # Only a fully validated order may advance the clock.
+        self._observe(ts)
         position = Position(
             side=side,
             lot=lot,
@@ -158,21 +169,25 @@ class PaperBroker:
         if position.side is Side.LONG:
             if bar.low <= position.sl:
                 exit_price = min(position.sl, bar.open)
-                return self._settle(bar, exit_price, "sl")
+                return self._settle(bar, exit_price, "sl", exit_quote=False)
             if bar.high >= position.tp:
-                return self._settle(bar, position.tp, "tp")
+                return self._settle(bar, position.tp, "tp", exit_quote=False)
         else:
             if bar.high >= position.sl:
                 exit_price = max(position.sl, bar.open)
-                return self._settle(bar, exit_price, "sl")
+                return self._settle(bar, exit_price, "sl", exit_quote=False)
             if bar.low <= position.tp:
-                return self._settle(bar, position.tp, "tp")
+                return self._settle(bar, position.tp, "tp", exit_quote=False)
 
         self._unrealized = self._unrealized_at(bar)
         return None
 
     def close(self, bar: Bar, reason: str) -> Trade:
-        """Close the open position at the bar's liquidating quote."""
+        """Close the open position at the bar's liquidating quote.
+
+        A ``timeout`` (or an ``sl``/``tp`` label) is a trigger exit and reports no
+        exit spread; any other reason is a quote exit and includes it.
+        """
         position = self._position
         if position is None:
             raise RuntimeError("cannot close: no open position")
@@ -181,22 +196,26 @@ class PaperBroker:
             exit_price = bar.bid_close
         else:
             exit_price = bar.ask_close
-        return self._settle(bar, exit_price, reason)
+        return self._settle(bar, exit_price, reason, exit_quote=reason not in _TRIGGER_REASONS)
 
-    def state(self, balance: float) -> AccountState:
-        """Snapshot equity for the caller-supplied balance."""
+    def state(self, balance: float, day_start_equity: float | None = None) -> AccountState:
+        """Snapshot equity for the caller-supplied balance and session anchor.
+
+        The broker keeps no day state. ``day_start_equity`` defaults to
+        ``balance``; the simulator passes the 17:00 session anchor explicitly.
+        """
         _check_finite("balance", balance)
+        if day_start_equity is None:
+            day_start_equity = balance
+        else:
+            _check_finite("day_start_equity", day_start_equity)
         equity = balance + self._unrealized
-        if self._day_start_equity is None or self._state_day != self._day:
-            self._state_day = self._day
-            self._day_start_equity = equity
-        day_start = self._day_start_equity
         return AccountState(
             balance=balance,
             equity=equity,
             position=self._position,
-            day_start_equity=day_start,
-            day_pnl=equity - day_start,
+            day_start_equity=day_start_equity,
+            day_pnl=equity - day_start_equity,
             bars_in_trade=self._bars_in_trade if self._position is not None else 0,
             trades_closed=self._trades_closed,
         )
@@ -204,13 +223,12 @@ class PaperBroker:
     # --- internals ---------------------------------------------------------
 
     def _observe(self, ts: datetime) -> None:
-        """Track bar order and the current accounting day."""
+        """Track bar order; the caller owns session/day accounting."""
         if self._last_ts is not None and ts < self._last_ts:
             raise ValueError(
                 f"bars must arrive in non-decreasing time order: {ts!r} after {self._last_ts!r}"
             )
         self._last_ts = ts
-        self._day = ts.date()
 
     def _slippage_per_unit(self) -> float:
         return self.costs.slippage_atr_frac * self.atr
@@ -223,17 +241,22 @@ class PaperBroker:
         size = self.contract.size * position.lot
         return (price - position.entry_price) * int(position.side) * size
 
-    def _settle(self, bar: Bar, exit_price: float, reason: str) -> Trade:
-        """Book the exit, charge the round-turn commission and clear the position."""
+    def _settle(self, bar: Bar, exit_price: float, reason: str, *, exit_quote: bool) -> Trade:
+        """Book the exit, charge the round-turn commission and clear the position.
+
+        The exit half-spread is reported only when the fill crosses the quote;
+        a trigger exit fills at a level and reports none.
+        """
         position = self._position
         if position is None:
             raise RuntimeError("cannot settle: no open position")
         size = self.contract.size * position.lot
         gross = (exit_price - position.entry_price) * int(position.side) * size
         commission = self.costs.commission_per_lot * position.lot
+        exit_half_spread = (bar.ask_close - bar.bid_close) / 2.0 * size if exit_quote else 0.0
         costs = (
             self._entry_half_spread * size
-            + (bar.ask_close - bar.bid_close) / 2.0 * size
+            + exit_half_spread
             + self._entry_slippage * size
             + commission
         )

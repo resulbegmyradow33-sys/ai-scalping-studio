@@ -12,8 +12,9 @@ Per day, minute log-returns are GBM increments whose volatility is scaled by a
 three-state Markov regime (calm ``1x``, trend ``1.6x``, spike ``3x``). OHLC is
 built from the previous close, the new close, and wicks proportional to the
 bar's body, so ``low <= min(open, close) <= max(open, close) <= high`` holds by
-construction. Spread is session-dependent and always positive; ``close`` is the
-mid quote.
+construction. Spread is session-dependent and always positive; OHLC is the bid
+series, so ``close`` is the bid quote and ``ask_close = close + spread``, the
+same convention as :class:`~scalping.data.dukascopy.DukascopyProvider`.
 """
 
 from __future__ import annotations
@@ -81,7 +82,7 @@ class SyntheticProvider(DataProvider):
     a timestamp with seconds is rounded up to the next minute, and Saturdays
     and Sundays are dropped. Both bounds are required; the generator has no
     natural start or end to fall back on. Bars are continuous (each open equals the prior
-    close) and quoted with ``close`` as the mid price.
+    close) and quoted from the bid side, with ``ask_close = close + spread``.
     """
 
     name: str = PROVIDER_NAME
@@ -212,8 +213,8 @@ class SyntheticProvider(DataProvider):
         spread = _SESSION_SPREAD[hours] * (
             0.9 + 0.2 * np.random.default_rng(spread_seed).random(MINUTES_PER_DAY)
         )
-        bid_close = close - spread / 2
-        ask_close = bid_close + spread
+        bid_close = close
+        ask_close = close + spread
         volume = (
             np.random.default_rng(volume_seed)
             .poisson(_VOLUME_MEAN, MINUTES_PER_DAY)
