@@ -1,4 +1,4 @@
-"""Causal market structure: swings, break of structure and change of character.
+"""Causal market structure: swings, breaks of structure, order blocks and character changes.
 
 A swing is a local extreme of the ``2k + 1`` bar window centred on the pivot.
 The label is written at the **confirmation** bar ``i + k``, the first bar at
@@ -14,9 +14,14 @@ A change of character (CHoCH) is a BOS that flips the running trend.
 
 from __future__ import annotations
 
+from collections import deque
+
+import numpy as np
 import polars as pl
 
-__all__ = ["market_structure", "swings"]
+from scalping.features.indicators import atr
+
+__all__ = ["market_structure", "order_block_distance", "swings"]
 
 
 def swings(df: pl.DataFrame, k: int = 2) -> tuple[pl.Series, pl.Series]:
@@ -113,3 +118,49 @@ def market_structure(df: pl.DataFrame, k: int = 2) -> pl.DataFrame:
         pl.col("structure_high"),
         pl.col("structure_low"),
     )
+
+
+def order_block_distance(df: pl.DataFrame, n_atr: int = 14) -> pl.Series:
+    """Signed distance to the nearest recent opposing candle body, in ATR units.
+
+    Two bodies are tracked per side: the two most recent **down** candles (the
+    opposing block for a long) and the two most recent **up** candles (the block
+    for a short). The body is ``[min(open, close), max(open, close)]``.
+
+    Distance from the current close to a body is ``(close - body_top) / ATR``
+    above it, ``(close - body_bottom) / ATR`` below it, and ``0`` inside it. The
+    nearest candidate by absolute distance wins, so the result is ``0`` whenever
+    the close sits in any tracked body. The current bar's body joins the book
+    only after its own row, so a row never measures against itself. ``0.0``
+    before any body exists.
+    """
+    if n_atr < 1:
+        raise ValueError(f"atr window must be >= 1, got {n_atr}")
+    opens = df["open"].to_numpy().astype(np.float64)
+    closes = df["close"].to_numpy().astype(np.float64)
+    scale = atr(df, n_atr).to_numpy().astype(np.float64)
+
+    out = np.zeros(df.height, dtype=np.float64)
+    up_bodies: deque[tuple[float, float]] = deque(maxlen=2)
+    down_bodies: deque[tuple[float, float]] = deque(maxlen=2)
+
+    for i in range(df.height):
+        candidates = list(up_bodies) + list(down_bodies)
+        if candidates:
+            distances: list[float] = []
+            unit = scale[i] if np.isfinite(scale[i]) and scale[i] > 0.0 else 1.0
+            for bottom, top in candidates:
+                if closes[i] > top:
+                    distances.append((closes[i] - top) / unit)
+                elif closes[i] < bottom:
+                    distances.append((closes[i] - bottom) / unit)
+                else:
+                    distances.append(0.0)
+            out[i] = min(distances, key=abs)
+
+        if closes[i] < opens[i]:
+            down_bodies.append((closes[i], opens[i]))
+        elif closes[i] > opens[i]:
+            up_bodies.append((opens[i], closes[i]))
+
+    return pl.Series("order_block_dist_atr", out)

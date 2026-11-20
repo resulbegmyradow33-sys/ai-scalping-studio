@@ -27,7 +27,7 @@ from scalping.data.resample import resample
 from scalping.features.context import htf_context, session_flags
 from scalping.features.indicators import atr, macd_hist, rsi
 from scalping.features.liquidity import fvg, liquidity_sweep
-from scalping.features.structure import market_structure
+from scalping.features.structure import market_structure, order_block_distance
 
 __all__ = ["FEATURE_COLUMNS", "WARMUP", "FeatureFrame", "build_features"]
 
@@ -38,17 +38,56 @@ WARMUP: int = 60
 _Z_WINDOW: int = 20
 _RANGE_WINDOW: int = 20
 
+#: Window of the realised volatility estimate and of its tercile history.
+_VOL_WINDOW: int = 30
+_VOL_TIER_WINDOW: int = 120
+
+#: Price tolerance for an equal high/low, in price units.
+_EQUAL_EXTREME_TOLERANCE: float = 0.05
+
+#: The FX day rolls at 17:00 UTC, matching ``RiskEngine.session_anchor``.
+_SESSION_ROLL_HOUR: int = 17
+
+# Units and signs
+# ---------------
+# ``*_atr``: value divided by ATR(14) of the same timeframe, dimensionless.
+# ``*_z20``: (x - 20-bar mean) / 20-bar std; 0 when the window has no variance.
+# ``ret_1/5/15/60``: simple close-to-close returns. ``ret_3``: log return.
+# ``dist_high_20``/``dist_low_20``: unsigned room to the 20-bar extreme, ATR
+#   units, so both are non-negative and large when price sits mid-range.
+# ``dist_structure_high``/``dist_structure_low``: signed close-to-level
+#   distance, positive above the level (the swing high/low has been broken).
+# ``fvg_dist``: ATR distance to the nearest unfilled gap, positive above an up
+#   gap, negative below a down gap, 0 when no gap is open.
+# ``order_block_dist_atr``: signed ATR distance to the nearest tracked candle
+#   body, positive above it, negative below it, 0 when price is inside one.
+# ``eq_high_20``/``eq_low_20``: 1.0 when the high/low is within 0.05 price
+#   units of the prior 20-bar extreme (current bar excluded).
+# ``vwap_dist_atr``: (close - session VWAP) / ATR(14), 17:00 UTC session roll.
+# ``day_position``: close position inside the current 17:00-to-17:00 session
+#   range, in [0, 1], 0.5 on a zero range.
+# ``realized_vol_30``: std of 1-bar log returns over 30 bars.
+# ``vol_regime``: -1/0/1 from ``realized_vol_30`` against its own prior
+#   120-bar terciles (thresholds never include the current bar).
+# ``trend``/``bos``/``choch``: -1/0/1 integer states. Booleans are 0.0/1.0.
+# ``rsi_14`` and the M5/M15 RSI columns are divided by 100.
+# HTF columns come from the last closed 5m/15m bucket; ``htf_bos`` is the M5
+#   BOS state and ``htf_fvg_dist`` the M15 FVG distance.
+
 #: Column order of :attr:`FeatureFrame.X`. One entry per feature.
 FEATURE_COLUMNS: tuple[str, ...] = (
-    # --- price action and momentum (24) ---
+    # --- price action and momentum (29) ---
     "ret_1",
     "ret_5",
     "ret_15",
     "ret_60",
+    "ret_3",
     "body_atr",
     "upper_wick_atr",
     "lower_wick_atr",
     "range_atr",
+    "realized_vol_30",
+    "vol_regime",
     "ret_z20",
     "rsi_14",
     "macd_hist_atr",
@@ -63,9 +102,11 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "dist_high_20",
     "dist_low_20",
     "pos_range_20",
+    "eq_high_20",
+    "eq_low_20",
     "tod_sin",
     "tod_cos",
-    # --- structure and liquidity (11) ---
+    # --- structure and liquidity (12) ---
     "trend",
     "bos",
     "choch",
@@ -73,16 +114,19 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "swing_low",
     "dist_structure_high",
     "dist_structure_low",
+    "order_block_dist_atr",
     "liquidity_sweep",
     "fvg_up",
     "fvg_down",
     "fvg_dist",
-    # --- session context (4) ---
+    # --- session context (6) ---
     "asia",
     "london",
     "ny",
     "ny_open_30",
-    # --- higher timeframe context (10) ---
+    "vwap_dist_atr",
+    "day_position",
+    # --- higher timeframe context (12) ---
     "m5_ret_1",
     "m5_rsi_14",
     "m5_atr_norm",
@@ -93,6 +137,8 @@ FEATURE_COLUMNS: tuple[str, ...] = (
     "m15_atr_norm",
     "m15_ema_gap_21",
     "m15_pos_range_20",
+    "htf_bos",
+    "htf_fvg_dist",
 )
 
 
@@ -113,7 +159,7 @@ class FeatureFrame:
     columns: list[str] = field(default_factory=list)
 
 
-def _guarded(condition: pl.Expr, value: pl.Expr, fallback: float) -> pl.Expr:
+def _guarded(condition: pl.Expr, value: pl.Expr, fallback: float | pl.Expr) -> pl.Expr:
     """``value`` where ``condition`` holds, else ``fallback`` (null-safe)."""
     return pl.when(condition.fill_null(False)).then(value).otherwise(fallback)
 
@@ -131,7 +177,10 @@ def _with_helpers(frame: pl.DataFrame) -> pl.DataFrame:
     high20 = pl.col("high").rolling_max(_RANGE_WINDOW, min_samples=1)
     low20 = pl.col("low").rolling_min(_RANGE_WINDOW, min_samples=1)
     ret1 = close / close.shift(1) - 1.0
-    return frame.with_columns(
+    realized_vol = (
+        (close / close.shift(1)).log().rolling_std(_VOL_WINDOW, min_samples=1).fill_null(0.0)
+    )
+    work = frame.with_columns(
         atr(frame, 14).alias("_atr14"),
         atr(frame, 60).alias("_atr60"),
         rsi(frame, 14).alias("_rsi14"),
@@ -153,11 +202,73 @@ def _with_helpers(frame: pl.DataFrame) -> pl.DataFrame:
         .cast(pl.Float64)
         .alias("_minute_of_day"),
         liquidity_sweep(frame, 20).alias("_liquidity_sweep"),
+        order_block_distance(frame, 14).alias("_order_block"),
+        realized_vol.alias("_realized_vol"),
+    )
+    work = work.with_columns(_vol_regime_expr().alias("_vol_regime"))
+    work = work.with_columns(_session_anchor_expr())
+    return work.with_columns(
+        _vwap_distance_expr().alias("_vwap_dist"),
+        _day_position_expr().alias("_day_position"),
     )
 
 
+def _vol_regime_expr() -> pl.Expr:
+    """-1/0/1 tercile bucket of realised vol against its prior 120 bars.
+
+    Both thresholds are shifted by one bar, so the current bar's realised
+    volatility never contributes to the terciles it is compared against.
+    """
+    realized = pl.col("_realized_vol")
+    lower = realized.rolling_quantile(
+        0.33, interpolation="linear", window_size=_VOL_TIER_WINDOW, min_samples=1
+    ).shift(1)
+    upper = realized.rolling_quantile(
+        0.67, interpolation="linear", window_size=_VOL_TIER_WINDOW, min_samples=1
+    ).shift(1)
+    return pl.when(realized < lower).then(-1.0).when(realized > upper).then(1.0).otherwise(0.0)
+
+
+def _session_anchor_expr() -> pl.Expr:
+    """The 17:00 UTC FX day a row belongs to.
+
+    Mirrors ``RiskEngine.session_anchor``: at or after 17:00 the row anchors to
+    its own date, earlier to the previous date. The engine itself is not
+    imported, so the feature layer stays free of execution dependencies.
+    """
+    day = pl.col("ts").dt.date()
+    return (
+        pl.when(pl.col("ts").dt.hour() >= _SESSION_ROLL_HOUR)
+        .then(day)
+        .otherwise(day - pl.duration(days=1))
+        .alias("_session")
+    )
+
+
+def _vwap_distance_expr() -> pl.Expr:
+    """(close - session VWAP) / ATR(14), with the VWAP reset per 17:00 session.
+
+    The typical price (``(high + low + close) / 3``) is volume weighted and
+    accumulated over rows already printed in the current session.
+    """
+    volume = pl.col("volume").cast(pl.Float64)
+    typical = (pl.col("high") + pl.col("low") + pl.col("close")) / 3.0
+    notional = (typical * volume).cum_sum().over("_session")
+    weight = volume.cum_sum().over("_session")
+    vwap = _guarded(weight > 0.0, notional / weight, pl.col("close"))
+    return _scaled(pl.col("close") - vwap, pl.col("_atr14"))
+
+
+def _day_position_expr() -> pl.Expr:
+    """Close position inside the running 17:00-to-17:00 session range."""
+    day_high = pl.col("high").cum_max().over("_session")
+    day_low = pl.col("low").cum_min().over("_session")
+    width = day_high - day_low
+    return _guarded(width > 0.0, (pl.col("close") - day_low) / width, 0.5)
+
+
 def _feature_exprs() -> list[pl.Expr]:
-    """The 49 feature expressions, in :data:`FEATURE_COLUMNS` order."""
+    """The 59 feature expressions, in :data:`FEATURE_COLUMNS` order."""
     close = pl.col("close")
     high = pl.col("high")
     low = pl.col("low")
@@ -174,10 +285,13 @@ def _feature_exprs() -> list[pl.Expr]:
         close / close.shift(5) - 1.0,
         close / close.shift(15) - 1.0,
         close / close.shift(60) - 1.0,
+        (close / close.shift(3)).log(),  # log return, unlike the simple ret_* above
         _scaled(body, atr14),
         _scaled(high - pl.max_horizontal(open_, close), atr14),
         _scaled(pl.min_horizontal(open_, close) - low, atr14),
         _scaled(high - low, atr14),
+        pl.col("_realized_vol"),
+        pl.col("_vol_regime"),
         _scaled(ret1 - pl.col("_ret1_mean"), pl.col("_ret1_std")),
         pl.col("_rsi14") / 100.0,
         _scaled(pl.col("_macd_hist"), atr14),
@@ -198,6 +312,8 @@ def _feature_exprs() -> list[pl.Expr]:
             (close - pl.col("_low20")) / pl.col("_width20"),
             0.5,
         ),
+        _equal_extreme(high, pl.col("high").rolling_max(_RANGE_WINDOW, min_samples=1)),
+        _equal_extreme(low, pl.col("low").rolling_min(_RANGE_WINDOW, min_samples=1)),
         angle.sin(),
         angle.cos(),
         pl.col("_trend").cast(pl.Float64),
@@ -207,6 +323,7 @@ def _feature_exprs() -> list[pl.Expr]:
         pl.col("_swing_low").cast(pl.Float64),
         _scaled(close - pl.col("_structure_high"), atr14),
         _scaled(close - pl.col("_structure_low"), atr14),
+        pl.col("_order_block"),
         pl.col("_liquidity_sweep").cast(pl.Float64),
         pl.col("_fvg_up").cast(pl.Float64),
         pl.col("_fvg_down").cast(pl.Float64),
@@ -215,6 +332,8 @@ def _feature_exprs() -> list[pl.Expr]:
         pl.col("_london").cast(pl.Float64),
         pl.col("_ny").cast(pl.Float64),
         pl.col("_ny_open_30").cast(pl.Float64),
+        pl.col("_vwap_dist"),
+        pl.col("_day_position"),
         pl.col("m5_ret_1"),
         pl.col("m5_rsi_14"),
         pl.col("m5_atr_norm"),
@@ -225,7 +344,15 @@ def _feature_exprs() -> list[pl.Expr]:
         pl.col("m15_atr_norm"),
         pl.col("m15_ema_gap_21"),
         pl.col("m15_pos_range_20"),
+        pl.col("m5_bos").cast(pl.Float64),
+        pl.col("m15_fvg_dist"),
     ]
+
+
+def _equal_extreme(price: pl.Expr, rolling: pl.Expr) -> pl.Expr:
+    """1.0 when ``price`` is within tolerance of the prior-window extreme."""
+    prior = rolling.shift(1)
+    return pl.when((price - prior).abs() <= _EQUAL_EXTREME_TOLERANCE).then(1.0).otherwise(0.0)
 
 
 def _empty_frame() -> FeatureFrame:
@@ -279,7 +406,7 @@ def build_features(df: pl.DataFrame) -> FeatureFrame:
         raise RuntimeError("feature column order drifted from FEATURE_COLUMNS")
 
     return FeatureFrame(
-        X=features.cast(pl.Float32).to_numpy(),
+        X=features.cast(pl.Float32).to_numpy().copy(order="C"),
         ts=frame["ts"].to_numpy(),
         ohlc=frame.select("open", "high", "low", "close").to_numpy(),
         spread=frame["spread"].to_numpy(),

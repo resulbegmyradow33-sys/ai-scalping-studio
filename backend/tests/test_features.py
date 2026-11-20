@@ -8,7 +8,7 @@ truncated prefix must reproduce the same row, bit for bit, at every ``t``.
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import numpy as np
 import polars as pl
@@ -26,7 +26,8 @@ from scalping.features.structure import market_structure, swings
 def bars(closes: list[float]) -> pl.DataFrame:
     """Minimal M1 frame; range is 1.0 wide so ATR-based checks are exact."""
     n = len(closes)
-    ts = [datetime(2026, 1, 5, 10, i, tzinfo=UTC) for i in range(n)]
+    start = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+    ts = [start + timedelta(minutes=i) for i in range(n)]
     return pl.DataFrame(
         {
             "ts": ts,
@@ -60,6 +61,36 @@ def ohlc_bars(highs: list[float], lows: list[float], closes: list[float]) -> pl.
     )
 
 
+def frame_at(
+    start: datetime,
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    volume: list[int] | None = None,
+) -> pl.DataFrame:
+    """Explicit OHLC frame starting at ``start``, one bar per minute."""
+    n = len(opens)
+    return pl.DataFrame(
+        {
+            "ts": [start + timedelta(minutes=i) for i in range(n)],
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "bid_close": closes,
+            "ask_close": closes,
+            "spread": [0.02] * n,
+            "volume": volume if volume is not None else [10] * n,
+        }
+    )
+
+
+def feature(f: FeatureFrame, name: str) -> np.ndarray:
+    """The ``name`` column of ``f.X``."""
+    return f.X[:, f.columns.index(name)]
+
+
 @pytest.fixture(scope="module")
 def day() -> pl.DataFrame:
     provider = SyntheticProvider(seed=3)
@@ -88,11 +119,105 @@ def test_bos_after_higher_high() -> None:
     assert out.filter(pl.col("bos") == 1).height >= 1
 
 
+def test_bos_breaks_a_swing_confirmed_before_the_break() -> None:
+    """Production path: the level is a forward-filled confirmed swing, not a range.
+
+    Structure: pivot low at 2 (confirmed at 4), higher low at 7 (confirmed at 9),
+    pivot high at 3 (confirmed at 5) that holds until the close at 14 breaks it.
+    The 5-bar fallback at 14 is max(high[9:14]) = 10.72, so a level of 10.90 can
+    only come from the confirmed swing.
+    """
+    opens = [
+        10.30,
+        10.25,
+        10.15,
+        10.00,
+        10.80,
+        10.60,
+        10.50,
+        10.40,
+        10.30,
+        10.50,
+        10.60,
+        10.65,
+        10.58,
+        10.66,
+        10.90,
+    ]
+    highs = [
+        10.40,
+        10.30,
+        10.20,
+        10.90,
+        10.85,
+        10.62,
+        10.55,
+        10.45,
+        10.55,
+        10.60,
+        10.65,
+        10.68,
+        10.70,
+        10.72,
+        11.10,
+    ]
+    lows = [
+        10.20,
+        10.10,
+        9.90,
+        9.95,
+        10.55,
+        10.45,
+        10.35,
+        10.20,
+        10.28,
+        10.45,
+        10.55,
+        10.52,
+        10.56,
+        10.60,
+        10.85,
+    ]
+    closes = [
+        10.25,
+        10.15,
+        10.00,
+        10.80,
+        10.60,
+        10.50,
+        10.40,
+        10.30,
+        10.50,
+        10.60,
+        10.65,
+        10.58,
+        10.66,
+        10.68,
+        11.00,
+    ]
+    out = market_structure(
+        frame_at(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), opens, highs, lows, closes)
+    )
+
+    # Pivot labels sit at the confirmation bar, never at the pivot itself.
+    assert out["swing_low"][4] is True
+    assert out["swing_low"][7] is False
+    assert out["swing_low"][9] is True
+    assert out["swing_high"][3] is False
+    assert out["swing_high"][5] is True
+
+    # The level at the break is the 10.90 pivot confirmed at 5.
+    assert out["structure_high"][14] == pytest.approx(10.90)
+    assert max(highs[9:14]) == pytest.approx(10.72)
+    assert out["bos"][14] == 1
+    assert out["bos"][5:14].to_list() == [0] * 9, "the swing level holds until the break"
+    assert out["trend"][14] == 1
+    assert out["choch"][14] == 0, "first break, not a character change"
+
+
 def test_fvg_detects_gap_up() -> None:
     df = bars([10.0, 10.2, 10.2])
-    df = df.with_columns(
-        pl.Series("high", [10.1, 10.9, 11.3]), pl.Series("low", [9.9, 10.3, 10.6])
-    )
+    df = df.with_columns(pl.Series("high", [10.1, 10.9, 11.3]), pl.Series("low", [9.9, 10.3, 10.6]))
     out = fvg(df)
     # gap: low[i] > high[i-2] -> bar index 2
     assert out["fvg_up"].to_list()[2] is True
@@ -188,9 +313,9 @@ def test_htf_join_uses_last_closed_bucket(day: pl.DataFrame) -> None:
     m5 = resample(day, "5m")
     current = m5.filter(pl.col("ts") == datetime(2026, 1, 5, 12, 0, tzinfo=UTC))["close"][0]
     previous = m5.filter(pl.col("ts") == datetime(2026, 1, 5, 11, 55, tzinfo=UTC))["close"][0]
-    row = day.with_row_index().filter(
-        pl.col("ts") == datetime(2026, 1, 5, 12, 7, tzinfo=UTC)
-    )["index"][0]
+    row = day.with_row_index().filter(pl.col("ts") == datetime(2026, 1, 5, 12, 7, tzinfo=UTC))[
+        "index"
+    ][0]
     # 12:07 sits inside the 12:05..12:09 bucket; only the 12:00 bucket is closed.
     assert f.X[row, col] == pytest.approx(current / previous - 1.0, rel=1e-5)
 
@@ -201,9 +326,9 @@ def test_htf_context_switches_only_when_a_bucket_closes(day: pl.DataFrame) -> No
     assert out.height == day.height
 
     def m15_close(hour: int, minute: int) -> float:
-        return m15.filter(pl.col("ts") == datetime(2026, 1, 5, hour, minute, tzinfo=UTC))[
-            "close"
-        ][0]
+        return m15.filter(pl.col("ts") == datetime(2026, 1, 5, hour, minute, tzinfo=UTC))["close"][
+            0
+        ]
 
     def value(hour: int, minute: int) -> float:
         return out.filter(pl.col("ts") == datetime(2026, 1, 5, hour, minute, tzinfo=UTC))[
@@ -259,9 +384,7 @@ def test_structure_finds_a_down_break() -> None:
 
 def test_fvg_detects_gap_down() -> None:
     df = bars([11.0, 10.8, 10.8])
-    df = df.with_columns(
-        pl.Series("high", [11.1, 10.4, 10.1]), pl.Series("low", [10.9, 10.0, 9.7])
-    )
+    df = df.with_columns(pl.Series("high", [11.1, 10.4, 10.1]), pl.Series("low", [10.9, 10.0, 9.7]))
     out = fvg(df)
     assert out["fvg_down"].to_list()[2] is True
     assert out["fvg_up"].to_list()[2] is False
@@ -357,6 +480,173 @@ def test_atr_uses_only_past_true_range() -> None:
         .alias("high")
     )
     assert atr(spiked, 14)[20] == atr(df, 14)[20]
+
+
+# --- design doc §11 features ----------------------------------------------
+
+#: Columns added for the design doc §11 feature set.
+NEW_COLUMNS: tuple[str, ...] = (
+    "realized_vol_30",
+    "vol_regime",
+    "eq_high_20",
+    "eq_low_20",
+    "order_block_dist_atr",
+    "vwap_dist_atr",
+    "day_position",
+    "ret_3",
+    "htf_bos",
+    "htf_fvg_dist",
+)
+
+
+def test_design_doc_columns_are_present_and_float32(day: pl.DataFrame) -> None:
+    f = build_features(day)
+    missing = [name for name in NEW_COLUMNS if name not in f.columns]
+    assert not missing, missing
+    assert len(f.columns) == 59
+    assert f.X.dtype == np.float32
+
+
+def test_x_is_c_contiguous(day: pl.DataFrame) -> None:
+    assert build_features(day).X.flags["C_CONTIGUOUS"]
+
+
+def test_realized_vol_30_matches_manual_std(day: pl.DataFrame) -> None:
+    f = build_features(day)
+    closes = day["close"].to_numpy()
+    log_returns = np.diff(np.log(closes))
+    expected = log_returns[-30:].std(ddof=1)
+    assert feature(f, "realized_vol_30")[-1] == pytest.approx(expected, rel=1e-5)
+
+
+def test_ret_3_is_a_log_return(day: pl.DataFrame) -> None:
+    f = build_features(day)
+    closes = day["close"].to_numpy()
+    expected = np.log(closes[-1] / closes[-4])
+    assert feature(f, "ret_3")[-1] == pytest.approx(expected, rel=1e-5)
+
+
+def test_vol_regime_is_in_domain_and_flags_a_volatility_jump() -> None:
+    rng = np.random.default_rng(1)
+    calm = 10.0 * np.exp(np.cumsum(rng.normal(0.0, 1e-6, 200)))
+    jump = calm[-1] * np.exp(np.cumsum(rng.normal(0.0, 2e-3, 60)))
+    df = bars([float(c) for c in np.concatenate([calm, jump])])
+    f = build_features(df)
+    regime = feature(f, "vol_regime")
+    assert set(np.unique(regime[f.valid_from :])) <= {-1.0, 0.0, 1.0}
+    assert np.isfinite(regime[f.valid_from :]).all()
+    assert regime[-1] == 1.0, "a vol jump is above its own past terciles"
+
+
+def test_eq_high_20_detects_a_retest_of_the_prior_range_high() -> None:
+    highs = [10.5] * 21 + [10.6]
+    lows = [9.5] * 22
+    closes = [10.0] * 22
+    f = build_features(
+        frame_at(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), closes, highs, lows, closes)
+    )
+    eq_high = feature(f, "eq_high_20")
+    assert eq_high[20] == 1.0, "touching the prior 20-bar max is an equal high"
+    assert eq_high[21] == 0.0, "0.10 above the prior max is a clean break"
+
+
+def test_eq_low_20_detects_a_retest_of_the_prior_range_low() -> None:
+    highs = [10.5] * 22
+    lows = [9.5] * 21 + [9.4]
+    closes = [10.0] * 22
+    f = build_features(
+        frame_at(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), closes, highs, lows, closes)
+    )
+    eq_low = feature(f, "eq_low_20")
+    assert eq_low[20] == 1.0
+    assert eq_low[21] == 0.0
+
+
+def test_order_block_distance_uses_the_opposing_body_and_is_zero_inside() -> None:
+    opens = [10.00, 10.35, 10.30, 10.35]
+    highs = [10.40, 10.40, 10.55, 10.40]
+    lows = [9.95, 10.10, 10.25, 10.20]
+    closes = [10.30, 10.15, 10.50, 10.25]
+    df = frame_at(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), opens, highs, lows, closes)
+    f = build_features(df)
+    dist = feature(f, "order_block_dist_atr")
+    atr_at_2 = atr(df, 14)[2]
+    # Bar 1 is the last down candle: body [10.15, 10.35], price closes 10.50 above it.
+    assert dist[2] == pytest.approx((10.50 - 10.35) / atr_at_2, rel=1e-5)
+    # Bar 3 closes at 10.25, inside that body and inside bar 0's up body.
+    assert dist[3] == 0.0
+
+
+def test_vwap_resets_at_the_1700_utc_boundary() -> None:
+    start = datetime(2026, 1, 5, 16, 55, tzinfo=UTC)
+    opens = [10.00, 10.05, 10.10, 10.15, 10.20, 10.50, 10.55, 10.60]
+    highs = [10.05, 10.10, 10.15, 10.20, 10.25, 10.90, 10.60, 10.65]
+    lows = [9.95, 10.00, 10.05, 10.10, 10.15, 10.40, 10.50, 10.55]
+    closes = [10.00, 10.05, 10.10, 10.15, 10.20, 10.50, 10.55, 10.60]
+    volume = [10, 10, 10, 10, 10, 30, 10, 10]
+    df = frame_at(start, opens, highs, lows, closes, volume)
+    f = build_features(df)
+    vwap = feature(f, "vwap_dist_atr")
+
+    # 17:00 opens a new session: VWAP is that single bar's typical price.
+    typical_5 = (highs[5] + lows[5] + closes[5]) / 3.0
+    assert vwap[5] == pytest.approx((closes[5] - typical_5) / atr(df, 14)[5], rel=1e-5)
+
+    # 17:01 continues the new session, volume weighted.
+    typical_6 = (highs[6] + lows[6] + closes[6]) / 3.0
+    expected_6 = (typical_5 * 30 + typical_6 * 10) / 40.0
+    assert vwap[6] == pytest.approx((closes[6] - expected_6) / atr(df, 14)[6], rel=1e-5)
+
+
+def test_day_position_is_measured_inside_the_1700_session() -> None:
+    start = datetime(2026, 1, 5, 16, 58, tzinfo=UTC)
+    opens = [10.0, 10.0, 10.1, 9.8]
+    highs = [12.0, 12.0, 10.2, 10.4]
+    lows = [8.0, 8.0, 9.8, 9.6]
+    closes = [10.0, 10.0, 10.1, 9.7]
+    df = frame_at(start, opens, highs, lows, closes)
+    f = build_features(df)
+    pos = feature(f, "day_position")
+
+    # 17:00 resets the session range to its own bar: (10.1 - 9.8) / (10.2 - 9.8).
+    assert pos[2] == pytest.approx((10.1 - 9.8) / (10.2 - 9.8), rel=1e-6)
+    # 17:01 uses only 17:00 and 17:01: high 10.4, low 9.6.
+    assert pos[3] == pytest.approx((9.7 - 9.6) / (10.4 - 9.6), rel=1e-6)
+
+    flat = frame_at(start, [10.0] * 4, [10.0] * 4, [10.0] * 4, [10.0] * 4)
+    assert feature(build_features(flat), "day_position")[3] == pytest.approx(0.5)
+
+
+def test_htf_bos_and_fvg_dist_are_the_last_closed_bucket(day: pl.DataFrame) -> None:
+    f = build_features(day)
+    m5 = resample(day, "5m")
+    m15 = resample(day, "15m")
+    bos_5 = market_structure(m5)
+    fvg_15 = fvg(m15)
+
+    row = day.with_row_index().filter(pl.col("ts") == datetime(2026, 1, 5, 12, 7, tzinfo=UTC))[
+        "index"
+    ][0]
+    closed_5 = datetime(2026, 1, 5, 12, 0, tzinfo=UTC)  # closed at 12:05
+    closed_15 = datetime(2026, 1, 5, 11, 45, tzinfo=UTC)  # closed at 12:00
+    index_5 = m5.with_row_index().filter(pl.col("ts") == closed_5)["index"][0]
+    index_15 = m15.with_row_index().filter(pl.col("ts") == closed_15)["index"][0]
+    assert feature(f, "htf_bos")[row] == bos_5["bos"][index_5]
+    assert feature(f, "htf_fvg_dist")[row] == pytest.approx(
+        fvg_15["fvg_dist"][index_15], rel=1e-5
+    )
+
+    # At 12:15 the 12:00 15m bucket has closed and becomes the reference.
+    row_15 = day.with_row_index().filter(
+        pl.col("ts") == datetime(2026, 1, 5, 12, 15, tzinfo=UTC)
+    )["index"][0]
+    index_15_next = m15.with_row_index().filter(
+        pl.col("ts") == datetime(2026, 1, 5, 12, 0, tzinfo=UTC)
+    )["index"][0]
+    assert feature(f, "htf_fvg_dist")[row_15] == pytest.approx(
+        fvg_15["fvg_dist"][index_15_next], rel=1e-5
+    )
+    assert np.abs(feature(f, "htf_fvg_dist")[f.valid_from :]).max() > 0.0
 
 
 # --- performance -----------------------------------------------------------

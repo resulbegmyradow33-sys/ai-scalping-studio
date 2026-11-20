@@ -21,11 +21,21 @@ from datetime import timedelta
 import polars as pl
 
 from scalping.features.indicators import atr, rsi
+from scalping.features.liquidity import fvg
+from scalping.features.structure import market_structure
 
 __all__ = ["HTF_COLUMNS", "htf_context", "session_flags"]
 
 #: Feature suffixes computed on each higher timeframe.
-_HTF_SUFFIXES: tuple[str, ...] = ("ret_1", "rsi_14", "atr_norm", "ema_gap_21", "pos_range_20")
+_HTF_SUFFIXES: tuple[str, ...] = (
+    "ret_1",
+    "rsi_14",
+    "atr_norm",
+    "ema_gap_21",
+    "pos_range_20",
+    "bos",
+    "fvg_dist",
+)
 
 _ASIA_HOURS: tuple[int, int] = (0, 8)
 _LONDON_HOURS: tuple[int, int] = (8, 13)
@@ -57,24 +67,26 @@ def session_flags(ts: pl.Series) -> pl.DataFrame:
 
 
 def _htf_features(frame: pl.DataFrame, prefix: str) -> pl.DataFrame:
-    """Five causal features for one aggregated timeframe."""
+    """Causal features for one aggregated timeframe."""
+    ordered = frame.sort("ts")
     close = pl.col("close")
-    width = pl.col("high").rolling_max(20, min_samples=1) - pl.col(
-        "low"
-    ).rolling_min(20, min_samples=1)
-    rsi_14 = rsi(frame, 14, min_samples=2)
-    return frame.select(
+    low20 = pl.col("low").rolling_min(20, min_samples=1)
+    width = pl.col("high").rolling_max(20, min_samples=1) - low20
+    rsi_14 = rsi(ordered, 14, min_samples=2)
+    structure = market_structure(ordered, 2)["bos"]
+    gaps = fvg(ordered)
+    return ordered.select(
         pl.col("ts"),
         (close / close.shift(1) - 1.0).alias(f"{prefix}_ret_1"),
         (rsi_14 / 100.0).alias(f"{prefix}_rsi_14"),
-        (atr(frame, 14) / close).alias(f"{prefix}_atr_norm"),
+        (atr(ordered, 14) / close).alias(f"{prefix}_atr_norm"),
         (close / close.ewm_mean(span=21, adjust=False) - 1.0).alias(f"{prefix}_ema_gap_21"),
         pl.when(width > 0.0)
-        .then(
-            (close - pl.col("low").rolling_min(20, min_samples=1)) / width
-        )
+        .then((close - low20) / width)
         .otherwise(0.5)
         .alias(f"{prefix}_pos_range_20"),
+        structure.alias(f"{prefix}_bos"),
+        gaps["fvg_dist"].alias(f"{prefix}_fvg_dist"),
     )
 
 
