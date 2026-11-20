@@ -11,10 +11,10 @@ Accounting contract
   round-turn commission. Spread and slippage are already embedded in the fill
   prices, so ``pnl`` must never be reduced by ``Trade.costs`` again.
 * ``Trade.costs`` is a reporting breakdown only: entry half-spread + slippage +
-  commission, plus the exit half-spread for quote exits. Trigger exits
-  (``sl``, ``tp``, ``timeout``) fill at a level and report no exit spread.
-  Costs are embedded in the fill prices, so they must never be subtracted from
-  ``pnl`` again.
+  commission, plus the exit half-spread for quote exits. ``sl``/``tp`` level
+  triggers report no exit spread; ``timeout`` and manual closes are quote exits
+  and include it. Costs are embedded in the fill prices, so they must never be
+  subtracted from ``pnl`` again.
 * The broker does not own the balance. ``state(balance, day_start_equity=None)``
   receives both from the caller (the simulator), which owns the 17:00 session
   anchor; ``update`` and ``close`` return trades whose ``pnl`` the caller
@@ -44,7 +44,7 @@ from scalping.types import (
 __all__ = ["PaperBroker"]
 
 #: Exit reasons that fill at a level rather than across the quoted spread.
-_TRIGGER_REASONS = frozenset({"sl", "tp", "timeout"})
+_TRIGGER_REASONS = frozenset({"sl", "tp"})
 
 
 def _check_finite(name: str, value: float) -> None:
@@ -185,8 +185,8 @@ class PaperBroker:
     def close(self, bar: Bar, reason: str) -> Trade:
         """Close the open position at the bar's liquidating quote.
 
-        A ``timeout`` (or an ``sl``/``tp`` label) is a trigger exit and reports no
-        exit spread; any other reason is a quote exit and includes it.
+        ``sl``/``tp`` labels are level fills and report no exit spread; a
+        ``timeout`` or any other reason is a quote exit and includes it.
         """
         position = self._position
         if position is None:

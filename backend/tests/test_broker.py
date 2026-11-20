@@ -232,13 +232,15 @@ def test_trigger_exit_costs_exclude_exit_spread():
     assert trade.pnl == pytest.approx(-127.0)
 
 
-def test_timeout_close_is_a_trigger_exit():
+def test_timeout_close_is_a_quote_exit():
     b = make()
     b.open(Side.LONG, 1.0, TS, 2350.0, 2350.20, sl=2348.0, tp=2354.0, strategy="mom")
     trade = b.close(bar(2351.0, 2352.0, 2350.5, 2351.5), "timeout")
     assert trade.reason == "timeout"
-    assert trade.costs == pytest.approx(17.0)
-    assert trade.pnl == pytest.approx(100 * (2351.5 - 2350.20) - 7)  # $123
+    # A timeout closes at the quote: entry half-spread $10 + exit half-spread $10 + $7.
+    assert trade.costs == pytest.approx(27.0)
+    assert trade.pnl == pytest.approx(100 * (2351.5 - 2350.20) - 7)
+    assert trade.pnl == pytest.approx(123.0)
 
 
 def test_quote_exit_costs_include_exit_spread_and_reconcile_with_pnl():
