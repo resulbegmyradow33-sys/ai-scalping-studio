@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 
 import numpy as np
 import polars as pl
+import pytest
 
 from scalping.data.base import BAR_SCHEMA
 from scalping.data.synthetic import SyntheticProvider
@@ -100,3 +101,51 @@ def test_empty_range_is_empty_with_schema():
     df = SyntheticProvider().fetch("XAUUSD", END, START)
     assert df.height == 0
     assert df.schema == BAR_SCHEMA
+
+
+def _median_spread(start: datetime, end: datetime) -> float:
+    df = SyntheticProvider().fetch("XAUUSD", start, end)
+    assert df.height > 0
+    return float(df["spread"].median())
+
+
+def test_session_spread_tiers():
+    # Monday 2026-01-05: Asia 00:00-07:59, London 08:00-12:59, NY 13:00-20:59.
+    asia = _median_spread(
+        datetime(2026, 1, 5, 0, tzinfo=UTC), datetime(2026, 1, 5, 2, 59, tzinfo=UTC)
+    )
+    london = _median_spread(
+        datetime(2026, 1, 5, 12, tzinfo=UTC), datetime(2026, 1, 5, 12, 59, tzinfo=UTC)
+    )
+    ny = _median_spread(
+        datetime(2026, 1, 5, 18, tzinfo=UTC), datetime(2026, 1, 5, 20, 59, tzinfo=UTC)
+    )
+    late_asia = _median_spread(
+        datetime(2026, 1, 5, 21, tzinfo=UTC), datetime(2026, 1, 5, 23, 59, tzinfo=UTC)
+    )
+
+    # Tier order and bases (0.18/0.22/0.28) within the +/-10% noise band.
+    assert london < ny < asia
+    assert np.isclose(asia, 0.28, rtol=0.05)
+    assert np.isclose(london, 0.18, rtol=0.05)
+    assert np.isclose(ny, 0.22, rtol=0.05)
+    assert np.isclose(london / asia, 0.18 / 0.28, rtol=0.10)
+    assert np.isclose(ny / asia, 0.22 / 0.28, rtol=0.10)
+    # 21:00-23:59 rolls over to the Asian book.
+    assert np.isclose(late_asia, asia, rtol=0.03)
+
+
+def test_spread_is_ask_minus_bid():
+    df = SyntheticProvider().fetch("XAUUSD", START, END)
+    assert np.allclose(
+        (df["ask_close"] - df["bid_close"]).to_numpy(),
+        df["spread"].to_numpy(),
+        rtol=0,
+        atol=1e-9,
+    )
+
+
+@pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), float("-inf")])
+def test_start_price_must_be_finite(bad_price):
+    with pytest.raises(ValueError, match="start_price"):
+        SyntheticProvider(start_price=bad_price)

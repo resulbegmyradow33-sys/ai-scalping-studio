@@ -19,6 +19,7 @@ mid quote.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
+from math import isfinite
 from typing import Final
 
 import numpy as np
@@ -87,8 +88,8 @@ class SyntheticProvider(DataProvider):
     def __init__(
         self, seed: int = 7, start_price: float = 2350.0, vol_regimes: bool = True
     ) -> None:
-        if start_price <= 0:
-            raise ValueError("start_price must be positive")
+        if not isfinite(start_price) or start_price <= 0:
+            raise ValueError("start_price must be a finite positive number")
         self.seed = int(seed)
         self.start_price = float(start_price)
         self.vol_regimes = bool(vol_regimes)
