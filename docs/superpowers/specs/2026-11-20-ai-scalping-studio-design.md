@@ -162,12 +162,14 @@ Spread yoksa (CSV kaynağı) spread modeli devreye girer: seans bazlı taban + v
 - **Episode**: 20.000 bar veya equity %20 düşüşü (erken bitiş).
 - **Ödül**:
   `r = Δequity / initial_balance × 100`
-  `− 50 × max(0, drawdown − limit)`
+  `− 50 × max(0, drawdown − önceki_drawdown)` (yalnızca limitin ötesinde **yeni** derinlik için, tek sefer)
   `− 0.05 × (yeni pozisyon açıldı mı)`
   `+ 0.02 × (giriş anında risk limitine uyum bonusu, tek sefer)`
   Ödül ölçeği PPO için kırpılır `[-5, +5]`.
   Not: drawdown terimi equity terimiyle aynı birimde (×100) olmalı; aksi halde
-  şekillendirme etkisiz kalır. Giriş cezası, risk bonusundan büyük olmalı; yoksa
+  şekillendirme etkisiz kalır. Ceza **her bar** değil, drawdown limitin ötesinde yeni
+  bir derinliğe ulaştığında bir kez kesilir; aksi halde "hiç işlem yapmama" her zaman
+  en yüksek ödüllü politika olur. Giriş cezası, risk bonusundan büyük olmalı; yoksa
   ajan sadece pozisyon açarak pozitif ödül toplar.
 
 ### 10.1 Risk motoru (ajanın dışında)
