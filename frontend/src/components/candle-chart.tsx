@@ -222,10 +222,15 @@ export function CandleChart({
       return;
     }
 
-    // Same array length (last-candle revision) or a clean append: O(1) update
-    // keeps the viewport instead of resetting it with a full setData.
-    const sameLength =
-      previous !== null && previous.timeframe === timeframe && previous.length === candles.length;
+    // Same length and same last time is a revision of the last candle
+    // (wick-only change). Same length with a newer last time means the 5 000
+    // bar window shifted: update() would append a candle the source no longer
+    // has, so the whole array must be rewritten.
+    const revised =
+      previous !== null &&
+      previous.timeframe === timeframe &&
+      previous.length === candles.length &&
+      previous.lastTime === last.time;
     const appended =
       previous !== null &&
       previous.timeframe === timeframe &&
@@ -233,7 +238,7 @@ export function CandleChart({
       candles.length === previous.length + 1 &&
       last.time > previous.lastTime;
 
-    if (sameLength || appended) {
+    if (revised || appended) {
       series.update(last);
     } else {
       series.setData(candles);

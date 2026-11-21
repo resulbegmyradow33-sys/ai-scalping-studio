@@ -151,6 +151,31 @@ describe("CandleChart with a canvas surface", () => {
     expect(mocks.timeScale.fitContent).toHaveBeenCalledTimes(2);
   });
 
+  it("updates on two consecutive appends", () => {
+    const first = bars(40);
+    const { rerender } = render(<CandleChart bars={first} />);
+
+    rerender(<CandleChart bars={[...first, barAt(40)]} />);
+    rerender(<CandleChart bars={[...first, barAt(40), barAt(41)]} />);
+
+    expect(mocks.series.update).toHaveBeenCalledTimes(2);
+    expect(mocks.series.setData).toHaveBeenCalledTimes(1);
+  });
+
+  it("rewrites the series when the capped window shifts", () => {
+    const capped = bars(5000);
+    const { rerender } = render(<CandleChart bars={capped} />);
+
+    const shifted = [...capped.slice(1), barAt(5000)];
+    rerender(<CandleChart bars={shifted} />);
+
+    expect(mocks.series.update).not.toHaveBeenCalled();
+    expect(mocks.series.setData).toHaveBeenCalledTimes(2);
+
+    const lastPayload = mocks.series.setData.mock.calls.at(-1)?.[0] as Array<{ close: number }>;
+    expect(lastPayload.at(-1)?.close).toBe(shifted.at(-1)?.close);
+  });
+
   it("updates the last candle when only its wick changes", () => {
     const first = bars(40);
     const { rerender } = render(<CandleChart bars={first} />);
