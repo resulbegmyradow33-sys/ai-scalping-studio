@@ -28,7 +28,6 @@ from typing import Any, Final, NoReturn
 import numpy as np
 import polars as pl
 
-from scalping.api.schemas import metrics_payload
 from scalping.backtest.engine import BacktestResult, run_backtest
 from scalping.config import Settings
 from scalping.data.csv_provider import CsvProvider, DataError
@@ -36,6 +35,7 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
+from scalping.serialize import metrics_payload
 
 __all__ = ["main"]
 

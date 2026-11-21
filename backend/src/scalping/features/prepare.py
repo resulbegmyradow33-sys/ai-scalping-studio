@@ -6,15 +6,13 @@ spread is NaN, which the simulator rejects at reset. :func:`prepare_bars` fills
 those bars from :class:`~scalping.types.CostConfig`, so an OHLC-only file still
 produces a finite, strictly positive spread.
 
-The model is::
-
-    spread = spread_floor * (1 + spread_vol_mult * atr14 / atr_ref)
-
+The model is ``spread = spread_floor * (1 + spread_vol_mult * atr14 / atr_ref)``
 where ``atr_ref`` is the causal rolling mean of ``atr14`` over the current and
 the previous :data:`ATR_REF_WINDOW - 1` bars. The result is clamped to
 ``[spread_floor, 5 * spread_floor]``, and a zero or non-finite reference falls
-back to ``spread_floor``. Bar ``t`` therefore reads only bars at or before ``t``,
-matching the feature layer's causality rule.
+back to ``spread_floor``. A null, NaN or non-positive quote is treated as
+missing. Bar ``t`` therefore reads only bars at or before ``t``, matching the
+feature layer's causality rule.
 """
 
 from __future__ import annotations
@@ -53,7 +51,8 @@ def prepare_bars(df: pl.DataFrame, costs: CostConfig, atr: np.ndarray) -> pl.Dat
     if not np.isfinite(floor) or floor <= 0.0:
         raise ValueError(f"spread_floor must be finite and > 0, got {costs.spread_floor!r}")
 
-    missing = pl.col("spread").is_null() | (pl.col("spread") <= 0.0)
+    spread = pl.col("spread").fill_nan(None)
+    missing = spread.is_null() | (spread <= 0.0)
     if not df.filter(missing.fill_null(True)).height:
         return df
 

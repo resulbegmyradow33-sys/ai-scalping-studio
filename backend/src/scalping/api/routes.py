@@ -134,12 +134,17 @@ async def sim_start(body: StartRequest, request: Request) -> StartResponse:
     """Install a replay run; connected WebSocket pumps drive it.
 
     Reading history and building features is CPU bound, so it runs in a worker
-    thread: the runner's state lock is a threading lock and safe off-loop.
+    thread: the runner's state lock is a threading lock and safe off-loop. A
+    store the feature layer rejects (for example a non-finite quote) is a data
+    problem, not a server failure: ``build_features`` raises ``ValueError`` with
+    the offending columns and it maps to 422.
     """
     try:
         session_id = await asyncio.to_thread(_runner(request).start, body.speed, body.mode)
     except RunnerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return StartResponse(session_id=session_id)
 
 

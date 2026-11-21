@@ -41,6 +41,25 @@ def run(*args: str, cwd: str = ".") -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_cli_import_does_not_load_the_api():
+    """A data command must not pay for FastAPI just to serialise a report."""
+    code = (
+        "import sys\n"
+        "import scalping.cli\n"
+        "print('scalping.api' in sys.modules)\n"
+        "print('fastapi' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["False", "False"]
+
+
 def _read_stdout_line(proc: subprocess.Popen[str], timeout: float = 30.0) -> str:
     """Read the child's first stdout line, failing instead of blocking forever."""
     assert proc.stdout is not None

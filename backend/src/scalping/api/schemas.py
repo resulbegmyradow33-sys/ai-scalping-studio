@@ -7,14 +7,12 @@ plain datetimes: providers treat a naive value as already-UTC.
 
 from __future__ import annotations
 
-import math
-from dataclasses import fields
 from datetime import datetime
-from typing import Any, Literal
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
-from scalping.backtest.metrics import Metrics
+from scalping.serialize import metrics_payload
 
 __all__ = [
     "ControlRequest",
@@ -31,21 +29,6 @@ __all__ = [
 
 ProviderName = Literal["synthetic", "csv", "dukascopy"]
 ControlAction = Literal["pause", "resume", "stop", "reset"]
-
-
-def metrics_payload(metrics: Metrics) -> dict[str, Any]:
-    """Metrics by field name, with ``inf``/``nan`` mapped to JSON ``null``.
-
-    ``Metrics.profit_factor`` is legitimately ``inf`` for a win-only run, and a
-    JSON response with a raw ``inf`` fails ``allow_nan=False`` serialisers.
-    """
-    payload: dict[str, Any] = {}
-    for field_ in fields(metrics):
-        value = getattr(metrics, field_.name)
-        if isinstance(value, float) and not math.isfinite(value):
-            value = None
-        payload[field_.name] = value
-    return payload
 
 
 class HealthResponse(BaseModel):

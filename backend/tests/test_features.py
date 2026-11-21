@@ -308,6 +308,25 @@ def test_prepare_bars_leaves_a_quoted_spread_untouched(day: pl.DataFrame) -> Non
     )
 
 
+def test_prepare_bars_fills_a_nan_quoted_spread(day: pl.DataFrame) -> None:
+    flat = day.sort("ts")
+    nan_row = 42
+    quoted = flat.with_columns(
+        pl.when(pl.int_range(0, flat.height) == nan_row)
+        .then(float("nan"))
+        .otherwise(pl.col("spread"))
+        .alias("spread")
+    )
+    out = prepare_bars(quoted, CostConfig(), atr(flat, 14).to_numpy())
+
+    spread = out["spread"].to_numpy()
+    assert np.isfinite(spread).all()
+    assert spread[nan_row] > 0.0
+    np.testing.assert_array_equal(
+        np.delete(spread, nan_row), np.delete(flat["spread"].to_numpy(), nan_row)
+    )
+
+
 def test_build_features_accepts_an_ohlc_only_csv(nospread_csv) -> None:
     raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None)
     f = build_features(raw, CostConfig())

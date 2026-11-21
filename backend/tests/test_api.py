@@ -15,14 +15,15 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+import polars as pl
 import pytest
 from fastapi.testclient import TestClient
 
 from scalping.api.app import create_app
-from scalping.api.schemas import metrics_payload
 from scalping.backtest.metrics import Metrics
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
+from scalping.serialize import metrics_payload
 
 BODY = {
     "provider": "synthetic",
@@ -419,8 +420,13 @@ def test_cors_allows_the_local_panel():
 def test_cors_has_no_wildcard_for_other_origins():
     app = create_app()
     with TestClient(app) as client:
-        r = client.get("/api/health", headers={"Origin": "http://evil.example"})
-    assert r.status_code == 200
+        r = client.options(
+            "/api/sim/start",
+            headers={
+                "Origin": "http://evil.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
     assert "access-control-allow-origin" not in r.headers
 
 
@@ -442,9 +448,34 @@ def test_sim_start_accepts_a_store_written_from_a_no_spread_csv(tmp_path, nospre
     assert r.status_code == 200, r.text
 
 
+def test_sim_start_rejects_a_non_finite_store_with_422(tmp_path):
+    frame = SyntheticProvider(seed=7).fetch(
+        "XAUUSD", datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 7, tzinfo=UTC)
+    )
+    broken = frame.with_columns(
+        pl.when(pl.int_range(0, frame.height) == 500)
+        .then(float("nan"))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    ParquetStore(tmp_path).write("XAUUSD", "M1", broken)
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        r = client.post("/api/sim/start", json={"speed": 1, "mode": "replay"})
+    assert r.status_code == 422
+    assert "non-finite feature columns" in r.json()["detail"]
+
+
+def _next_status(ws, limit: int = 50) -> dict:
+    for _ in range(limit):
+        message = ws.receive_json()
+        if message["type"] == "status":
+            return message
+    pytest.fail("no status frame arrived")  # pragma: no cover - regression only
+
+
 @pytest.mark.parametrize(
     ("action", "state"),
-    [("stop", "stopped"), ("pause", "paused")],
+    [("stop", "stopped"), ("pause", "paused"), ("resume", "running")],
 )
 def test_control_announces_its_state_on_a_live_socket(client, seed_data, action, state):
     with client.websocket_connect("/ws/sim") as ws:
@@ -452,13 +483,12 @@ def test_control_announces_its_state_on_a_live_socket(client, seed_data, action,
         client.post("/api/sim/start", json={"speed": 10, "mode": "replay"})
         ws.receive_json()
         ws.receive_json()
+        if action == "resume":
+            # Resume is only meaningful from a paused run.
+            assert client.post("/api/sim/control", json={"action": "pause"}).json()["ok"] is True
+            assert _next_status(ws)["payload"]["state"] == "paused"
         assert client.post("/api/sim/control", json={"action": action}).json()["ok"] is True
-        for _ in range(50):
-            message = ws.receive_json()
-            if message["type"] == "status":
-                break
-        else:  # pragma: no cover - only a regression reaches this branch
-            pytest.fail(f"{action} never announced a status frame")
+        message = _next_status(ws)
     assert message["payload"]["state"] == state
 
 
