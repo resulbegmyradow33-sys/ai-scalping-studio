@@ -538,8 +538,8 @@ def test_runs_surface_the_degeneracy_gate(client, seed_data):
     assert "reward_mean_normalized" in row
 
 
-def _seed_long_history(tmp_path: Path, days: int = 160) -> None:
-    frame = SyntheticProvider(seed=33).fetch(
+def _seed_long_history(tmp_path: Path, days: int = 160, seed: int = 33) -> None:
+    frame = SyntheticProvider(seed=seed).fetch(
         "XAUUSD",
         datetime(2026, 1, 5, tzinfo=UTC),
         datetime(2026, 1, 5, tzinfo=UTC) + timedelta(days=days),
@@ -547,12 +547,13 @@ def _seed_long_history(tmp_path: Path, days: int = 160) -> None:
     ParquetStore(tmp_path).write("XAUUSD", "M1", frame)
 
 
-def test_evaluate_returns_three_walkforward_folds(client, seed_data, tmp_path):
-    r = client.post("/api/train", json=BODY)
+def test_evaluate_returns_three_walkforward_folds(client, tmp_path):
+    # Train and evaluate on the same stored history: the identity guard must pass.
+    _seed_long_history(tmp_path, days=160, seed=7)
+    r = client.post("/api/train", json={**BODY, "use_strategy": False})
     run_id = r.json()["run_id"]
     _wait_status(client, run_id, {"completed"})
 
-    _seed_long_history(tmp_path)
     response = client.post("/api/evaluate", json={"run_id": run_id, "symbol": "XAUUSD"})
     assert response.status_code == 200, response.text
     body = response.json()
@@ -560,12 +561,72 @@ def test_evaluate_returns_three_walkforward_folds(client, seed_data, tmp_path):
     assert len(body["stress"]) == 3
     assert isinstance(body["overfit_warning"], bool)
     assert {"net_profit", "trades", "profit_factor"} <= set(body["overall"])
+    assert body["in_sample"] is False
+    assert body["train_end"] is None
+    assert body["eval_start"] is None
+    assert body["data_hash"] == body["eval_data_hash"]
     report = Path(body["report_path"])
     assert report.is_file()
     assert report.parent == tmp_path / "runs" / run_id
     stored = json.loads(report.read_text())
     assert stored["run_id"] == run_id
     assert len(stored["folds"]) == 3
+    assert stored["data_hash"] == stored["eval_data_hash"]
+    assert stored["in_sample"] is False
+
+
+def test_evaluate_rejects_a_different_data_store(client, seed_data, tmp_path):
+    r = client.post("/api/train", json={**BODY, "use_strategy": False})
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    _seed_long_history(tmp_path, days=160, seed=33)
+    response = client.post("/api/evaluate", json={"run_id": run_id, "symbol": "XAUUSD"})
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert "different data" in detail
+    assert "data_hash" in detail
+    assert len(detail.split("data_hash ")) == 3  # both hashes are named
+
+
+def test_train_with_strategy_rejects_an_empty_label_batch(client, tmp_path):
+    import polars as pl
+
+    flat = SyntheticProvider(seed=7).fetch(
+        "XAUUSD",
+        datetime(2026, 1, 5, tzinfo=UTC),
+        datetime(2026, 1, 8, tzinfo=UTC),
+    ).with_columns(
+        [
+            pl.lit(2350.0).alias("open"),
+            pl.lit(2350.01).alias("high"),
+            pl.lit(2349.99).alias("low"),
+            pl.lit(2350.0).alias("close"),
+        ]
+    )
+    ParquetStore(tmp_path).write("XAUUSD", "M1", flat)
+
+    response = client.post("/api/train", json=BODY)
+    assert response.status_code == 409
+    assert "no strategy labels" in response.json()["detail"]
+    assert not (tmp_path / "runs").exists()
+
+
+def test_listing_sanitises_a_non_bool_degenerate(client, tmp_path):
+    run_dir = tmp_path / "runs" / "odd"
+    save_manifest(
+        run_dir,
+        {
+            "run_id": "odd",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "completed",
+            "steps": 10,
+            "reward_mean": 0.5,
+            "degenerate": "yes",
+        },
+    )
+    row = client.get("/api/runs").json()[0]
+    assert row["degenerate"] is None
 
 
 def test_evaluate_rejects_a_live_run(client, seed_data):

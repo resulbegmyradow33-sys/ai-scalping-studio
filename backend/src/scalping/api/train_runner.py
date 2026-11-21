@@ -335,7 +335,11 @@ class TrainRunner:
             labels = label_events(frame, self.settings)
             try:
                 X, arms, rewards = bandit_training_data(features, labels)
+                if X.shape[0] == 0:
+                    raise TrainError("no strategy labels: cannot fit the bandit")
                 selector = LinUCB(dim=CONTEXT_DIM).fit_offline(X, arms, rewards).freeze()
+            except TrainError:
+                raise
             except (TypeError, ValueError) as exc:
                 raise TrainError(f"cannot fit the strategy bandit: {exc}") from exc
 
@@ -521,7 +525,11 @@ class TrainRunner:
                     "steps": _steps(manifest.get("steps")),
                     "reward_mean": _finite_float(manifest.get("reward_mean")),
                     "reward_mean_normalized": _finite_float(manifest.get("reward_mean_normalized")),
-                    "degenerate": manifest.get("degenerate"),
+                    "degenerate": (
+                        manifest.get("degenerate")
+                        if isinstance(manifest.get("degenerate"), bool)
+                        else None
+                    ),
                     "baseline_hold_net_profit": _finite_float(
                         manifest.get("baseline_hold_net_profit")
                     ),
@@ -590,7 +598,7 @@ class TrainRunner:
             raise TrainError(f"cannot load {BANDIT_NAME}: {exc}") from exc
 
     def _expected_data_hash(
-        self, run_dir: Path, frame: pl.DataFrame, config: dict[str, Any]
+        self, frame: pl.DataFrame, config: dict[str, Any]
     ) -> str:
         """The hash of the bars this run was trained on (the slice when split)."""
         train_end = config.get("train_end")
@@ -642,7 +650,7 @@ class TrainRunner:
             raise TrainError(
                 f"run {run_id} was trained on {declared} features, the stored data produces {width}"
             )
-        expected_hash = self._expected_data_hash(run_dir, frame, config)
+        expected_hash = self._expected_data_hash(frame, config)
         run_data_hash = policy.config.get("data_hash")
         if not isinstance(run_data_hash, str) or run_data_hash != expected_hash:
             raise TrainError(
@@ -699,8 +707,11 @@ class TrainRunner:
         """Walk-forward and cost-stress a finished run on out-of-sample bars.
 
         The evaluation window starts at the run's ``eval_start`` when the run was
-        trained with a split; otherwise the whole stored history is used. Features
-        are rebuilt inside every fold, so no fold sees another's bars, and a
+        trained with a split; otherwise the whole stored history is used. The
+        slice must match the run's data identity: a no-split run is evaluated on
+        exactly its training bars, and a split run's training slice is re-hashed
+        against ``data_hash`` before its newer bars are evaluated. Features are
+        rebuilt inside every fold, so no fold sees another's bars, and a
         strategy-aware policy gets its frozen bandit and per-window labels so the
         observation width matches training. The report is written to
         ``evaluation.json`` in the run directory.
@@ -724,12 +735,33 @@ class TrainRunner:
             raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
         selector = self._load_selector(run_dir, config)
 
-        frame = self.store.read(symbol, TIMEFRAME)
+        full = self.store.read(symbol, TIMEFRAME)
+        train_end = config.get("train_end")
         eval_start = config.get("eval_start")
+        frame = full
         if isinstance(eval_start, str):
             frame = frame.filter(pl.col("ts") >= _parsed_ts(eval_start))
         if frame.height < SIM_MIN_BARS:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
+
+        features = build_features(frame, self.settings.costs)
+        eval_data_hash = data_hash_for(features)
+        run_data_hash = config.get("data_hash")
+        if not isinstance(run_data_hash, str):
+            raise TrainError(f"run {run_id} has no data hash")
+        # A no-split run must be evaluated on the exact bars it trained on. A
+        # split run evaluates newer bars by design, so its guard is the training
+        # slice, exactly as the backtest guard is.
+        guard_hash = (
+            self._expected_data_hash(full, config)
+            if isinstance(train_end, str)
+            else eval_data_hash
+        )
+        if guard_hash != run_data_hash:
+            raise TrainError(
+                f"run {run_id} was trained on different data: "
+                f"run data_hash {run_data_hash}, evaluation data_hash {eval_data_hash}"
+            )
 
         try:
             report = evaluate_walkforward(
@@ -739,7 +771,6 @@ class TrainRunner:
                 folds=3,
                 strategy_selector=selector,
             )
-            features = build_features(frame, self.settings.costs)
             labels = label_events(frame, self.settings) if selector is not None else None
             stress = cost_stress(
                 policy,
@@ -754,7 +785,11 @@ class TrainRunner:
         payload: dict[str, Any] = {
             "run_id": run_id,
             "symbol": symbol,
+            "train_end": train_end,
             "eval_start": eval_start,
+            "data_hash": run_data_hash,
+            "eval_data_hash": eval_data_hash,
+            "in_sample": False,
             "created_at": _now(),
             "folds": [_fold_payload(fold) for fold in report.folds],
             "overall": metrics_payload(report.overall),
@@ -773,6 +808,11 @@ class TrainRunner:
         write_json(report_path, payload)
         return {
             "report_path": str(report_path),
+            "train_end": train_end,
+            "eval_start": eval_start,
+            "data_hash": run_data_hash,
+            "eval_data_hash": eval_data_hash,
+            "in_sample": False,
             "folds": payload["folds"],
             "overall": payload["overall"],
             "overfit_warning": payload["overfit_warning"],

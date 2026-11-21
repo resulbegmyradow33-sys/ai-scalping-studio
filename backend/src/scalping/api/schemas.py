@@ -194,6 +194,11 @@ class StressSummary(BaseModel):
 
 class EvaluateResponse(BaseModel):
     report_path: str
+    train_end: str | None = None
+    eval_start: str | None = None
+    data_hash: str
+    eval_data_hash: str
+    in_sample: bool = False
     folds: list[FoldSummary]
     overall: dict[str, Any]
     overfit_warning: bool
