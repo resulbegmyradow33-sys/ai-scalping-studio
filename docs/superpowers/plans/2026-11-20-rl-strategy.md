@@ -137,9 +137,9 @@ git commit -m "feat(strategy): five causal signal families"
 - Consumes: `Strategy`, `strategy_signals`, `PaperBroker`, `RiskEngine`, `Settings`
 - Produces:
   - `label_events(df: pl.DataFrame, settings: Settings) -> pl.DataFrame` with `ts, strategy, side, entry, exit, bars, r_multiple, reason`
-  - `context_matrix(features: FeatureFrame) -> np.ndarray (T, C)` — bandit bağlamı: rejim one-hot(3), seans one-hot(3), atr_pct, rsi/100, trend, spread/atr, son 20 bar strateji başarı ortalaması (5)
+  - `context_matrix(features: FeatureFrame) -> np.ndarray (T, C)` — bandit bağlamı: rejim one-hot(3), seans one-hot(3), atr_pct (nedensel 240-bar z-skoru), rsi/100, trend, spread/atr, son 240 barda kapanan strateji başarı ortalaması (5; kapanış yoksa 0.5 nötr).
   - `CONTEXT_DIM` constant matching `context_matrix` width
-  - Her strateji için sinyal barında **tek** varsayımsal işlem: giriş sonraki bar açılışı, çıkış SL/TP/120 bar.
+  - Her strateji için sinyal barında **tek** varsayımsal işlem: giriş **sinyal barının kapanış kotasyonu** (Simulator ile aynı zamanlama), çıkış sonraki bardan itibaren SL/TP/120 bar. (Amended: tasarım dokümanı "sonraki barın açılışı" diyor ama env karar barının kapanışında doluyor ve bar şemasında ask_open yok; etiketler env'in gerçekten yaptığı işlemi fiyatlamalı, yoksa bandit'in kol değerleri yanlış olur.)
 
 - [ ] **Step 1: Write the failing test**
 
