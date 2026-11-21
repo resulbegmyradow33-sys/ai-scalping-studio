@@ -342,3 +342,33 @@ def test_predict_and_scores_validate_input():
     nan[0] = np.nan
     with pytest.raises(ValueError, match="non-finite"):
         b.scores(nan)
+
+
+def _fitted(seed: int = 0, rows: int = 200) -> LinUCB:
+    rng = np.random.default_rng(seed)
+    X = rng.normal(size=(rows, CONTEXT_DIM))
+    arms = rng.integers(0, 5, size=rows)
+    rewards = rng.normal(size=rows)
+    return LinUCB(dim=CONTEXT_DIM, alpha=0.5).fit_offline(X, arms, rewards)
+
+
+def test_freeze_turns_selection_into_the_prediction_argmax():
+    bandit = _fitted()
+    bandit.freeze()
+    assert bandit.alpha == 0.0
+
+    rng = np.random.default_rng(7)
+    for row in rng.normal(size=(50, CONTEXT_DIM)):
+        predictions = [bandit.predict(arm, row) for arm in range(bandit.n_arms)]
+        assert bandit.select(row) == int(np.argmax(predictions))
+
+
+def test_state_digest_tracks_the_fit_and_the_freeze():
+    a = _fitted(seed=1)
+    b = _fitted(seed=2)
+    assert a.state_digest() == a.state_digest()
+    assert a.state_digest() != b.state_digest()
+
+    before = a.state_digest()
+    a.freeze()
+    assert a.state_digest() != before, "alpha is part of the identity"

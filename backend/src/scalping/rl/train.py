@@ -47,6 +47,7 @@ from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 
+from scalping.backtest.engine import run_backtest
 from scalping.config import Settings
 from scalping.env.simulator import WINDOW
 from scalping.env.trading_env import TradingEnv
@@ -106,6 +107,7 @@ class TrainConfig:
     gamma: float = 0.99
     ent_coef: float = 0.01
     checkpoint_every: int = 10_000
+    random_start: bool = True
     data_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -181,12 +183,16 @@ def run_identity(
     features: FeatureFrame,
     settings: Settings,
     selector: LinUCB | None = None,
+    split: dict[str, str | None] | None = None,
 ) -> tuple[str, dict[str, Any]]:
     """Return the run id and the identity dict the id is hashed from.
 
     :func:`train` and the API runner share this so a request can name the run
     directory before the worker thread has built anything. ``config.data_hash``
-    wins when set; otherwise the feature matrix is hashed.
+    wins when set; otherwise the feature matrix is hashed. The selector's fitted
+    state and the train/eval split are part of the identity: two differently
+    fitted bandits, or the same data cut at different points, are different runs
+    even when the hyperparameters match.
     """
     data_hash = config.data_hash or data_hash_for(features)
     params: dict[str, Any] = asdict(config)
@@ -197,7 +203,9 @@ def run_identity(
         "selector": {
             "enabled": selector is not None,
             "type": type(selector).__name__ if selector is not None else None,
+            "digest": selector.state_digest() if selector is not None else None,
         },
+        "split": split,
         "data_hash": data_hash,
         "seed": config.seed,
     }
@@ -230,17 +238,30 @@ def _make_vec_env(
     features: FeatureFrame,
     settings: Settings,
     selector: LinUCB | None,
+    labels: pl.DataFrame | None,
     n_envs: int,
     seed: int,
     gamma: float,
+    random_start: bool,
 ) -> tuple[VecNormalize, list[int]]:
-    """Build ``n_envs`` envs on distinct start bars, normalised and seeded."""
+    """Build ``n_envs`` normalised envs on distinct (or random) start bars."""
 
-    def factory(start: int) -> Callable[[], TradingEnv]:
-        return lambda: TradingEnv(features, settings, strategy_selector=selector, start=start)
+    def factory(index: int) -> Callable[[], TradingEnv]:
+        def make() -> TradingEnv:
+            return TradingEnv(
+                features,
+                settings,
+                strategy_selector=selector,
+                labels=labels,
+                start=0 if random_start else starts[index],
+                random_start=random_start,
+                seed=seed + index,
+            )
+
+        return make
 
     starts = env_starts_for(features, n_envs)
-    inner = DummyVecEnv([factory(start) for start in starts])
+    inner = DummyVecEnv([factory(index) for index in range(n_envs)])
     inner.seed(seed)
     normalized = VecNormalize(
         inner,
@@ -286,6 +307,7 @@ def _existing_identity(run_dir: Path, identity: dict[str, Any]) -> dict[str, Any
             "params": stored["params"],
             "settings": stored["settings"],
             "selector": stored["selector"],
+            "split": stored.get("split"),
             "data_hash": stored["data_hash"],
             "seed": stored["seed"],
         }
@@ -296,6 +318,33 @@ def _existing_identity(run_dir: Path, identity: dict[str, Any]) -> dict[str, Any
     return identity
 
 
+def _sampled_start(vec_env: VecNormalize) -> int | None:
+    """The first env's current episode start, for the manifest."""
+    inner: Any = getattr(vec_env, "venv", None)
+    envs = getattr(inner, "envs", None)
+    if not envs:
+        return None
+    env = envs[0]
+    sim = getattr(getattr(env, "unwrapped", env), "sim", None)
+    start = getattr(sim, "episode_start", None)
+    return int(start) if isinstance(start, int) else None
+
+
+def _hold_baseline(features: FeatureFrame, settings: Settings) -> float | None:
+    """Net profit of a hold-everything policy over the training window."""
+    try:
+        result = run_backtest(
+            lambda obs: 0,
+            features,
+            settings,
+            policy_name="hold-baseline",
+            max_steps=len(features.ts) + 1,
+        )
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return float(result.metrics.net_profit)
+
+
 def train(
     config: TrainConfig,
     features: FeatureFrame,
@@ -303,6 +352,9 @@ def train(
     selector: LinUCB | None = None,
     out_dir: str | Path = Path("runs"),
     *,
+    labels: pl.DataFrame | None = None,
+    train_end: str | None = None,
+    eval_start: str | None = None,
     stop_event: threading.Event | None = None,
     pause_event: threading.Event | None = None,
 ) -> TrainResult:
@@ -312,9 +364,15 @@ def train(
     ``selector``, when given, is frozen: the environment calls it to pick the
     strategy context but training never updates it. Its state is saved as
     ``bandit.npz`` next to the model; without a selector a stale ``bandit.npz``
-    is removed.
+    is removed. ``labels`` is the matching :func:`~scalping.strategy.labeling.label_events`
+    frame, so the context's success columns are priced with this account.
 
-    ``stop_event`` ends the run after the current rollout, writes
+    ``train_end`` and ``eval_start`` are provenance: the caller has already
+    sliced ``features``; the strings are recorded in ``config.json``, the
+    manifest and the run identity so an in-sample report can be distinguished
+    from an out-of-sample one.
+
+    ``stop_event`` ends the run at the next environment step, writes
     ``status="interrupted"`` and returns a loadable model. ``pause_event`` blocks
     the training thread between steps/rollouts, publishes ``status="paused"`` and
     continues when the event is cleared; stopping while paused ends as
@@ -326,7 +384,12 @@ def train(
 
     pin_threads()
     out = Path(out_dir)
-    run_id, identity = run_identity(config, features, settings, selector)
+    split = (
+        {"train_end": train_end, "eval_start": eval_start}
+        if train_end is not None or eval_start is not None
+        else None
+    )
+    run_id, identity = run_identity(config, features, settings, selector, split)
     data_hash = identity["data_hash"]
     params = identity["params"]
     settings_dict = identity["settings"]
@@ -338,10 +401,18 @@ def train(
     created_at = _utc_now()
     _seed_everything(config.seed)
     env, env_starts = _make_vec_env(
-        features, settings, selector, config.n_envs, config.seed, config.gamma
+        features,
+        settings,
+        selector,
+        labels,
+        config.n_envs,
+        config.seed,
+        config.gamma,
+        config.random_start,
     )
     model: PPO | None = None
     final_status: str | None = None
+    failure: str | None = None
     metrics: dict[str, Any] = {}
     metrics_callback: MetricsCallback | None = None
     checkpoint_callback: CheckpointCallback | None = None
@@ -358,6 +429,10 @@ def train(
             "metrics_history": METRICS_HISTORY_NAME,
             "vec_normalize": VECNORMALIZE_NAME,
             "bandit": selector is not None,
+            "use_strategy": selector is not None,
+            "random_start": config.random_start,
+            "train_end": train_end,
+            "eval_start": eval_start,
             "env_starts": env_starts,
         },
     )
@@ -407,6 +482,10 @@ def train(
                 "obs_dim": _obs_dim(env),
                 "n_actions": _n_actions(env),
                 "env_starts": env_starts,
+                "use_strategy": selector is not None,
+                "random_start": config.random_start,
+                "train_end": train_end,
+                "eval_start": eval_start,
                 "normalisation": {
                     "norm_obs": True,
                     "norm_reward": True,
@@ -425,6 +504,7 @@ def train(
             env,
             metrics_callback,
             manifest_writer,
+            extra=lambda: {"sampled_start": _sampled_start(env)},
         )
 
         def checkpoint(status: str) -> None:
@@ -462,6 +542,10 @@ def train(
         final_status = halted.status
     except KeyboardInterrupt:
         final_status = "interrupted"
+    except Exception as exc:
+        final_status = "failed"
+        failure = str(exc)
+        raise
     finally:
         if (
             model is not None
@@ -469,8 +553,22 @@ def train(
             and metrics_callback is not None
             and checkpoint_callback is not None
         ):
+            baseline = _hold_baseline(features, settings)
             metrics_callback.status = final_status
             metrics = metrics_callback.write()
+            distribution = metrics.get("action_dist")
+            trades = int(metrics.get("trades") or 0)
+            degenerate = True if distribution is None else trades == 0 or max(distribution) < 0.30
+            manifest_writer.base.update(
+                {
+                    "baseline_hold_net_profit": baseline,
+                    "degenerate": degenerate,
+                    "reward_mean_normalized": metrics.get("reward_mean"),
+                    "trades": trades,
+                }
+            )
+            if failure is not None:
+                manifest_writer.base["error"] = failure
             checkpoint_callback.save()
             if selector is not None:
                 selector.save(run_dir / BANDIT_NAME)

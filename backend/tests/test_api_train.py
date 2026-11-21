@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -57,7 +57,9 @@ def client(tmp_path):
 
 
 def test_train_rejects_without_data(client):
-    r = client.post("/api/train", json={"total_steps": 256, "n_envs": 1, "seed": 0, "symbol": "XAUUSD"})
+    r = client.post(
+        "/api/train", json={"total_steps": 256, "n_envs": 1, "seed": 0, "symbol": "XAUUSD"}
+    )
     assert r.status_code == 409
     assert "not enough bars" in r.json()["detail"]
 
@@ -74,7 +76,9 @@ def test_unknown_run_404(client):
 
 
 def test_train_starts_and_is_listed(client, seed_data):
-    r = client.post("/api/train", json={"total_steps": 256, "n_envs": 1, "seed": 0, "symbol": "XAUUSD"})
+    r = client.post(
+        "/api/train", json={"total_steps": 256, "n_envs": 1, "seed": 0, "symbol": "XAUUSD"}
+    )
     assert r.status_code == 202
     run_id = r.json()["run_id"]
     listed = [x["run_id"] for x in client.get("/api/runs").json()]
@@ -113,13 +117,19 @@ def test_pause_resume_and_stop_leave_a_loadable_model(client, seed_data, tmp_pat
     r = client.post("/api/train", json=LONG_BODY)
     run_id = r.json()["run_id"]
 
-    assert client.post(f"/api/runs/{run_id}/control", json={"action": "pause"}).json() == {"ok": True}
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "pause"}).json() == {
+        "ok": True
+    }
     assert _wait_status(client, run_id, {"paused"})["status"] == "paused"
 
-    assert client.post(f"/api/runs/{run_id}/control", json={"action": "resume"}).json() == {"ok": True}
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "resume"}).json() == {
+        "ok": True
+    }
     assert _wait_status(client, run_id, {"running"})["status"] == "running"
 
-    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).json() == {"ok": True}
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).json() == {
+        "ok": True
+    }
     detail = _wait_status(client, run_id, {"interrupted"})
     assert detail["status"] == "interrupted"
     manifest = json.loads((tmp_path / "runs" / run_id / "manifest.json").read_text())
@@ -148,7 +158,9 @@ def test_stop_moves_the_visible_status_off_running(client, seed_data):
     assert client.post(f"/api/runs/{run_id}/control", json={"action": "pause"}).status_code == 200
     _wait_status(client, run_id, {"paused"})
 
-    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).json() == {"ok": True}
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).json() == {
+        "ok": True
+    }
     stopped = client.get(f"/api/runs/{run_id}").json()["status"]
     # The worker may already have written ``interrupted``; it must never still
     # report the run as controllable.
@@ -209,7 +221,10 @@ def test_detail_returns_config_metrics_and_status(client, seed_data):
 
 def test_runs_are_newest_first(client, tmp_path):
     root = tmp_path / "runs"
-    for run_id, created in (("old", "2026-01-01T00:00:00+00:00"), ("new", "2026-02-01T00:00:00+00:00")):
+    for run_id, created in (
+        ("old", "2026-01-01T00:00:00+00:00"),
+        ("new", "2026-02-01T00:00:00+00:00"),
+    ):
         save_manifest(
             root / run_id,
             {
@@ -222,7 +237,16 @@ def test_runs_are_newest_first(client, tmp_path):
         )
     listed = client.get("/api/runs").json()
     assert [item["run_id"] for item in listed] == ["new", "old"]
-    assert set(listed[0]) == {"run_id", "status", "created_at", "steps", "reward_mean"}
+    assert set(listed[0]) == {
+        "run_id",
+        "status",
+        "created_at",
+        "steps",
+        "reward_mean",
+        "reward_mean_normalized",
+        "degenerate",
+        "baseline_hold_net_profit",
+    }
 
 
 def test_backtest_uses_the_stored_policy(client, seed_data, tmp_path):
@@ -445,3 +469,109 @@ def test_train_rejects_a_store_below_the_bar_floor(client, tmp_path):
     assert r.status_code == 409
     assert "not enough bars: need 4000" in r.json()["detail"]
     assert not (tmp_path / "runs").exists()
+
+
+def test_train_uses_the_fitted_bandit_by_default(client, seed_data, tmp_path):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    detail = _wait_status(client, run_id, {"completed"})
+    config = detail["config"]
+    assert config["use_strategy"] is True
+    assert config["obs_dim"] == 3551
+    assert (tmp_path / "runs" / run_id / "bandit.npz").is_file()
+    assert detail["status"] == "completed"
+
+
+def test_train_without_strategy_keeps_the_plain_observation(client, seed_data, tmp_path):
+    r = client.post("/api/train", json={**BODY, "use_strategy": False})
+    run_id = r.json()["run_id"]
+    detail = _wait_status(client, run_id, {"completed"})
+    assert detail["config"]["use_strategy"] is False
+    assert detail["config"]["obs_dim"] == 3545
+    assert not (tmp_path / "runs" / run_id / "bandit.npz").exists()
+
+
+def test_train_end_records_the_split(client, seed_data):
+    r = client.post(
+        "/api/train",
+        json={**BODY, "use_strategy": False, "train_end": "2026-01-07T23:00:00+00:00"},
+    )
+    assert r.status_code == 202
+    run_id = r.json()["run_id"]
+    detail = _wait_status(client, run_id, {"completed"})
+    config = detail["config"]
+    assert config["train_end"] == "2026-01-07T23:00:00+00:00"
+    assert config["eval_start"] == "2026-01-07T23:01:00+00:00"
+
+
+def test_backtest_marks_a_split_run_out_of_sample(client, seed_data, tmp_path):
+    r = client.post(
+        "/api/train",
+        json={**BODY, "use_strategy": False, "train_end": "2026-01-07T23:00:00+00:00"},
+    )
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    body = client.post("/api/backtest", json={"run_id": run_id, "symbol": "XAUUSD"}).json()
+    stored = json.loads(Path(body["report_path"]).read_text())
+    assert stored["in_sample"] is False
+    assert stored["train_end"] == "2026-01-07T23:00:00+00:00"
+
+
+def test_backtest_marks_a_full_history_run_in_sample(client, seed_data):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+    body = client.post("/api/backtest", json={"run_id": run_id, "symbol": "XAUUSD"}).json()
+    stored = json.loads(Path(body["report_path"]).read_text())
+    assert stored["in_sample"] is True
+    assert stored["train_end"] is None
+
+
+def test_runs_surface_the_degeneracy_gate(client, seed_data):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+    row = next(item for item in client.get("/api/runs").json() if item["run_id"] == run_id)
+    assert "degenerate" in row
+    assert "baseline_hold_net_profit" in row
+    assert "reward_mean_normalized" in row
+
+
+def _seed_long_history(tmp_path: Path, days: int = 160) -> None:
+    frame = SyntheticProvider(seed=33).fetch(
+        "XAUUSD",
+        datetime(2026, 1, 5, tzinfo=UTC),
+        datetime(2026, 1, 5, tzinfo=UTC) + timedelta(days=days),
+    )
+    ParquetStore(tmp_path).write("XAUUSD", "M1", frame)
+
+
+def test_evaluate_returns_three_walkforward_folds(client, seed_data, tmp_path):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    _seed_long_history(tmp_path)
+    response = client.post("/api/evaluate", json={"run_id": run_id, "symbol": "XAUUSD"})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert len(body["folds"]) == 3
+    assert len(body["stress"]) == 3
+    assert isinstance(body["overfit_warning"], bool)
+    assert {"net_profit", "trades", "profit_factor"} <= set(body["overall"])
+    report = Path(body["report_path"])
+    assert report.is_file()
+    assert report.parent == tmp_path / "runs" / run_id
+    stored = json.loads(report.read_text())
+    assert stored["run_id"] == run_id
+    assert len(stored["folds"]) == 3
+
+
+def test_evaluate_rejects_a_live_run(client, seed_data):
+    r = client.post("/api/train", json=LONG_BODY)
+    run_id = r.json()["run_id"]
+    response = client.post("/api/evaluate", json={"run_id": run_id, "symbol": "XAUUSD"})
+    assert response.status_code == 409
+    client.post(f"/api/runs/{run_id}/control", json={"action": "stop"})
+    _wait_status(client, run_id, {"interrupted"})

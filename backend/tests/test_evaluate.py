@@ -223,3 +223,22 @@ def test_select_splits_raises_when_no_fold_fits():
     )
     with pytest.raises(ValueError, match="not enough data for 3 folds"):
         _select_splits(pl.DataFrame({"ts": stamps}), train_months=6, folds=3)
+
+
+def test_every_window_run_uses_the_full_window_step_cap(monkeypatch):
+    import scalping.backtest.evaluate as evaluate_module
+
+    df, features = make(120)
+    seen: list[tuple[int, int | None]] = []
+    real = evaluate_module.run_backtest
+
+    def spy(policy, frame, settings, **kwargs):
+        seen.append((len(frame.ts), kwargs.get("max_steps")))
+        return real(policy, frame, settings, **kwargs)
+
+    monkeypatch.setattr(evaluate_module, "run_backtest", spy)
+    evaluate_walkforward(lambda o: 0, df, Settings(), folds=1)
+    cost_stress(lambda o: 0, features, Settings(), multipliers=(1,))
+
+    assert seen
+    assert all(max_steps == length + 1 for length, max_steps in seen), seen

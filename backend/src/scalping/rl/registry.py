@@ -224,15 +224,19 @@ class ManifestWriter:
         status: str | None = None,
         steps: int = 0,
         reward_mean: float | None = None,
+        extra: Mapping[str, Any] | None = None,
     ) -> Path:
         if status is not None:
             self.status = status
         payload = dict(self.base)
+        if extra:
+            payload.update(extra)
         payload.update(
             {
                 "status": self.status,
                 "steps": int(steps),
                 "reward_mean": reward_mean,
+                "reward_mean_normalized": reward_mean,
                 "updated_at": _now(),
             }
         )

@@ -121,11 +121,15 @@ class Simulator:
     ``step`` truncates with ``info["reason"] == "no_bars"``.
 
     The reward is ``Δequity / initial * 100
-    - 50 * max(0, drawdown - 0.03) - 0.05 * opened + 0.02 * risk_ok`` clipped
-    to ``[-5, 5]``, where ``drawdown`` is the fractional drop from the episode
-    peak, ``opened`` is 1.0 only on the step that opens a position, and
-    ``risk_ok`` is a one-time 1.0 on that same gate-approved step (flat, hold
-    and close steps earn no shaping bonus). The episode terminates once equity reaches 80% of the initial balance and
+    - 50 * max(0, excess - prev_excess) - 0.05 * opened + 0.02 * risk_ok``
+    clipped to ``[-5, 5]``, where ``drawdown`` is the fractional drop from the
+    episode peak, ``excess = max(0, drawdown - 0.03)`` and ``prev_excess`` is the
+    highest excess already charged this episode. The drawdown term is therefore
+    a one-time charge for reaching a **new** depth, not a per-bar tax that would
+    make "never trade" the best policy. ``opened`` is 1.0 only on the step that
+    opens a position, and ``risk_ok`` is a one-time 1.0 on that same
+    gate-approved step (flat, hold and close steps earn no shaping bonus). The
+    episode terminates once equity reaches 80% of the initial balance and
     truncates at ``max_steps`` (the constructor override, default
     :data:`MAX_STEPS`) or when the data ends; an open position is
     force-closed with reason ``"liquidation"`` when equity depletion terminates
@@ -136,6 +140,13 @@ class Simulator:
     ``strategy`` and ``reason``. With a ``strategy_selector``, ``strategy`` is
     the arm chosen for the bar the returned observation describes; otherwise it
     is the constructor's ``strategy`` argument.
+
+    ``random_start`` makes every ``reset`` pick a new start uniformly from the
+    range that still leaves ``max_steps`` bars (the last episode's start is at
+    ``last_index - max_steps``); the RNG is seeded once at construction, so a
+    reset stream is reproducible and a fixed seed replays the same starts. The
+    default keeps the historical single start at ``start``. ``episode_start``
+    reports the bar index the current episode began on.
     """
 
     def __init__(
@@ -148,12 +159,19 @@ class Simulator:
         strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
         labels: pl.DataFrame | None = None,
         max_steps: int | None = None,
+        random_start: bool = False,
+        seed: int = 0,
     ) -> None:
         self.features = features
         self.settings = settings
         self.max_steps = MAX_STEPS if max_steps is None else int(max_steps)
         if self.max_steps < 1:
             raise ValueError(f"max_steps must be >= 1, got {max_steps!r}")
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise TypeError(f"seed must be an int, got {type(seed).__name__}")
+        self.random_start = bool(random_start)
+        self.rng_seed = int(seed)
+        self._rng = np.random.default_rng(self.rng_seed)
         self.risk = RiskEngine(settings.risk, settings.contract)
         self.strategy = strategy
         self._base_strategy = strategy
@@ -202,7 +220,9 @@ class Simulator:
         self.seed: int | None = None
         self.broker = PaperBroker(settings.contract, settings.costs, 0.0)
         self._i = self._first_index
+        self._episode_start = self._first_index
         self._peak = self._initial
+        self._prev_excess = 0.0
         self._equity_before = self._initial
         self._equity_value = self._initial
         self._last_obs = np.zeros(self.obs_dim, dtype=np.float32)
@@ -219,16 +239,28 @@ class Simulator:
         """Index of the decision bar the next ``step`` will act on."""
         return self._i
 
+    @property
+    def episode_start(self) -> int:
+        """Index of the bar the current episode started from."""
+        return self._episode_start
+
     # --- episode -----------------------------------------------------------
 
     def reset(self, seed: int | None = None) -> np.ndarray:
         """Restart the episode and return the first observation."""
         self.seed = seed
         self._i = self._first_index
+        if self.random_start and self._last_index >= self._first_index:
+            # Keep a full horizon when the frame allows one; the last possible
+            # start still leaves exactly ``max_steps`` bars to step through.
+            upper = max(self._first_index, self._last_index - self.max_steps)
+            self._i = int(self._rng.integers(self._first_index, upper + 1))
+        self._episode_start = self._i
         self.steps = 0
         self.balance = self._initial
         self.day_start_equity = self._initial
         self._peak = self._initial
+        self._prev_excess = 0.0
         self._equity_before = self._initial
         self._equity_value = self._initial
         self._done = False
@@ -325,8 +357,13 @@ class Simulator:
 
         self._peak = max(self._peak, equity)
         drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0.0
+        excess = max(0.0, drawdown - _DD_LIMIT)
+        # Charge only the new depth. ``_prev_excess`` is monotone within the
+        # episode, so recovering and falling back to the same level is free.
+        penalty = _DD_PENALTY * max(0.0, excess - self._prev_excess)
+        self._prev_excess = max(self._prev_excess, excess)
         reward = (equity - self._equity_before) / self._initial * 100.0
-        reward -= _DD_PENALTY * max(0.0, drawdown - _DD_LIMIT)
+        reward -= penalty
         reward -= _OPEN_PENALTY * (1.0 if opened is not None else 0.0)
         reward += _RISK_BONUS * risk_ok
         reward = float(np.clip(reward, -_REWARD_CLIP, _REWARD_CLIP))
@@ -536,7 +573,7 @@ class Simulator:
     # --- bars --------------------------------------------------------------
 
     def _has_window(self) -> bool:
-        return self._first_index <= self._last_index and self._first_index >= WINDOW - 1
+        return self._i >= WINDOW - 1 and self._i <= self._last_index
 
     def _ts(self, index: int) -> datetime:
         stamp = np.datetime64(self.features.ts[index], "us").astype(datetime)

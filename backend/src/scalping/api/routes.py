@@ -29,6 +29,8 @@ from scalping.api.schemas import (
     DataStatusResponse,
     DownloadRequest,
     DownloadResponse,
+    EvaluateRequest,
+    EvaluateResponse,
     HealthResponse,
     OkResponse,
     RunControlRequest,
@@ -162,6 +164,8 @@ async def train_start(body: TrainRequest, request: Request) -> TrainResponse:
             n_envs=body.n_envs,
             seed=body.seed,
             symbol=body.symbol,
+            use_strategy=body.use_strategy,
+            train_end=body.train_end,
         )
     except TrainError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -219,6 +223,20 @@ async def backtest(body: BacktestRequest, request: Request) -> BacktestResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return BacktestResponse(**result)
+
+
+@router.post("/api/evaluate", response_model=EvaluateResponse)
+async def evaluate(body: EvaluateRequest, request: Request) -> EvaluateResponse:
+    """Walk-forward and cost-stress a finished run on out-of-sample bars."""
+    try:
+        result = await asyncio.to_thread(_trains(request).evaluate, body.run_id, body.symbol)
+    except UnknownRunError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown run: {body.run_id}") from exc
+    except TrainError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EvaluateResponse(**result)
 
 
 @router.post("/api/sim/start", response_model=StartResponse)

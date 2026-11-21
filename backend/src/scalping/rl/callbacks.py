@@ -15,7 +15,7 @@ from __future__ import annotations
 import math
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final
 
@@ -125,6 +125,7 @@ class MetricsCallback(BaseCallback):
         self._episode_lengths: list[int] = []
         self._current_lengths = np.zeros(0, dtype=np.int64)
         self._losses: dict[str, float] = {}
+        self._trade_count = 0
         self._last_history_step = -1
         self._metrics: dict[str, Any] = {}
 
@@ -174,6 +175,10 @@ class MetricsCallback(BaseCallback):
                     self._episode_lengths.append(int(self._current_lengths[index]))
                     self._current_lengths[index] = 0
 
+        infos = self.locals.get("infos")
+        if infos:
+            self._trade_count += sum(1 for info in infos if info.get("trade") is not None)
+
         if self._trigger.due(self.num_timesteps):
             self.write()
         return True
@@ -202,9 +207,13 @@ class MetricsCallback(BaseCallback):
 
         total = int(self._action_counts.sum())
         if total:
-            distribution = [float(count / total) for count in self._action_counts]
+            distribution: list[float] | None = [
+                float(count / total) for count in self._action_counts
+            ]
         else:
-            distribution = [1.0 / self._n_actions] * self._n_actions
+            # No action has been sampled yet; a uniform guess would claim a
+            # measurement that does not exist.
+            distribution = None
 
         if self._episode_lengths:
             ep_len_mean = float(np.mean(self._episode_lengths))
@@ -217,8 +226,10 @@ class MetricsCallback(BaseCallback):
         return {
             "step": int(self.num_timesteps),
             "reward_mean": _finite(reward_mean),
+            "reward_mean_normalized": _finite(reward_mean),
             "reward_mean_interval": _finite(interval_mean),
             "ep_len_mean": _finite(ep_len_mean),
+            "trades": int(self._trade_count),
             "entropy_loss": self._loss("train/entropy_loss"),
             "policy_loss": self._loss("train/policy_gradient_loss"),
             "value_loss": self._loss("train/value_loss"),
@@ -255,6 +266,7 @@ class CheckpointCallback(BaseCallback):
         vec_env: VecNormalize,
         metrics: MetricsCallback,
         manifest: ManifestWriter,
+        extra: Callable[[], Mapping[str, Any]] | None = None,
         verbose: int = 0,
     ) -> None:
         super().__init__(verbose)
@@ -263,6 +275,7 @@ class CheckpointCallback(BaseCallback):
         self.vec_env = vec_env
         self.metrics_callback = metrics
         self.manifest = manifest
+        self.extra = extra
 
     def _on_step(self) -> bool:
         if self._trigger.due(self.num_timesteps):
@@ -279,6 +292,7 @@ class CheckpointCallback(BaseCallback):
             status=self.metrics_callback.status,
             steps=int(self.model.num_timesteps),
             reward_mean=float(reward_mean) if reward_mean is not None else None,
+            extra=self.extra() if self.extra is not None else None,
         )
 
 

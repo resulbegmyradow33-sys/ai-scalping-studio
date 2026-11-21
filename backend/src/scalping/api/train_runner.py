@@ -34,10 +34,12 @@ from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
+import polars as pl
 
 from scalping.api.runner import MIN_BARS as SIM_MIN_BARS
 from scalping.api.runner import TIMEFRAME
 from scalping.backtest.engine import run_backtest
+from scalping.backtest.evaluate import FoldResult, cost_stress, evaluate_walkforward
 from scalping.config import Settings
 from scalping.data.store import ParquetStore
 from scalping.features.build import FeatureFrame, build_features
@@ -61,6 +63,7 @@ from scalping.rl.train import (
 )
 from scalping.serialize import metrics_payload
 from scalping.strategy.bandit import LinUCB
+from scalping.strategy.labeling import CONTEXT_DIM, bandit_training_data, label_events
 from scalping.strategy.signals import ALL_STRATEGIES
 
 __all__ = [
@@ -112,6 +115,25 @@ class RunState:
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _utc(value: datetime) -> datetime:
+    """Naive timestamps are read as UTC, matching the data layer."""
+    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _iso(value: datetime | str | None) -> str | None:
+    """Normalise a split boundary to an ISO string (naive means UTC)."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        parsed = datetime.fromisoformat(value)
+        return _utc(parsed).isoformat()
+    return _utc(value).isoformat()
+
+
+def _parsed_ts(value: str) -> datetime:
+    return _utc(datetime.fromisoformat(value))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -182,9 +204,7 @@ def _series_from_history(run_dir: Path) -> dict[str, list[dict[str, Any]]] | Non
         step = _finite_int(row.get("step"))
         if step is None:
             continue
-        reward_key = (
-            "reward_mean_interval" if "reward_mean_interval" in row else "reward_mean"
-        )
+        reward_key = "reward_mean_interval" if "reward_mean_interval" in row else "reward_mean"
         for name, key in (
             ("reward", reward_key),
             ("episode_length", "ep_len_mean"),
@@ -195,6 +215,21 @@ def _series_from_history(run_dir: Path) -> dict[str, list[dict[str, Any]]] | Non
             if value is not None:
                 series[name].append({"step": step, "value": value})
     return series
+
+
+def _range_pair(value: tuple[datetime, datetime]) -> list[str]:
+    return [_utc(value[0]).isoformat(), _utc(value[1]).isoformat()]
+
+
+def _fold_payload(fold: FoldResult) -> dict[str, Any]:
+    """One walk-forward fold as a JSON-safe response object."""
+    return {
+        "train_range": _range_pair(fold.train_range),
+        "test_range": _range_pair(fold.test_range),
+        "evaluated_range": _range_pair(fold.evaluated_range),
+        "metrics": metrics_payload(fold.metrics),
+        "train_expectancy": _finite_float(fold.train_expectancy),
+    }
 
 
 def _bandit_weights(run_dir: Path) -> list[dict[str, Any]] | None:
@@ -250,16 +285,39 @@ class TrainRunner:
         n_envs: int,
         seed: int,
         symbol: str,
+        use_strategy: bool = True,
+        train_end: datetime | None = None,
     ) -> str:
         """Prepare a run, reserve its id and start the worker thread.
+
+        ``use_strategy`` fits a LinUCB on the label batch, freezes it and saves
+        ``bandit.npz`` *before* the worker starts PPO, so the strategy context is
+        real from the first step. ``train_end`` slices the raw bars: the run only
+        sees bars at or before it, and ``eval_start`` records the first bar after
+        it for the evaluation endpoint.
 
         Raises :class:`TrainError` (409) for a store below the bar floor or a
         run id that is already training. Data problems from the feature layer
         stay ``ValueError`` and map to 422 in the route.
         """
-        frame = self.store.read(symbol, TIMEFRAME)
+        full = self.store.read(symbol, TIMEFRAME)
+        if full.height < MIN_BARS:
+            raise TrainError(f"not enough bars: need {MIN_BARS}")
+
+        train_end_iso = _iso(train_end)
+        eval_start: str | None = None
+        frame = full
+        if train_end is not None:
+            end = _utc(train_end)
+            frame = full.filter(pl.col("ts") <= end)
+            after = full.filter(pl.col("ts") > end)
+            if after.height:
+                first_after = after["ts"].min()
+                if isinstance(first_after, datetime):
+                    eval_start = _utc(first_after).isoformat()
         if frame.height < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
+
         features = build_features(frame, self.settings.costs)
         if features.X.shape[0] < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
@@ -271,13 +329,28 @@ class TrainRunner:
         except ValueError as exc:
             raise TrainError(str(exc)) from exc
 
+        labels: pl.DataFrame | None = None
+        selector: LinUCB | None = None
+        if use_strategy:
+            labels = label_events(frame, self.settings)
+            try:
+                X, arms, rewards = bandit_training_data(features, labels)
+                selector = LinUCB(dim=CONTEXT_DIM).fit_offline(X, arms, rewards).freeze()
+            except (TypeError, ValueError) as exc:
+                raise TrainError(f"cannot fit the strategy bandit: {exc}") from exc
+
         config = TrainConfig(
             run_name=symbol,
             total_steps=total_steps,
             n_envs=n_envs,
             seed=seed,
         )
-        run_id, identity = run_identity(config, features, self.settings)
+        split = (
+            {"train_end": train_end_iso, "eval_start": eval_start}
+            if train_end_iso is not None or eval_start is not None
+            else None
+        )
+        run_id, identity = run_identity(config, features, self.settings, selector, split)
         run_dir = self.runs_root / run_id
         created_at = _now()
 
@@ -308,12 +381,20 @@ class TrainRunner:
                     "status": "running",
                     "steps": 0,
                     "reward_mean": None,
+                    "use_strategy": selector is not None,
+                    "random_start": config.random_start,
+                    "train_end": train_end_iso,
+                    "eval_start": eval_start,
                     "updated_at": created_at,
                 },
             )
+            if selector is not None:
+                # The frozen bandit exists before the first PPO step: the panel
+                # can inspect the weights while the policy is still untrained.
+                selector.save(run_dir / BANDIT_NAME)
             thread = threading.Thread(
                 target=self._train,
-                args=(state, config, features),
+                args=(state, config, features, selector, labels, train_end_iso, eval_start),
                 name=f"train-{run_id}",
                 daemon=True,
             )
@@ -326,7 +407,16 @@ class TrainRunner:
             raise
         return run_id
 
-    def _train(self, state: RunState, config: TrainConfig, features: FeatureFrame) -> None:
+    def _train(
+        self,
+        state: RunState,
+        config: TrainConfig,
+        features: FeatureFrame,
+        selector: LinUCB | None,
+        labels: pl.DataFrame | None,
+        train_end: str | None,
+        eval_start: str | None,
+    ) -> None:
         """Run ``train`` in the worker thread and publish its final status."""
         status = "failed"
         try:
@@ -334,7 +424,11 @@ class TrainRunner:
                 config,
                 features,
                 self.settings,
+                selector=selector,
                 out_dir=self.runs_root,
+                labels=labels,
+                train_end=train_end,
+                eval_start=eval_start,
                 stop_event=state.stop_event,
                 pause_event=state.pause_event,
             )
@@ -377,23 +471,17 @@ class TrainRunner:
                 raise UnknownRunError(run_id)
             if action == "pause":
                 if state.status != "running":
-                    raise RunControlError(
-                        f"cannot pause run {run_id} while it is {state.status}"
-                    )
+                    raise RunControlError(f"cannot pause run {run_id} while it is {state.status}")
                 state.status = "paused"
                 state.pause_event.set()
             elif action == "resume":
                 if state.status != "paused":
-                    raise RunControlError(
-                        f"cannot resume run {run_id} while it is {state.status}"
-                    )
+                    raise RunControlError(f"cannot resume run {run_id} while it is {state.status}")
                 state.status = "running"
                 state.pause_event.clear()
             elif action == "stop":
                 if state.status not in LIVE_STATUSES:
-                    raise RunControlError(
-                        f"cannot stop run {run_id} while it is {state.status}"
-                    )
+                    raise RunControlError(f"cannot stop run {run_id} while it is {state.status}")
                 # Make the stop observable before the worker's terminal
                 # manifest lands; pause/resume no longer fit ``stopping``.
                 state.status = "stopping"
@@ -431,7 +519,12 @@ class TrainRunner:
                     "status": live.get(run_id, str(manifest.get("status") or "unknown")),
                     "created_at": str(created_at) if created_at is not None else None,
                     "steps": _steps(manifest.get("steps")),
-                    "reward_mean": manifest.get("reward_mean"),
+                    "reward_mean": _finite_float(manifest.get("reward_mean")),
+                    "reward_mean_normalized": _finite_float(manifest.get("reward_mean_normalized")),
+                    "degenerate": manifest.get("degenerate"),
+                    "baseline_hold_net_profit": _finite_float(
+                        manifest.get("baseline_hold_net_profit")
+                    ),
                 }
             )
         items.sort(key=lambda item: (item["created_at"] or "", item["run_id"]), reverse=True)
@@ -450,7 +543,9 @@ class TrainRunner:
             state = self._runs.get(run_id)
         if manifest is None and state is None:
             raise UnknownRunError(run_id)
-        status = state.status if state is not None else str((manifest or {}).get("status") or "unknown")
+        status = (
+            state.status if state is not None else str((manifest or {}).get("status") or "unknown")
+        )
 
         config = _read_json(run_dir / CONFIG_NAME)
         metrics = _read_json(run_dir / METRICS_NAME)
@@ -481,6 +576,30 @@ class TrainRunner:
 
     # -- backtest --------------------------------------------------------
 
+    def _load_selector(self, run_dir: Path, config: dict[str, Any]) -> LinUCB | None:
+        """Load the frozen bandit when the run was trained with strategy context."""
+        selector = config.get("selector")
+        if not isinstance(selector, dict) or not selector.get("enabled"):
+            return None
+        path = run_dir / BANDIT_NAME
+        if not path.is_file():
+            raise TrainError(f"run directory {run_dir.name} has no {BANDIT_NAME}")
+        try:
+            return LinUCB.load(path)
+        except (OSError, TypeError, ValueError, KeyError) as exc:
+            raise TrainError(f"cannot load {BANDIT_NAME}: {exc}") from exc
+
+    def _expected_data_hash(
+        self, run_dir: Path, frame: pl.DataFrame, config: dict[str, Any]
+    ) -> str:
+        """The hash of the bars this run was trained on (the slice when split)."""
+        train_end = config.get("train_end")
+        if isinstance(train_end, str):
+            end = _parsed_ts(train_end)
+            sliced = frame.filter(pl.col("ts") <= end)
+            return data_hash_for(build_features(sliced, self.settings.costs))
+        return data_hash_for(build_features(frame, self.settings.costs))
+
     def backtest(self, run_id: str, symbol: str) -> dict[str, Any]:
         """Replay one stored policy over the stored bars and write a report.
 
@@ -490,6 +609,10 @@ class TrainRunner:
         to load. The stored bars must hash to the run's own ``data_hash`` — a
         policy replayed on different prices would produce a report that looks
         valid and means nothing.
+
+        ``in_sample`` compares the last evaluated bar with ``train_end``: a run
+        trained on the full stored range is in-sample everywhere, a run with a
+        split is out of sample as soon as the replay extends past it.
         """
         run_dir = self._run_dir(run_id)
         manifest = load_run(run_dir)
@@ -507,6 +630,7 @@ class TrainRunner:
         if frame.height < SIM_MIN_BARS:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
         features = build_features(frame, self.settings.costs)
+        config = _read_json(run_dir / CONFIG_NAME)
         try:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
@@ -516,24 +640,40 @@ class TrainRunner:
         declared = policy.config.get("n_features")
         if declared is not None and int(declared) != width:
             raise TrainError(
-                f"run {run_id} was trained on {declared} features, "
-                f"the stored data produces {width}"
+                f"run {run_id} was trained on {declared} features, the stored data produces {width}"
             )
-        data_hash = data_hash_for(features)
+        expected_hash = self._expected_data_hash(run_dir, frame, config)
         run_data_hash = policy.config.get("data_hash")
-        if not isinstance(run_data_hash, str) or run_data_hash != data_hash:
+        if not isinstance(run_data_hash, str) or run_data_hash != expected_hash:
             raise TrainError(
                 f"run {run_id} was trained on different data: "
-                f"run data_hash {run_data_hash}, stored data_hash {data_hash}"
+                f"run data_hash {run_data_hash}, stored data_hash {expected_hash}"
             )
 
+        selector = self._load_selector(run_dir, config)
+        labels = label_events(frame, self.settings) if selector is not None else None
         try:
-            result = run_backtest(policy, features, self.settings, policy_name=run_id)
+            result = run_backtest(
+                policy,
+                features,
+                self.settings,
+                policy_name=run_id,
+                max_steps=max(len(features.ts) + 1, 1),
+                strategy_selector=selector,
+                labels=labels,
+            )
         except (TypeError, ValueError) as exc:
-            # A policy trained with the bandit context cannot act on the plain
-            # simulator observation; that is a mismatch, not a server fault.
             raise TrainError(f"run {run_id} cannot be replayed: {exc}") from exc
         metrics = metrics_payload(result.metrics)
+        train_end = config.get("train_end")
+        evaluated_end = features.ts[-1] if len(features.ts) else None
+        if train_end is None:
+            in_sample = True
+        elif evaluated_end is None:
+            in_sample = False
+        else:
+            last = np.datetime64(evaluated_end, "us").astype(datetime).replace(tzinfo=UTC)
+            in_sample = last <= _parsed_ts(str(train_end))
         report_path = run_dir / f"backtest-{_safe_name(symbol)}.json"
         write_json(
             report_path,
@@ -542,13 +682,102 @@ class TrainRunner:
                 "backtest_run_id": result.run_id,
                 "symbol": symbol,
                 "config_hash": result.config_hash,
-                "data_hash": data_hash,
+                "data_hash": data_hash_for(features),
                 "run_data_hash": run_data_hash,
+                "train_end": train_end,
+                "eval_start": config.get("eval_start"),
+                "in_sample": in_sample,
                 "created_at": _now(),
                 "metrics": metrics,
             },
         )
         return {"report_path": str(report_path), "metrics": metrics}
+
+    # -- evaluation ------------------------------------------------------
+
+    def evaluate(self, run_id: str, symbol: str) -> dict[str, Any]:
+        """Walk-forward and cost-stress a finished run on out-of-sample bars.
+
+        The evaluation window starts at the run's ``eval_start`` when the run was
+        trained with a split; otherwise the whole stored history is used. Features
+        are rebuilt inside every fold, so no fold sees another's bars, and a
+        strategy-aware policy gets its frozen bandit and per-window labels so the
+        observation width matches training. The report is written to
+        ``evaluation.json`` in the run directory.
+        """
+        run_dir = self._run_dir(run_id)
+        manifest = load_run(run_dir)
+        if manifest is None:
+            raise UnknownRunError(run_id)
+        with self._lock:
+            state = self._runs.get(run_id)
+        status = state.status if state is not None else str(manifest.get("status") or "unknown")
+        if status in LIVE_STATUSES:
+            raise TrainError(f"run {run_id} is not finished (status {status})")
+        if status == "failed":
+            raise TrainError(f"run {run_id} is failed; there is no policy to evaluate")
+
+        config = _read_json(run_dir / CONFIG_NAME)
+        try:
+            policy = load_policy(run_dir)
+        except (OSError, TypeError, ValueError) as exc:
+            raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
+        selector = self._load_selector(run_dir, config)
+
+        frame = self.store.read(symbol, TIMEFRAME)
+        eval_start = config.get("eval_start")
+        if isinstance(eval_start, str):
+            frame = frame.filter(pl.col("ts") >= _parsed_ts(eval_start))
+        if frame.height < SIM_MIN_BARS:
+            raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
+
+        try:
+            report = evaluate_walkforward(
+                policy,
+                frame,
+                self.settings,
+                folds=3,
+                strategy_selector=selector,
+            )
+            features = build_features(frame, self.settings.costs)
+            labels = label_events(frame, self.settings) if selector is not None else None
+            stress = cost_stress(
+                policy,
+                features,
+                self.settings,
+                strategy_selector=selector,
+                labels=labels,
+            )
+        except (TypeError, ValueError, RuntimeError) as exc:
+            raise TrainError(f"run {run_id} cannot be evaluated: {exc}") from exc
+
+        payload: dict[str, Any] = {
+            "run_id": run_id,
+            "symbol": symbol,
+            "eval_start": eval_start,
+            "created_at": _now(),
+            "folds": [_fold_payload(fold) for fold in report.folds],
+            "overall": metrics_payload(report.overall),
+            "overfit_warning": bool(report.overfit_warning),
+            "folds_requested": report.folds_requested,
+            "folds_produced": report.folds_produced,
+            "stress": [
+                {
+                    "multiplier": float(result.multiplier),
+                    "metrics": metrics_payload(result.metrics),
+                }
+                for result in stress
+            ],
+        }
+        report_path = run_dir / "evaluation.json"
+        write_json(report_path, payload)
+        return {
+            "report_path": str(report_path),
+            "folds": payload["folds"],
+            "overall": payload["overall"],
+            "overfit_warning": payload["overfit_warning"],
+            "stress": payload["stress"],
+        }
 
     # -- lifecycle -------------------------------------------------------
 

@@ -52,8 +52,9 @@ from scalping.backtest.engine import run_backtest
 from scalping.backtest.metrics import Metrics, compute
 from scalping.backtest.walkforward import Split, walkforward_split
 from scalping.config import Settings
-from scalping.env.simulator import WINDOW
+from scalping.env.simulator import WINDOW, ArmSelector
 from scalping.features.build import FeatureFrame, build_features
+from scalping.strategy.labeling import label_events
 from scalping.types import Trade
 
 __all__ = [
@@ -162,6 +163,14 @@ def _window_features(
     return build_features(window, settings.costs)
 
 
+def _window_labels(
+    df: pl.DataFrame, start: datetime, end: datetime, settings: Settings
+) -> pl.DataFrame:
+    """Label the same raw window; used only when a strategy selector is present."""
+    window = df.filter((pl.col("ts") >= start) & (pl.col("ts") < end))
+    return label_events(window, settings)
+
+
 def _empty_metrics(settings: Settings) -> Metrics:
     return compute([], np.empty(0, dtype=np.float64), float(settings.contract.initial_balance))
 
@@ -211,6 +220,7 @@ def evaluate_walkforward(
     settings: Settings,
     train_months: int = 6,
     folds: int = 3,
+    strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
 ) -> WalkForwardReport:
     """Evaluate ``policy`` out of sample on ``folds`` walk-forward windows.
 
@@ -219,10 +229,15 @@ def evaluate_walkforward(
     into ``overall``; the per-fold train and test expectancies feed the overfit
     warning. No retraining happens between folds in v1.
 
-    Each test run raises the simulator's step cap to the window length, so a
+    ``strategy_selector``, when given, is the frozen bandit a strategy-aware
+    policy expects: every window builds its own labels and passes the same
+    selector to the simulator, so the observation width matches training and
+    the context stays causal inside the window.
+
+    Each run raises the simulator's step cap to its window length, so a
     one-month M1 window (~29k bars) is evaluated end to end instead of stopping
-    at the legacy 20k default. The train run keeps the default cap: it only
-    supplies a signal for the trend and does not define coverage.
+    at the legacy 20k default. That applies to the train window too: its
+    expectancy is a full-window signal, not the first 20k bars of it.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -235,12 +250,31 @@ def evaluate_walkforward(
     for split in splits:
         train_features = _window_features(df, split.train.start, split.train.end, settings)
         test_features = _window_features(df, split.test.start, split.test.end, settings)
-        train_result = run_backtest(policy, train_features, settings)
+        train_labels = (
+            _window_labels(df, split.train.start, split.train.end, settings)
+            if strategy_selector
+            else None
+        )
+        test_labels = (
+            _window_labels(df, split.test.start, split.test.end, settings)
+            if strategy_selector
+            else None
+        )
+        train_result = run_backtest(
+            policy,
+            train_features,
+            settings,
+            max_steps=max(len(train_features.ts) + 1, 1),
+            strategy_selector=strategy_selector,
+            labels=train_labels,
+        )
         test_result = run_backtest(
             policy,
             test_features,
             settings,
             max_steps=max(len(test_features.ts) + 1, 1),
+            strategy_selector=strategy_selector,
+            labels=test_labels,
         )
         fold_results.append(
             FoldResult(
@@ -309,6 +343,8 @@ def cost_stress(
     features: FeatureFrame,
     settings: Settings,
     multipliers: Sequence[float] = (1, 2, 3),
+    strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
+    labels: pl.DataFrame | None = None,
 ) -> list[StressResult]:
     """Rerun ``policy`` with each cost multiplier and return the results.
 
@@ -317,7 +353,9 @@ def cost_stress(
     ``commission_per_lot`` multiplied. ``spread_floor`` alone cannot move a
     fill, because fills read ``FeatureFrame.spread``; each run therefore also
     receives a shallow frame copy with ``spread * multiplier``. Multipliers
-    must be finite and positive.
+    must be finite and positive. Each run's step cap is the frame length, so a
+    multi-month frame is stressed end to end. ``strategy_selector``/``labels``
+    mirror :func:`evaluate_walkforward` for a strategy-aware policy.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -330,7 +368,14 @@ def cost_stress(
     results: list[StressResult] = []
     for multiplier in values:
         stressed = _stressed_settings(settings, multiplier)
-        result = run_backtest(policy, _scaled_features(features, multiplier), stressed)
+        result = run_backtest(
+            policy,
+            _scaled_features(features, multiplier),
+            stressed,
+            max_steps=max(len(features.ts) + 1, 1),
+            strategy_selector=strategy_selector,
+            labels=labels,
+        )
         results.append(
             StressResult(multiplier=multiplier, metrics=result.metrics, trades=result.trades)
         )

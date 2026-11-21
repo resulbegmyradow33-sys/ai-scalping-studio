@@ -370,3 +370,39 @@ def test_every_label_gets_a_fresh_broker(monkeypatch):
     assert len(opened) == len(created)
     assert len(set(opened)) == len(opened)
     assert out.height <= len(created)
+
+
+def test_bandit_training_data_pairs_each_label_with_its_signal_row():
+    df = data()
+    features = build_features(df)
+    labels = label_events(df, Settings())
+    X, arms, rewards = labeling.bandit_training_data(features, labels)
+
+    assert X.ndim == 2 and X.shape[1] == CONTEXT_DIM
+    assert arms.shape == rewards.shape == (X.shape[0],)
+    assert X.shape[0] == labels.height
+    assert set(np.unique(arms)) <= set(range(len(ALL_STRATEGIES)))
+    assert np.isfinite(X).all() and np.isfinite(rewards).all()
+
+    context = context_matrix(features, labels=labels)
+    positions = {np.datetime64(stamp, "us"): index for index, stamp in enumerate(features.ts)}
+    for row, (label, arm, reward) in enumerate(
+        zip(labels.iter_rows(named=True), arms, rewards, strict=True)
+    ):
+        stamp = label["ts"]
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone(UTC).replace(tzinfo=None)
+        index = positions[np.datetime64(stamp, "us")]
+        assert np.array_equal(X[row], context[index])
+        assert arm == [s.value for s in ALL_STRATEGIES].index(label["strategy"])
+        assert reward == pytest.approx(label["r_multiple"])
+
+
+def test_bandit_training_data_is_empty_when_no_label_is_inside_the_frame():
+    df = data()
+    features = build_features(df)
+    labels = label_events(df, Settings())
+    outside = labels.with_columns(pl.col("ts") + pl.duration(days=30))
+    X, arms, rewards = labeling.bandit_training_data(features, outside)
+    assert X.shape == (0, CONTEXT_DIM)
+    assert arms.shape == rewards.shape == (0,)

@@ -43,6 +43,11 @@ class TradingEnv(gym.Env):
     ``start`` is the first decision bar of every episode, forwarded to the
     simulator. Training uses it to give each vectorised env a different slice of
     the same frame; the default keeps the historical behaviour.
+
+    ``random_start`` and ``seed`` are forwarded to the simulator: with
+    ``random_start=True`` every reset samples a new start from the usable range
+    with a construction-seeded RNG, so long training runs cover the whole frame
+    instead of replaying one window.
     """
 
     def __init__(
@@ -52,6 +57,8 @@ class TradingEnv(gym.Env):
         strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
         labels: pl.DataFrame | None = None,
         start: int | None = None,
+        random_start: bool = False,
+        seed: int = 0,
     ) -> None:
         super().__init__()
         self.sim = Simulator(
@@ -60,6 +67,8 @@ class TradingEnv(gym.Env):
             start=0 if start is None else start,
             strategy_selector=strategy_selector,
             labels=labels,
+            random_start=random_start,
+            seed=seed,
         )
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)

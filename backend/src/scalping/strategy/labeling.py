@@ -64,6 +64,7 @@ __all__ = [
     "CONTEXT_COLUMNS",
     "CONTEXT_DIM",
     "LABEL_COLUMNS",
+    "bandit_training_data",
     "context_matrix",
     "label_events",
     "strength_matrix",
@@ -344,9 +345,7 @@ def _bars_frame(features: FeatureFrame) -> pl.DataFrame:
     never reads it.
     """
     close = features.ohlc[:, 3]
-    spread = np.where(
-        np.isfinite(features.spread) & (features.spread >= 0.0), features.spread, 0.0
-    )
+    spread = np.where(np.isfinite(features.spread) & (features.spread >= 0.0), features.spread, 0.0)
     return pl.DataFrame(
         {
             "ts": pl.Series("ts", features.ts).cast(pl.Datetime("us")),
@@ -362,9 +361,7 @@ def _bars_frame(features: FeatureFrame) -> pl.DataFrame:
     )
 
 
-def _success_matrix(
-    outcomes: list[tuple[Strategy, int, float]], height: int
-) -> np.ndarray:
+def _success_matrix(outcomes: list[tuple[Strategy, int, float]], height: int) -> np.ndarray:
     """Causal 240-bar success rate per family, neutral when nothing resolved.
 
     ``success[t, arm]`` is the fraction of ``arm``'s labels that exited with a
@@ -405,9 +402,59 @@ def _utc(stamp: datetime) -> datetime:
 
 def _feature_stamps(features: FeatureFrame) -> list[datetime]:
     return [
-        np.datetime64(value, "us").astype(datetime).replace(tzinfo=UTC)
-        for value in features.ts
+        np.datetime64(value, "us").astype(datetime).replace(tzinfo=UTC) for value in features.ts
     ]
+
+
+def bandit_training_data(
+    features: FeatureFrame, labels: pl.DataFrame
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The ``(X, arms, rewards)`` batch an offline LinUCB fit consumes.
+
+    For every label whose signal bar exists in ``features`` and whose exit bar
+    is still inside the frame, this takes the context row of the **signal** bar
+    (the row the bandit would have seen when it chose), the arm index from the
+    frozen :data:`~scalping.strategy.signals.ALL_STRATEGIES` order, and the
+    label's ``r_multiple`` as the reward. Labels outside the frame are ignored,
+    matching :func:`context_matrix`. An empty result keeps the context width so
+    ``fit_offline`` accepts it as a no-op batch.
+    """
+    required = {"ts", "strategy", "bars", "r_multiple"}
+    missing = sorted(required - set(labels.columns))
+    if missing:
+        raise ValueError(f"labels missing columns: {missing}")
+
+    height = int(features.X.shape[0])
+    positions = {_utc(stamp): index for index, stamp in enumerate(_feature_stamps(features))}
+    arm_index = {strategy.value: index for index, strategy in enumerate(ALL_STRATEGIES)}
+
+    rows: list[int] = []
+    arms: list[int] = []
+    rewards: list[float] = []
+    for row in labels.iter_rows(named=True):
+        stamp = row["ts"]
+        if stamp is None:
+            continue
+        index = positions.get(_utc(stamp))
+        if index is None or index + int(row["bars"]) >= height:
+            continue
+        rows.append(index)
+        arms.append(arm_index[Strategy(row["strategy"]).value])
+        rewards.append(float(row["r_multiple"]))
+
+    context = context_matrix(features, labels=labels)
+    if not rows:
+        return (
+            np.zeros((0, CONTEXT_DIM), dtype=np.float64),
+            np.zeros(0, dtype=np.int64),
+            np.zeros(0, dtype=np.float64),
+        )
+    indices = np.asarray(rows, dtype=np.int64)
+    return (
+        context[indices],
+        np.asarray(arms, dtype=np.int64),
+        np.asarray(rewards, dtype=np.float64),
+    )
 
 
 def _outcomes_from_table(
@@ -456,22 +503,16 @@ def _atr_z_score(features: FeatureFrame, index: dict[str, int]) -> np.ndarray:
         .rolling_mean(window_size=_ATR_Z_WINDOW, min_samples=1)
         .shift(1)
         .alias("mean"),
-        pl.col("value")
-        .rolling_std(window_size=_ATR_Z_WINDOW, min_samples=2)
-        .shift(1)
-        .alias("std"),
+        pl.col("value").rolling_std(window_size=_ATR_Z_WINDOW, min_samples=2).shift(1).alias("std"),
     )
-    return (
-        work.select(
-            pl.when(pl.col("std") > 0.0)
-            .then((pl.col("value") - pl.col("mean")) / pl.col("std"))
-            .otherwise(0.0)
-            .fill_nan(0.0)
-            .fill_null(0.0)
-            .alias("z")
-        )["z"]
-        .to_numpy()
-    )
+    return work.select(
+        pl.when(pl.col("std") > 0.0)
+        .then((pl.col("value") - pl.col("mean")) / pl.col("std"))
+        .otherwise(0.0)
+        .fill_nan(0.0)
+        .fill_null(0.0)
+        .alias("z")
+    )["z"].to_numpy()
 
 
 def strength_matrix(features: FeatureFrame) -> np.ndarray:

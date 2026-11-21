@@ -32,10 +32,11 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
+import polars as pl
 
 from scalping.backtest.metrics import Metrics, compute
 from scalping.config import Settings
-from scalping.env.simulator import Simulator
+from scalping.env.simulator import ArmSelector, Simulator
 from scalping.features.build import FeatureFrame
 from scalping.types import Trade
 
@@ -136,6 +137,8 @@ def run_backtest(
     *,
     policy_name: str | None = None,
     max_steps: int | None = None,
+    strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
+    labels: pl.DataFrame | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -144,14 +147,23 @@ def run_backtest(
     identical lambdas share an id and a different body gets a different one.
     ``max_steps`` overrides the simulator's default step cap, so a caller can
     evaluate a window longer than :data:`~scalping.env.simulator.MAX_STEPS`
-    without truncating its tail.
+    without truncating its tail. ``strategy_selector`` and ``labels`` give the
+    simulator the +6 strategy context, so a policy trained with a frozen bandit
+    receives the observation width it expects.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
 
     label = _policy_label(policy, policy_name)
     identity = _policy_identity(policy, policy_name)
-    sim = Simulator(features, settings, strategy=label, max_steps=max_steps)
+    sim = Simulator(
+        features,
+        settings,
+        strategy=label,
+        max_steps=max_steps,
+        strategy_selector=strategy_selector,
+        labels=labels,
+    )
     obs = sim.reset(_SEED)
 
     equity: list[float] = []

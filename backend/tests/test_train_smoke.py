@@ -25,10 +25,17 @@ from scalping.data.synthetic import SyntheticProvider
 from scalping.env.trading_env import TradingEnv
 from scalping.features.build import FeatureFrame, build_features
 from scalping.rl.policy import load_policy
-from scalping.rl.registry import load_run, run_id_for
-from scalping.rl.train import TrainConfig, TrainResult, data_hash_for, env_starts_for, train
+from scalping.rl.registry import BANDIT_NAME, load_run, run_id_for
+from scalping.rl.train import (
+    TrainConfig,
+    TrainResult,
+    data_hash_for,
+    env_starts_for,
+    run_identity,
+    train,
+)
 from scalping.strategy.bandit import LinUCB
-from scalping.strategy.labeling import CONTEXT_DIM
+from scalping.strategy.labeling import CONTEXT_DIM, bandit_training_data, label_events
 from scalping.strategy.signals import ALL_STRATEGIES
 
 SYMBOL = "XAUUSD"
@@ -53,6 +60,8 @@ def _frame(seed: int = 5) -> FeatureFrame:
 
 
 def _train(tmp_path: Path, **overrides) -> TrainResult:
+    train_keys = {"stop_event", "pause_event", "train_end", "eval_start", "selector", "labels"}
+    train_kwargs = {key: overrides.pop(key) for key in list(overrides) if key in train_keys}
     fields = {
         "run_name": "smoke",
         "total_steps": 256,
@@ -62,7 +71,7 @@ def _train(tmp_path: Path, **overrides) -> TrainResult:
         "checkpoint_every": 256,
     }
     fields.update(overrides)
-    return train(TrainConfig(**fields), _frame(), Settings(), out_dir=tmp_path)
+    return train(TrainConfig(**fields), _frame(), Settings(), out_dir=tmp_path, **train_kwargs)
 
 
 def _wait_for_status(root: Path, status: str, timeout: float = 20.0) -> Path:
@@ -288,7 +297,9 @@ def test_config_records_settings_data_and_env_starts(trained_run):
     assert config["feature_columns"] == features.columns
     assert config["env_starts"] == env_starts_for(features, 1)
     assert config["initial_balance"] == Settings().contract.initial_balance
-    assert config["selector"] == {"enabled": False, "type": None}
+    assert config["selector"] == {"enabled": False, "type": None, "digest": None}
+    assert config["use_strategy"] is False
+    assert config["random_start"] is True
     for block in ("contract", "risk", "costs"):
         assert block in config, block
     assert config["normalisation"] == {
@@ -377,7 +388,11 @@ def test_frozen_bandit_is_saved_beside_the_model(tmp_path):
     config = json.loads((run_dir / "config.json").read_text())
     expected_dim = 60 * features.X.shape[1] + 5 + len(ALL_STRATEGIES) + 1
     assert config["obs_dim"] == expected_dim
-    assert config["selector"] == {"enabled": True, "type": "LinUCB"}
+    assert config["selector"] == {
+        "enabled": True,
+        "type": "LinUCB",
+        "digest": bandit.state_digest(),
+    }
     assert load_policy(run_dir).obs_dim == expected_dim
 
 
@@ -454,3 +469,125 @@ def test_pause_event_freezes_then_resumes(tmp_path):
     assert manifest["steps"] == results["result"].steps
     assert manifest["steps"] >= 2000
     assert paused["steps"] < manifest["steps"]
+
+
+def _selector(features: FeatureFrame, labels) -> LinUCB:
+    X, arms, rewards = bandit_training_data(features, labels)
+    return LinUCB(dim=CONTEXT_DIM).fit_offline(X, arms, rewards).freeze()
+
+
+@pytest.mark.slow
+def test_selector_adds_the_strategy_context_and_saves_the_bandit(tmp_path):
+    df = SyntheticProvider(seed=5).fetch(SYMBOL, START, END)
+    features = build_features(df)
+    labels = label_events(df, Settings())
+    selector = _selector(features, labels)
+    cfg = TrainConfig(
+        run_name="strategy",
+        total_steps=256,
+        n_envs=1,
+        n_steps=256,
+        batch_size=64,
+        checkpoint_every=256,
+    )
+    res = train(cfg, features, Settings(), selector=selector, labels=labels, out_dir=tmp_path)
+    run_dir = res.model_path.parent
+    config = json.loads((run_dir / "config.json").read_text())
+    assert config["obs_dim"] == 60 * features.X.shape[1] + 5 + len(ALL_STRATEGIES) + 1
+    assert config["use_strategy"] is True
+    assert config["selector"]["digest"] == selector.state_digest()
+    assert (run_dir / BANDIT_NAME).is_file()
+    assert load_policy(run_dir).obs_dim == config["obs_dim"]
+
+
+@pytest.mark.slow
+def test_no_selector_keeps_the_plain_observation_width(tmp_path):
+    res = _train(tmp_path)
+    run_dir = res.model_path.parent
+    config = json.loads((run_dir / "config.json").read_text())
+    features = _frame()
+    assert config["obs_dim"] == 60 * features.X.shape[1] + 5
+    assert config["use_strategy"] is False
+    assert not (run_dir / BANDIT_NAME).exists()
+
+
+@pytest.mark.slow
+def test_train_records_the_split_provenance(tmp_path):
+    res = _train(
+        tmp_path,
+        train_end="2026-01-07T00:00:00+00:00",
+        eval_start="2026-01-07T00:01:00+00:00",
+    )
+    config = json.loads((res.model_path.parent / "config.json").read_text())
+    manifest = load_run(res.model_path.parent)
+    assert config["train_end"] == "2026-01-07T00:00:00+00:00"
+    assert config["eval_start"] == "2026-01-07T00:01:00+00:00"
+    assert manifest["train_end"] == config["train_end"]
+    assert manifest["eval_start"] == config["eval_start"]
+    assert config["identity"]["split"] == {
+        "train_end": config["train_end"],
+        "eval_start": config["eval_start"],
+    }
+
+
+@pytest.mark.slow
+def test_bandit_state_changes_the_run_id():
+    features = _frame()
+    cfg = TrainConfig(run_name="digest", total_steps=256, n_envs=1, n_steps=256)
+    rng = np.random.default_rng(0)
+    arms = rng.integers(0, 5, size=50)
+    rewards = rng.normal(size=50)
+    a = LinUCB(dim=CONTEXT_DIM).fit_offline(rng.normal(size=(50, CONTEXT_DIM)), arms, rewards)
+    b = LinUCB(dim=CONTEXT_DIM).fit_offline(rng.normal(size=(50, CONTEXT_DIM)), arms, rewards)
+    id_a, identity_a = run_identity(cfg, features, Settings(), selector=a)
+    id_b, identity_b = run_identity(cfg, features, Settings(), selector=b)
+    assert id_a != id_b
+    assert identity_a["selector"]["digest"] == a.state_digest()
+    assert identity_b["selector"]["digest"] == b.state_digest()
+
+
+@pytest.mark.slow
+def test_zero_step_run_has_null_action_distribution_and_is_degenerate(tmp_path):
+    stop = threading.Event()
+    stop.set()
+    res = _train(tmp_path, stop_event=stop)
+    metrics = json.loads(res.metrics_path.read_text())
+    manifest = load_run(res.model_path.parent)
+    assert metrics["step"] == 0
+    assert metrics["action_dist"] is None
+    assert metrics["reward_mean_normalized"] == metrics["reward_mean"]
+    assert manifest["degenerate"] is True
+    assert manifest["baseline_hold_net_profit"] == pytest.approx(0.0)
+    assert manifest["reward_mean_normalized"] == metrics["reward_mean"]
+
+
+@pytest.mark.slow
+def test_manifest_records_random_start_and_sampled_start(trained_run, tmp_path):
+    _, features, result = trained_run
+    config = json.loads((result.model_path.parent / "config.json").read_text())
+    manifest = load_run(result.model_path.parent)
+    assert config["random_start"] is True
+    assert manifest["random_start"] is True
+    assert isinstance(manifest["sampled_start"], int)
+    first = features.valid_from + 60 - 1
+    assert first <= manifest["sampled_start"] <= len(features.X) - 1
+
+
+@pytest.mark.slow
+def test_unexpected_failure_writes_a_failed_manifest(tmp_path, monkeypatch):
+    import importlib
+
+    train_module = importlib.import_module("scalping.rl.train")
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(train_module.PPO, "learn", boom)
+    with pytest.raises(RuntimeError, match="kaboom"):
+        _train(tmp_path)
+
+    run_dirs = [path for path in tmp_path.iterdir() if path.is_dir()]
+    assert len(run_dirs) == 1
+    manifest = load_run(run_dirs[0])
+    assert manifest["status"] == "failed"
+    assert "kaboom" in manifest["error"]

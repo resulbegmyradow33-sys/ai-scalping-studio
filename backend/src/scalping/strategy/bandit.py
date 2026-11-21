@@ -51,6 +51,7 @@ path.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from collections.abc import Sequence
@@ -217,6 +218,31 @@ class LinUCB:
         index = self._arm(arm)
         design = self._design(self._context(x))
         return float(self._b[index] @ self._solve(index, design))
+
+    def freeze(self) -> LinUCB:
+        """Drop the exploration bonus: ``alpha = 0``, pure exploitation.
+
+        A fitted bandit used as the environment's frozen strategy selector must
+        not keep exploring; with the bonus still active an untried arm could win
+        a selection the offline fit never justified. Returns ``self``.
+        """
+        self.alpha = 0.0
+        return self
+
+    def state_digest(self) -> str:
+        """Digest of the fitted state: hyperparameters, pulls, ``A`` and ``b``.
+
+        Used by the run registry so two runs with differently fitted bandits do
+        not share a run id. ``alpha`` is included, so freezing a bandit changes
+        its digest.
+        """
+        digest = hashlib.sha256()
+        digest.update(np.float64(self.alpha).tobytes())
+        digest.update(np.float64(self.ridge).tobytes())
+        digest.update(np.ascontiguousarray(self._pulls, dtype=np.int64).tobytes())
+        digest.update(np.ascontiguousarray(self._A, dtype=np.float64).tobytes())
+        digest.update(np.ascontiguousarray(self._b, dtype=np.float64).tobytes())
+        return digest.hexdigest()
 
     def update(self, arm: int, x: np.ndarray | Sequence[float], reward: float) -> None:
         """Fold one observed ``(context, reward)`` pair into ``arm``."""

@@ -15,7 +15,7 @@ from scalping.backtest.metrics import compute
 from scalping.config import CostConfig, RiskConfig, Settings
 from scalping.data.csv_provider import CsvProvider
 from scalping.data.synthetic import SyntheticProvider
-from scalping.env.simulator import Simulator
+from scalping.env.simulator import WINDOW, Simulator
 from scalping.env.trading_env import TradingEnv
 from scalping.features.build import WARMUP, FeatureFrame, build_features
 
@@ -168,9 +168,7 @@ def test_equity_depletion_liquidates_the_open_trade():
     start = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
     ts = np.datetime64(start.replace(tzinfo=None), "us") + np.arange(n).astype("timedelta64[m]")
     close = np.full(n, 1000.0)
-    ohlc = np.column_stack(
-        [close, np.full(n, 1000.001), np.full(n, 999.999), close]
-    )
+    ohlc = np.column_stack([close, np.full(n, 1000.001), np.full(n, 999.999), close])
     ohlc[122] = (1000.0, 1000.0, 999.80, 999.80)  # deep red, but above the 999.725 stop
     frame = FeatureFrame(
         X=np.zeros((n, 3), dtype=np.float32),
@@ -608,3 +606,86 @@ def test_instance_max_steps_overrides_the_module_default():
 def test_max_steps_must_be_positive():
     with pytest.raises(ValueError, match="max_steps must be >= 1"):
         Simulator(flat_frame(300), Settings(), max_steps=0)
+
+
+def test_drawdown_penalty_is_charged_once_per_new_depth():
+    """Spec 10: a constant drawdown is taxed once, not on every hold bar."""
+    sim = Simulator(flat_frame(400), Settings())
+    sim.reset(seed=1)
+    sim._force_equity(9_000.0)  # 10% below the 10,000 peak, 7% beyond the limit
+
+    penalties = []
+    for _ in range(50):
+        _, reward, _, _, info = sim.step(0)
+        assert info["equity"] == pytest.approx(9_000.0)
+        penalties.append(reward)
+
+    nonzero = [value for value in penalties if abs(value) > 1e-12]
+    assert len(nonzero) == 1, "only the step that reaches the new depth pays"
+    assert nonzero[0] == pytest.approx(-50.0 * 0.07)
+
+
+def test_flat_policy_mean_reward_is_zero():
+    sim = Simulator(flat_frame(300), Settings())
+    sim.reset(seed=1)
+    rewards = []
+    while True:
+        result = sim.step(0)
+        rewards.append(result.reward)
+        if result.terminated or result.truncated:
+            break
+    assert np.mean(rewards) == 0.0
+    assert all(reward == 0.0 for reward in rewards)
+
+
+def test_drawdown_penalty_total_telescopes_over_a_monotone_decline():
+    sim = Simulator(flat_frame(400), Settings())
+    sim.reset(seed=1)
+    total = 0.0
+    for equity in (9_700.0, 9_600.0, 9_500.0, 9_400.0, 9_300.0, 9_200.0, 9_100.0, 9_000.0):
+        sim._force_equity(equity)
+        total += sim.step(0).reward
+
+    final_excess = 0.10 - 0.03
+    assert total == pytest.approx(-50.0 * final_excess)
+
+
+def test_random_start_is_seeded_reproducible_and_in_range():
+    frame = trend_frame(n=5_000, slope=-0.01, start=10_000.0)
+    a = Simulator(frame, Settings(), random_start=True, seed=3, max_steps=1_000)
+    b = Simulator(frame, Settings(), random_start=True, seed=3, max_steps=1_000)
+    starts_a, starts_b = [], []
+    for _ in range(6):
+        a.reset(seed=0)
+        starts_a.append(a.bar_index)
+        b.reset(seed=0)
+        starts_b.append(b.bar_index)
+
+    assert starts_a == starts_b
+    assert len(set(starts_a)) > 1
+    first = frame.valid_from + WINDOW - 1
+    upper = len(frame.X) - 1 - 1_000
+    assert all(first <= start <= upper for start in starts_a)
+    assert a.episode_start == starts_a[-1]
+
+
+def test_random_start_episode_runs_to_max_steps():
+    frame = trend_frame(n=5_000, slope=-0.01, start=10_000.0)
+    sim = Simulator(frame, Settings(), random_start=True, seed=4, max_steps=50)
+    sim.reset(0)
+    steps = 0
+    while True:
+        result = sim.step(0)
+        steps += 1
+        if result.terminated or result.truncated:
+            break
+    assert steps == 50
+    assert result.info["reason"] == "max_steps"
+
+
+def test_deterministic_start_remains_the_default():
+    frame = trend_frame(n=1_000, slope=-0.01, start=10_000.0)
+    sim = Simulator(frame, Settings())
+    sim.reset(0)
+    assert sim.bar_index == frame.valid_from + WINDOW - 1
+    assert sim.episode_start == sim.bar_index

@@ -22,6 +22,9 @@ __all__ = [
     "DataStatusResponse",
     "DownloadRequest",
     "DownloadResponse",
+    "EvaluateRequest",
+    "EvaluateResponse",
+    "FoldSummary",
     "HealthResponse",
     "OkResponse",
     "ProviderName",
@@ -30,6 +33,7 @@ __all__ = [
     "RunSummary",
     "StartRequest",
     "StartResponse",
+    "StressSummary",
     "TrainRequest",
     "TrainResponse",
     "TrainingPoint",
@@ -92,12 +96,18 @@ class OkResponse(BaseModel):
 
 
 class TrainRequest(BaseModel):
-    """Defaults match :class:`~scalping.rl.train.TrainConfig`."""
+    """Defaults match :class:`~scalping.rl.train.TrainConfig`.
+
+    ``train_end`` cuts the raw stored bars at that instant; the run trains only
+    on bars at or before it and records the first later bar as ``eval_start``.
+    """
 
     total_steps: int = Field(default=200_000, ge=1)
     n_envs: int = Field(default=2, ge=1)
     seed: int = Field(default=0, ge=0)
     symbol: str = Field(min_length=1)
+    use_strategy: bool = True
+    train_end: datetime | None = None
 
 
 class TrainResponse(BaseModel):
@@ -112,6 +122,9 @@ class RunSummary(BaseModel):
     created_at: str | None
     steps: int
     reward_mean: float | None
+    reward_mean_normalized: float | None = None
+    degenerate: bool | None = None
+    baseline_hold_net_profit: float | None = None
 
 
 class TrainingPoint(BaseModel):
@@ -155,3 +168,33 @@ class BacktestRequest(BaseModel):
 class BacktestResponse(BaseModel):
     report_path: str
     metrics: dict[str, Any]
+
+
+class EvaluateRequest(BaseModel):
+    run_id: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+
+
+class FoldSummary(BaseModel):
+    """One walk-forward window and the metrics of its test run."""
+
+    train_range: list[str]
+    test_range: list[str]
+    evaluated_range: list[str]
+    metrics: dict[str, Any]
+    train_expectancy: float | None = None
+
+
+class StressSummary(BaseModel):
+    """One cost multiplier and the metrics it produced."""
+
+    multiplier: float
+    metrics: dict[str, Any]
+
+
+class EvaluateResponse(BaseModel):
+    report_path: str
+    folds: list[FoldSummary]
+    overall: dict[str, Any]
+    overfit_warning: bool
+    stress: list[StressSummary]
