@@ -588,3 +588,23 @@ def test_max_steps_truncation_closes_the_open_position(monkeypatch):
     assert sim.balance == pytest.approx(equity[-1])
     assert sum(trade.pnl for trade in trades) == pytest.approx(equity[-1] - 10_000.0)
 
+
+def test_instance_max_steps_overrides_the_module_default():
+    sim = Simulator(flat_frame(300), Settings(), max_steps=40)
+    sim.reset(0)
+
+    steps = 0
+    while True:
+        result = sim.step(0)
+        steps += 1
+        if result.terminated or result.truncated:
+            break
+
+    assert steps == 40
+    assert sim.steps == 40
+    assert result.info["reason"] == "max_steps"
+
+
+def test_max_steps_must_be_positive():
+    with pytest.raises(ValueError, match="max_steps must be >= 1"):
+        Simulator(flat_frame(300), Settings(), max_steps=0)

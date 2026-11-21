@@ -4,8 +4,8 @@ v1 does not retrain between folds. :func:`evaluate_walkforward` evaluates the
 *same* callable out of sample on each fold's test window. That is deliberate:
 the policy under test is the frozen bandit/PPO pair from the earlier tasks, and
 retraining it per fold would change the thing being measured. The train window
-is still used for one short run whose normalised net profit is the per-fold
-train reward, so an in-sample/out-of-sample divergence can raise
+is still used for one short run whose per-trade expectancy is the per-fold
+train signal, so an in-sample/out-of-sample divergence can raise
 ``overfit_warning``.
 
 No look-ahead
@@ -30,14 +30,19 @@ Cost stress
 :func:`cost_stress` reruns the policy with ``spread_floor``,
 ``slippage_atr_frac`` and ``commission_per_lot`` scaled by each multiplier. It
 builds a new frozen :class:`~scalping.config.Settings` per run, so the caller's
-settings object is never mutated and needs no restore step.
+settings object is never mutated and needs no restore step. Because fills read
+the spread from the feature frame, not from settings, each run also gets a
+shallow copy of the frame whose ``spread`` array is multiplied by the same
+multiplier (``ask = bid + spread`` then follows automatically). The policy's
+``X`` matrix is left untouched: the stress models a wider broker quote, not a
+different market observation.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from math import isfinite
 
 import numpy as np
@@ -47,6 +52,7 @@ from scalping.backtest.engine import run_backtest
 from scalping.backtest.metrics import Metrics, compute
 from scalping.backtest.walkforward import Split, walkforward_split
 from scalping.config import Settings
+from scalping.env.simulator import WINDOW
 from scalping.features.build import FeatureFrame, build_features
 from scalping.types import Trade
 
@@ -63,8 +69,11 @@ __all__ = [
 class FoldResult:
     """One fold: its windows, test metrics and the trades the test run closed.
 
-    ``train_reward`` is the train run's net profit as a fraction of the initial
-    balance (percent return / 100), the scalar used for the overfit trend.
+    ``train_expectancy`` and ``test_expectancy`` (``metrics.expectancy_r``) are
+    per-trade R, so the two sides of the overfit trend share one unit.
+    ``evaluated_range`` is the span of bars the test run actually stepped
+    through: the first decision bar to the last frame bar. It is narrower than
+    ``test_range`` by the feature warm-up and any weekend/holiday boundary.
     ``equity`` is kept so the report can chain fold PnL into ``overall``; it is
     not part of the public contract.
     """
@@ -73,25 +82,41 @@ class FoldResult:
     test_range: tuple[datetime, datetime]
     metrics: Metrics
     trades: list[Trade]
-    train_reward: float
+    train_expectancy: float
     equity: np.ndarray
+    evaluated_range: tuple[datetime, datetime]
+
+    @property
+    def train_reward(self) -> float:
+        """Backward-compatible alias; the value is now per-trade expectancy in R."""
+        return self.train_expectancy
 
 
 @dataclass(frozen=True, slots=True)
 class WalkForwardReport:
     """Per-fold results, their aggregate and the overfit verdict.
 
-    ``train_reward_trend`` and ``test_expectancy_trend`` are least-squares
-    slopes over fold index. The warning fires only when train reward is rising
-    while test expectancy is falling, both strictly.
+    ``train_expectancy_trend`` and ``test_expectancy_trend`` are least-squares
+    slopes of per-trade expectancy (R) against fold index. Both sides use the
+    same unit. With three folds the slope is endpoint-based:
+    ``(y2 - y0) / 2``. The warning requires at least three folds and fires only
+    when train expectancy is rising while test expectancy is falling, both
+    strictly.
     """
 
     folds: list[FoldResult]
     overall: Metrics
     overfit_warning: bool
-    train_reward_trend: float = 0.0
+    folds_requested: int
+    folds_produced: int
+    train_expectancy_trend: float = 0.0
     test_expectancy_trend: float = 0.0
     train_months: int = 6
+
+    @property
+    def train_reward_trend(self) -> float:
+        """Backward-compatible alias; the value is now an expectancy slope in R."""
+        return self.train_expectancy_trend
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,12 +128,14 @@ class StressResult:
     trades: list[Trade]
 
 
-def _select_splits(df: pl.DataFrame, train_months: int, folds: int) -> list[Split]:
-    """Pick ``folds`` non-overlapping splits, shrinking train history if needed.
+def _select_splits(df: pl.DataFrame, train_months: int, folds: int) -> tuple[list[Split], int]:
+    """Pick ``folds`` non-overlapping splits and return them with the history used.
 
     A frame long enough for ``train_months`` keeps it. A shorter frame tries
     one month less at a time until enough folds fit; the selected folds are the
-    most recent ones.
+    most recent ones. When even a one-month train window cannot produce a
+    single test window, there is nothing to evaluate, so this raises instead of
+    returning an empty report that would look like a flat policy.
     """
     if int(folds) < 1:
         raise ValueError(f"folds must be >= 1, got {folds!r}")
@@ -116,11 +143,15 @@ def _select_splits(df: pl.DataFrame, train_months: int, folds: int) -> list[Spli
         raise ValueError(f"train_months must be >= 1, got {train_months!r}")
 
     candidates: list[Split] = []
+    used_months = int(train_months)
     for months in range(int(train_months), 0, -1):
         candidates = walkforward_split(df, train_months=months, val_months=1, test_months=1)
+        used_months = months
         if len(candidates) >= int(folds):
             break
-    return candidates[-int(folds) :] if candidates else []
+    if not candidates:
+        raise ValueError(f"not enough data for {int(folds)} folds")
+    return candidates[-int(folds) :], used_months
 
 
 def _window_features(
@@ -133,6 +164,19 @@ def _window_features(
 
 def _empty_metrics(settings: Settings) -> Metrics:
     return compute([], np.empty(0, dtype=np.float64), float(settings.contract.initial_balance))
+
+
+def _evaluated_range(
+    features: FeatureFrame, window: tuple[datetime, datetime]
+) -> tuple[datetime, datetime]:
+    """Span from the first decision bar to the last bar in ``features``."""
+    if len(features.ts) == 0:
+        return window
+    first = max(int(features.valid_from) + WINDOW - 1, WINDOW - 1)
+    first = min(first, len(features.ts) - 1)
+    start = features.ts[first].astype("datetime64[us]").astype(datetime).replace(tzinfo=UTC)
+    end = features.ts[-1].astype("datetime64[us]").astype(datetime).replace(tzinfo=UTC)
+    return (start, end)
 
 
 def _chain_equity(results: Sequence[FoldResult], initial: float) -> np.ndarray:
@@ -172,59 +216,78 @@ def evaluate_walkforward(
 
     Features are rebuilt inside each slice, so a fold's test run cannot see
     train bars and vice versa. Trades from every test window are aggregated
-    into ``overall``; the per-fold train and test series feed the overfit
+    into ``overall``; the per-fold train and test expectancies feed the overfit
     warning. No retraining happens between folds in v1.
+
+    Each test run raises the simulator's step cap to the window length, so a
+    one-month M1 window (~29k bars) is evaluated end to end instead of stopping
+    at the legacy 20k default. The train run keeps the default cap: it only
+    supplies a signal for the trend and does not define coverage.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
 
-    splits = _select_splits(df, train_months, folds)
+    splits, used_months = _select_splits(df, train_months, folds)
     initial = float(settings.contract.initial_balance)
     fold_results: list[FoldResult] = []
+    fold_ts: list[np.ndarray] = []
 
     for split in splits:
         train_features = _window_features(df, split.train.start, split.train.end, settings)
         test_features = _window_features(df, split.test.start, split.test.end, settings)
         train_result = run_backtest(policy, train_features, settings)
-        test_result = run_backtest(policy, test_features, settings)
+        test_result = run_backtest(
+            policy,
+            test_features,
+            settings,
+            max_steps=max(len(test_features.ts) + 1, 1),
+        )
         fold_results.append(
             FoldResult(
                 train_range=(split.train.start, split.train.end),
                 test_range=(split.test.start, split.test.end),
                 metrics=test_result.metrics,
                 trades=test_result.trades,
-                train_reward=float(train_result.metrics.net_profit) / initial,
+                train_expectancy=float(train_result.metrics.expectancy_r),
                 equity=test_result.equity,
+                evaluated_range=_evaluated_range(test_features, (split.test.start, split.test.end)),
             )
         )
+        fold_ts.append(np.asarray(test_features.ts))
 
     all_trades = [trade for fold in fold_results for trade in fold.trades]
+    combined_ts = np.concatenate(fold_ts) if fold_ts else None
     overall = (
-        compute(all_trades, _chain_equity(fold_results, initial), initial)
+        compute(all_trades, _chain_equity(fold_results, initial), initial, ts=combined_ts)
         if fold_results
         else _empty_metrics(settings)
     )
 
-    train_trend = _slope([fold.train_reward for fold in fold_results])
+    train_trend = _slope([fold.train_expectancy for fold in fold_results])
     test_trend = _slope([fold.metrics.expectancy_r for fold in fold_results])
+    enough_folds = len(fold_results) >= 3
     return WalkForwardReport(
         folds=fold_results,
         overall=overall,
-        overfit_warning=train_trend > 0.0 and test_trend < 0.0,
-        train_reward_trend=train_trend,
+        overfit_warning=enough_folds and train_trend > 0.0 and test_trend < 0.0,
+        folds_requested=int(folds),
+        folds_produced=len(fold_results),
+        train_expectancy_trend=train_trend,
         test_expectancy_trend=test_trend,
-        train_months=_selected_train_months(df, train_months, folds),
+        train_months=used_months,
     )
 
 
-def _selected_train_months(df: pl.DataFrame, train_months: int, folds: int) -> int:
-    """Report the train history actually used by :func:`_select_splits`."""
-    if int(folds) < 1 or int(train_months) < 1:
-        return int(train_months)
-    for months in range(int(train_months), 0, -1):
-        if len(walkforward_split(df, months, 1, 1)) >= int(folds):
-            return months
-    return 1
+def _scaled_features(features: FeatureFrame, multiplier: float) -> FeatureFrame:
+    """Shallow copy of ``features`` with only ``spread`` scaled.
+
+    Fills read the quote from the frame, so this is the lever that actually
+    widens the broker's spread. ``X`` stays as observed: the stress is a cost
+    change, not a different market.
+    """
+    if multiplier == 1.0:
+        return features
+    return replace(features, spread=np.asarray(features.spread, dtype=np.float64) * multiplier)
 
 
 def _stressed_settings(settings: Settings, multiplier: float) -> Settings:
@@ -251,7 +314,10 @@ def cost_stress(
 
     The caller's ``settings`` is never modified: each run gets a fresh frozen
     copy with ``spread_floor``, ``slippage_atr_frac`` and
-    ``commission_per_lot`` multiplied. Multipliers must be finite and positive.
+    ``commission_per_lot`` multiplied. ``spread_floor`` alone cannot move a
+    fill, because fills read ``FeatureFrame.spread``; each run therefore also
+    receives a shallow frame copy with ``spread * multiplier``. Multipliers
+    must be finite and positive.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -264,7 +330,7 @@ def cost_stress(
     results: list[StressResult] = []
     for multiplier in values:
         stressed = _stressed_settings(settings, multiplier)
-        result = run_backtest(policy, features, stressed)
+        result = run_backtest(policy, _scaled_features(features, multiplier), stressed)
         results.append(
             StressResult(multiplier=multiplier, metrics=result.metrics, trades=result.trades)
         )

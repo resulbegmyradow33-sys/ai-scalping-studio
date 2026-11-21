@@ -126,7 +126,8 @@ class Simulator:
     peak, ``opened`` is 1.0 only on the step that opens a position, and
     ``risk_ok`` is a one-time 1.0 on that same gate-approved step (flat, hold
     and close steps earn no shaping bonus). The episode terminates once equity reaches 80% of the initial balance and
-    truncates at ``MAX_STEPS`` or when the data ends; an open position is
+    truncates at ``max_steps`` (the constructor override, default
+    :data:`MAX_STEPS`) or when the data ends; an open position is
     force-closed with reason ``"liquidation"`` when equity depletion terminates
     the episode, and billed through a ``"data_end"`` or ``"max_steps"`` quote
     close before truncating, so an episode never ends with an open position.
@@ -146,9 +147,13 @@ class Simulator:
         strategy: str = "manual",
         strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
         labels: pl.DataFrame | None = None,
+        max_steps: int | None = None,
     ) -> None:
         self.features = features
         self.settings = settings
+        self.max_steps = MAX_STEPS if max_steps is None else int(max_steps)
+        if self.max_steps < 1:
+            raise ValueError(f"max_steps must be >= 1, got {max_steps!r}")
         self.risk = RiskEngine(settings.risk, settings.contract)
         self.strategy = strategy
         self._base_strategy = strategy
@@ -304,7 +309,7 @@ class Simulator:
             trade = self._close(self._bar(self._i), "liquidation")
             equity = self._equity()
 
-        if self.broker.position is not None and self.steps >= MAX_STEPS:
+        if self.broker.position is not None and self.steps >= self.max_steps:
             # Truncation must leave a flat, fully booked account: close through
             # the same quote path as ``data_end`` so balance == equity and every
             # dollar of PnL belongs to a trade.
@@ -330,7 +335,7 @@ class Simulator:
         truncated = False
         if self._terminated:
             reason = "equity_depleted"
-        elif self.steps >= MAX_STEPS:
+        elif self.steps >= self.max_steps:
             truncated = True
             reason = "max_steps"
         elif reason == "data_end":

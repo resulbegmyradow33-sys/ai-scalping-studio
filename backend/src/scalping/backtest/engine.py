@@ -135,19 +135,23 @@ def run_backtest(
     settings: Settings,
     *,
     policy_name: str | None = None,
+    max_steps: int | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
     ``policy_name`` overrides the derived policy identity in the run id. Without
     it, a lambda's qualname and bytecode hash form the identity, so two
     identical lambdas share an id and a different body gets a different one.
+    ``max_steps`` overrides the simulator's default step cap, so a caller can
+    evaluate a window longer than :data:`~scalping.env.simulator.MAX_STEPS`
+    without truncating its tail.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
 
     label = _policy_label(policy, policy_name)
     identity = _policy_identity(policy, policy_name)
-    sim = Simulator(features, settings, strategy=label)
+    sim = Simulator(features, settings, strategy=label, max_steps=max_steps)
     obs = sim.reset(_SEED)
 
     equity: list[float] = []
