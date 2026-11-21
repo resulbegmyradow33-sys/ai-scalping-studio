@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { SWRConfig } from "swr";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -36,7 +36,7 @@ const METRICS: Metrics = {
 
 function wrapper({ children }: { children: ReactNode }) {
   return (
-    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0, errorRetryCount: 0 }}>
+    <SWRConfig value={{ provider: () => new Map(), dedupingInterval: 0 }}>
       {children}
     </SWRConfig>
   );
@@ -89,20 +89,27 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
 describe("TrainingPage", () => {
   it("treats a 404 from /api/runs as an empty list without retrying", async () => {
+    vi.useFakeTimers();
     state.getRuns.mockRejectedValue(new ApiError(404, "Not Found"));
 
     render(<TrainingPage />, { wrapper });
 
-    expect(await screen.findByText("Henüz eğitim yok")).toBeInTheDocument();
+    // SWR's default retry waits 5 s; ten seconds must still be one request.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(screen.getByText("Henüz eğitim yok")).toBeInTheDocument();
     expect(
       screen.getByText("Eğitim başlatıldığında ölçümler burada görünecek."),
     ).toBeInTheDocument();
-    await waitFor(() => expect(state.getRuns).toHaveBeenCalledTimes(1));
+    expect(state.getRuns).toHaveBeenCalledTimes(1);
   });
 
   it("renders the newest run, four curves, five bandit rows and progress", async () => {
@@ -129,5 +136,46 @@ describe("TrainingPage", () => {
     const stop = screen.getByRole("button", { name: "Durdur" });
     expect(stop).toBeDisabled();
     expect(stop).toHaveAttribute("title", "Eğitim altyapısı henüz yok");
+  });
+
+  it("shows an unknown denominator and no completion claim without a total", async () => {
+    state.getRuns.mockResolvedValue([run("a", "2026-01-01T00:00:00Z")]);
+    state.getRun.mockResolvedValue(detail({ config: {}, total_steps: undefined, step: 50 }));
+
+    render(<TrainingPage />, { wrapper });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("training-progress")).toHaveTextContent("50 / —"),
+    );
+
+    const bar = screen.getByRole("progressbar", { name: "Eğitim ilerlemesi" });
+    expect(bar).not.toHaveAttribute("aria-valuenow");
+    expect(bar).not.toHaveAttribute("aria-valuemax");
+  });
+
+  it("clamps the progress bar when step exceeds total", async () => {
+    state.getRuns.mockResolvedValue([run("a", "2026-01-01T00:00:00Z")]);
+    state.getRun.mockResolvedValue(detail({ step: 150, total_steps: 100 }));
+
+    render(<TrainingPage />, { wrapper });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("training-progress")).toHaveTextContent("150 / 100"),
+    );
+
+    const bar = screen.getByRole("progressbar", { name: "Eğitim ilerlemesi" });
+    expect(bar).toHaveAttribute("aria-valuenow", "100");
+    expect(bar).toHaveAttribute("aria-valuemax", "100");
+  });
+
+  it("disables resume for a completed run", async () => {
+    state.getRuns.mockResolvedValue([run("a", "2026-01-01T00:00:00Z", "completed")]);
+    state.getRun.mockResolvedValue(detail({ status: "completed" }));
+
+    render(<TrainingPage />, { wrapper });
+
+    expect(await screen.findByRole("button", { name: "a" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Devam" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Durdur" })).toBeDisabled();
   });
 });

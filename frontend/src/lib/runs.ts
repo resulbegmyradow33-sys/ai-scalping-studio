@@ -6,13 +6,7 @@
  * an error, and a broken checkpoint is dropped instead of reaching an SVG.
  */
 
-import type { RunSummary } from "./types";
-
-/** Raw checkpoint as the training API will send it. */
-export interface TrainingPoint {
-  step: number;
-  value: number;
-}
+import type { RunSummary, TrainingPoint } from "./types";
 
 /** A chart-ready point: `step` renamed to `time` for a monotonic x axis. */
 export interface SeriesPoint {

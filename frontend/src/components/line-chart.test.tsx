@@ -35,14 +35,48 @@ describe("LineChart", () => {
     expect(coords(container)).toHaveLength(2);
   });
 
-  it("renders a single point without NaN coordinates", () => {
+  it("paints a single point as a circle instead of an invisible polyline", () => {
     const { container } = render(
       <LineChart title="Entropi" points={[{ time: 10, value: 1 }]} />,
     );
 
-    const points = coords(container);
-    expect(points).toHaveLength(1);
-    expect(points[0]).not.toMatch(/NaN/);
+    const circle = container.querySelector("circle");
+    expect(circle).not.toBeNull();
+    expect(circle?.getAttribute("cx")).not.toMatch(/NaN/);
+    expect(circle?.getAttribute("cy")).not.toMatch(/NaN/);
+    expect(container.querySelector("polyline")).toBeNull();
+  });
+
+  it("positions points by time, not by array index", () => {
+    const { container } = render(
+      <LineChart
+        title="Ödül"
+        points={[
+          { time: 0, value: 0 },
+          { time: 1, value: 1 },
+          { time: 100, value: 0 },
+        ]}
+      />,
+    );
+
+    const rendered = coords(container);
+    expect(rendered[0]).toBe("0.00,40.00");
+    expect(rendered[1]).toBe("1.00,0.00");
+    expect(rendered[2]).toBe("100.00,40.00");
+  });
+
+  it("centres a flat series on the middle line", () => {
+    const { container } = render(
+      <LineChart
+        title="Entropi"
+        points={[
+          { time: 0, value: 5 },
+          { time: 10, value: 5 },
+        ]}
+      />,
+    );
+
+    expect(coords(container)).toEqual(["0.00,20.00", "100.00,20.00"]);
   });
 
   it("exposes the title through the svg's accessible name", () => {

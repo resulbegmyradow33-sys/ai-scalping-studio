@@ -29,14 +29,20 @@ const NO_RETRY = { shouldRetryOnError: false } as const;
 const BUTTON_BASE =
   "rounded-sm border px-3 py-1.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
-function finite(value: number | undefined): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+function controlClass(enabled: boolean): string {
+  return enabled
+    ? `${BUTTON_BASE} border-slate-700 text-slate-300 hover:border-slate-600 hover:text-slate-100`
+    : `${BUTTON_BASE} cursor-not-allowed border-slate-800 text-slate-600`;
+}
+
+function finiteNumber(value: number | undefined): number | null {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 /** `total_steps` lives in the run config until the detail schema promotes it. */
-function configTotal(config: Record<string, unknown> | undefined): number {
+function configTotal(config: Record<string, unknown> | undefined): number | null {
   const value = config?.total_steps;
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 interface CurveCardProps {
@@ -61,6 +67,7 @@ function CurveCard({ label, points, color }: CurveCardProps) {
 
 export default function TrainingPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [controlError, setControlError] = useState<string | null>(null);
 
   const runsState = useSWR<RunSummary[]>(RUNS_KEY, api.getRuns, NO_RETRY);
   const runs = runsState.data ?? [];
@@ -83,14 +90,23 @@ export default function TrainingPage() {
   const entropy = toSeries(series?.entropy ?? []);
   const loss = toSeries(series?.loss ?? []);
 
-  const step = finite(detail?.step ?? selected?.steps);
-  const totalSteps = Math.max(
-    finite(detail?.total_steps) || configTotal(detail?.config),
-    0,
-  );
-  const progressMax = totalSteps > 0 ? totalSteps : 1;
-  const progressNow = Math.min(Math.max(step, 0), progressMax);
-  const progressPct = totalSteps > 0 ? (progressNow / totalSteps) * 100 : 0;
+  const status = detail?.status ?? selected?.status ?? "";
+
+  const step = finiteNumber(detail?.step ?? selected?.steps);
+  const totalSteps = finiteNumber(detail?.total_steps) ?? configTotal(detail?.config);
+  const totalValue = totalSteps ?? 0;
+  const hasTotal = totalValue > 0;
+  // Without a known total the bar is indeterminate: reporting `step / 1`
+  // would announce 100% for a run that may just have started.
+  const progressNow = hasTotal ? Math.min(Math.max(step ?? 0, 0), totalValue) : 0;
+  const progressPct = hasTotal ? (progressNow / totalValue) * 100 : 0;
+
+  const stopEnabled =
+    CONTROL_READY && (status === "running" || status === "paused");
+  const resumeEnabled =
+    CONTROL_READY && (status === "paused" || status === "stopped");
+  const stopTitle = CONTROL_READY ? "Bu koşu durdurulamaz" : CONTROL_TITLE;
+  const resumeTitle = CONTROL_READY ? "Bu koşu devam ettirilemez" : CONTROL_TITLE;
 
   const weights = detail?.bandit ?? [];
   const banditRows = BANDIT_STRATEGIES.map((strategy) => {
@@ -102,8 +118,13 @@ export default function TrainingPage() {
   });
 
   const handleControl = (action: RunControlAction): void => {
-    if (!CONTROL_READY || runId === null) return;
-    void api.controlRun(runId, action);
+    if (runId === null) return;
+    if (action === "stop" ? !stopEnabled : !resumeEnabled) return;
+
+    setControlError(null);
+    void api.controlRun(runId, action).catch(() => {
+      setControlError("Kontrol isteği gönderilemedi.");
+    });
   };
 
   return (
@@ -141,13 +162,13 @@ export default function TrainingPage() {
                   <span className="truncate font-mono text-sm text-slate-100">
                     {runId}
                   </span>
-                  {selected && <RunStatusChip status={detail?.status ?? selected.status} />}
+                  {selected && <RunStatusChip status={status} />}
                 </div>
                 <p
                   data-testid="training-progress"
                   className="text-xs tabular-nums text-slate-300"
                 >
-                  {formatNumber(step, 0)} / {formatNumber(totalSteps, 0)}
+                  {formatNumber(step, 0)} / {formatNumber(hasTotal ? totalValue : null, 0)}
                 </p>
               </div>
 
@@ -155,32 +176,37 @@ export default function TrainingPage() {
                 role="progressbar"
                 aria-label="Eğitim ilerlemesi"
                 aria-valuemin={0}
-                aria-valuemax={progressMax}
-                aria-valuenow={progressNow}
+                aria-valuemax={hasTotal ? totalValue : undefined}
+                aria-valuenow={hasTotal ? progressNow : undefined}
                 className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800"
               >
                 <div className="h-full bg-accent" style={{ width: `${progressPct}%` }} />
               </div>
 
-              <div className="mt-3 flex flex-wrap gap-2">
+              <div className="mt-3 flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={() => handleControl("stop")}
-                  disabled={!CONTROL_READY}
-                  title={CONTROL_TITLE}
-                  className={`${BUTTON_BASE} cursor-not-allowed border-slate-800 text-slate-600`}
+                  disabled={!stopEnabled}
+                  title={stopTitle}
+                  className={controlClass(stopEnabled)}
                 >
                   Durdur
                 </button>
                 <button
                   type="button"
                   onClick={() => handleControl("resume")}
-                  disabled={!CONTROL_READY}
-                  title={CONTROL_TITLE}
-                  className={`${BUTTON_BASE} cursor-not-allowed border-slate-800 text-slate-600`}
+                  disabled={!resumeEnabled}
+                  title={resumeTitle}
+                  className={controlClass(resumeEnabled)}
                 >
                   Devam
                 </button>
+                {controlError && (
+                  <p role="alert" className="text-xs text-loss">
+                    {controlError}
+                  </p>
+                )}
               </div>
             </div>
 
