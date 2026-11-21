@@ -46,7 +46,14 @@ from scalping.rl.registry import (
     save_manifest,
     write_json,
 )
-from scalping.rl.train import MIN_BARS, TrainConfig, run_identity, train
+from scalping.rl.train import (
+    MIN_BARS,
+    TrainConfig,
+    data_hash_for,
+    env_starts_for,
+    run_identity,
+    train,
+)
 from scalping.serialize import metrics_payload
 
 __all__ = [
@@ -60,8 +67,9 @@ __all__ = [
 
 logger = logging.getLogger(__name__)
 
-#: Statuses a control action can still change.
-LIVE_STATUSES: Final[frozenset[str]] = frozenset({"running", "paused"})
+#: Statuses of a run whose worker thread is still alive. ``stopping`` is the
+#: window between a stop request and the terminal ``interrupted`` manifest.
+LIVE_STATUSES: Final[frozenset[str]] = frozenset({"running", "paused", "stopping"})
 
 #: Seconds a lifespan shutdown waits for threads after asking them to stop.
 SHUTDOWN_TIMEOUT: Final[float] = 10.0
@@ -108,6 +116,16 @@ def _read_json(path: Path) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _steps(value: Any) -> int:
+    """Manifest step count as an int; a hand-edited value counts as zero."""
+    if isinstance(value, bool):
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 class TrainRunner:
     """Own the training threads and the ``runs/`` registry for one app."""
 
@@ -145,6 +163,13 @@ class TrainRunner:
         features = build_features(frame, self.settings.costs)
         if features.X.shape[0] < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
+
+        # Validate the env count here, with the trainer's own check: doing it in
+        # the worker would return 202 and then leave a half-created run behind.
+        try:
+            env_starts_for(features, n_envs)
+        except ValueError as exc:
+            raise TrainError(str(exc)) from exc
 
         config = TrainConfig(
             run_name=symbol,
@@ -269,6 +294,9 @@ class TrainRunner:
                     raise RunControlError(
                         f"cannot stop run {run_id} while it is {state.status}"
                     )
+                # Make the stop observable before the worker's terminal
+                # manifest lands; pause/resume no longer fit ``stopping``.
+                state.status = "stopping"
                 state.stop_event.set()
             else:  # pragma: no cover - the request schema only admits the three
                 raise RunControlError(f"unknown control action {action!r}")
@@ -302,7 +330,7 @@ class TrainRunner:
                     "run_id": run_id,
                     "status": live.get(run_id, str(manifest.get("status") or "unknown")),
                     "created_at": str(created_at) if created_at is not None else None,
-                    "steps": int(manifest.get("steps") or 0),
+                    "steps": _steps(manifest.get("steps")),
                     "reward_mean": manifest.get("reward_mean"),
                 }
             )
@@ -333,10 +361,27 @@ class TrainRunner:
     # -- backtest --------------------------------------------------------
 
     def backtest(self, run_id: str, symbol: str) -> dict[str, Any]:
-        """Replay one stored policy over the stored bars and write a report."""
+        """Replay one stored policy over the stored bars and write a report.
+
+        Only a finished run with a policy can be replayed. A live status
+        (``running``/``paused``/``stopping``) is a 409 because the worker is
+        still rewriting the run; ``failed`` is a 409 because there is no policy
+        to load. The stored bars must hash to the run's own ``data_hash`` — a
+        policy replayed on different prices would produce a report that looks
+        valid and means nothing.
+        """
         run_dir = self._run_dir(run_id)
-        if load_run(run_dir) is None:
+        manifest = load_run(run_dir)
+        if manifest is None:
             raise UnknownRunError(run_id)
+        with self._lock:
+            state = self._runs.get(run_id)
+        status = state.status if state is not None else str(manifest.get("status") or "unknown")
+        if status in LIVE_STATUSES:
+            raise TrainError(f"run {run_id} is not finished (status {status})")
+        if status == "failed":
+            raise TrainError(f"run {run_id} is failed; there is no policy to replay")
+
         frame = self.store.read(symbol, TIMEFRAME)
         if frame.height < SIM_MIN_BARS:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
@@ -345,12 +390,20 @@ class TrainRunner:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
             raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
+
         width = int(features.X.shape[1])
         declared = policy.config.get("n_features")
         if declared is not None and int(declared) != width:
             raise TrainError(
                 f"run {run_id} was trained on {declared} features, "
                 f"the stored data produces {width}"
+            )
+        data_hash = data_hash_for(features)
+        run_data_hash = policy.config.get("data_hash")
+        if not isinstance(run_data_hash, str) or run_data_hash != data_hash:
+            raise TrainError(
+                f"run {run_id} was trained on different data: "
+                f"run data_hash {run_data_hash}, stored data_hash {data_hash}"
             )
 
         try:
@@ -368,6 +421,8 @@ class TrainRunner:
                 "backtest_run_id": result.run_id,
                 "symbol": symbol,
                 "config_hash": result.config_hash,
+                "data_hash": data_hash,
+                "run_data_hash": run_data_hash,
                 "created_at": _now(),
                 "metrics": metrics,
             },
@@ -389,7 +444,11 @@ class TrainRunner:
         """Join every worker thread, waiting at most ``timeout`` seconds total."""
         with self._lock:
             threads = [
-                state.thread for state in self._runs.values() if state.thread is not None
+                state.thread
+                for state in self._runs.values()
+                # A thread whose ``start`` never ran has no ident and would make
+                # ``join`` raise; the start path removes that state anyway.
+                if state.thread is not None and state.thread.ident is not None
             ]
         deadline = time.monotonic() + timeout
         for thread in threads:

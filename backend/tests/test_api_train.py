@@ -138,6 +138,44 @@ def test_shutdown_stops_and_joins_live_threads(client, seed_data):
     _wait_status(client, run_id, {"interrupted"})
 
 
+def test_stop_moves_the_visible_status_off_running(client, seed_data):
+    r = client.post("/api/train", json=LONG_BODY)
+    run_id = r.json()["run_id"]
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "pause"}).status_code == 200
+    _wait_status(client, run_id, {"paused"})
+
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).json() == {"ok": True}
+    stopped = client.get(f"/api/runs/{run_id}").json()["status"]
+    # The worker may already have written ``interrupted``; it must never still
+    # report the run as controllable.
+    assert stopped in {"stopping", "interrupted"}, stopped
+    assert stopped != "paused"
+    assert client.get("/api/runs").json()[0]["status"] in {"stopping", "interrupted"}
+
+    detail = _wait_status(client, run_id, {"interrupted"})
+    assert detail["status"] == "interrupted"
+
+
+def test_pause_and_resume_after_stop_are_409(client, seed_data):
+    r = client.post("/api/train", json=LONG_BODY)
+    run_id = r.json()["run_id"]
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "pause"}).status_code == 200
+    _wait_status(client, run_id, {"paused"})
+    assert client.post(f"/api/runs/{run_id}/control", json={"action": "stop"}).status_code == 200
+
+    for action in ("pause", "resume"):
+        response = client.post(f"/api/runs/{run_id}/control", json={"action": action})
+        assert response.status_code == 409, action
+    _wait_status(client, run_id, {"interrupted"})
+
+
+def test_train_rejects_too_many_envs_before_reserving(client, seed_data, tmp_path):
+    r = client.post("/api/train", json={**BODY, "n_envs": 100_000})
+    assert r.status_code == 409
+    assert "n_envs 100000 exceeds" in r.json()["detail"]
+    assert not (tmp_path / "runs").exists()
+
+
 def test_control_unknown_run_404(client):
     r = client.post("/api/runs/nope/control", json={"action": "pause"})
     assert r.status_code == 404
@@ -204,6 +242,76 @@ def test_backtest_uses_the_stored_policy(client, seed_data, tmp_path):
 def test_backtest_unknown_run_404(client, seed_data):
     r = client.post("/api/backtest", json={"run_id": "nope", "symbol": "XAUUSD"})
     assert r.status_code == 404
+
+
+def test_backtest_rejects_a_run_that_is_still_training(client, seed_data):
+    r = client.post("/api/train", json=LONG_BODY)
+    run_id = r.json()["run_id"]
+
+    response = client.post("/api/backtest", json={"run_id": run_id, "symbol": "XAUUSD"})
+    assert response.status_code == 409
+    assert "not finished" in response.json()["detail"]
+
+    client.post(f"/api/runs/{run_id}/control", json={"action": "stop"})
+    _wait_status(client, run_id, {"interrupted"})
+
+
+def test_backtest_rejects_a_failed_run(client, tmp_path):
+    save_manifest(
+        tmp_path / "runs" / "dead",
+        {
+            "run_id": "dead",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "failed",
+            "steps": 0,
+            "reward_mean": None,
+        },
+    )
+    response = client.post("/api/backtest", json={"run_id": "dead", "symbol": "XAUUSD"})
+    assert response.status_code == 409
+    assert "failed" in response.json()["detail"]
+
+
+def test_backtest_rejects_mismatched_data(client, seed_data, tmp_path):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    other = SyntheticProvider(seed=99).fetch(
+        "XAUUSD", datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 8, tzinfo=UTC)
+    )
+    ParquetStore(tmp_path).write("XAUUSD", "M1", other)
+
+    response = client.post("/api/backtest", json={"run_id": run_id, "symbol": "XAUUSD"})
+    assert response.status_code == 409
+    assert "different data" in response.json()["detail"]
+
+
+def test_backtest_report_records_both_data_hashes(client, seed_data, tmp_path):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    body = client.post("/api/backtest", json={"run_id": run_id, "symbol": "XAUUSD"}).json()
+    stored = json.loads(Path(body["report_path"]).read_text())
+    assert stored["data_hash"] == stored["run_data_hash"]
+    assert len(stored["data_hash"]) == 64
+
+
+def test_listing_survives_a_non_numeric_step_count(client, tmp_path):
+    save_manifest(
+        tmp_path / "runs" / "odd",
+        {
+            "run_id": "odd",
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "completed",
+            "steps": "not-a-number",
+            "reward_mean": 0.1,
+        },
+    )
+    response = client.get("/api/runs")
+    assert response.status_code == 200
+    assert response.json()[0]["steps"] == 0
 
 
 def test_train_rejects_a_store_below_the_bar_floor(client, tmp_path):
