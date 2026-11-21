@@ -9,6 +9,7 @@ __pycache__/
 # data & artifacts (root-anchored: backend/src/scalping/data is source code)
 /data/
 /runs/
+/backend/runs/
 /e2e-data/
 *.parquet
 .env
