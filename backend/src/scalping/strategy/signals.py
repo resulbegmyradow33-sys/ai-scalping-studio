@@ -9,10 +9,10 @@ Rules
 -----
 ``momentum``
     ``close > ema20`` and ``close > close[-5]``, with expansion evidence:
-    ATR(14)/ATR(60) above ``1.1`` **or** the 5-bar displacement above ``1.1``
-    ATR. The displacement branch exists because a trend with a constant bar
-    range has an ATR ratio of exactly ``1.0``; without it a clean, steady trend
-    could never fire. Mirror for ``-1``.
+    ``max(ATR(14)/ATR(60), 5-bar displacement in ATR)`` above ``1.1``.
+    The displacement branch exists because a trend with a constant bar range
+    has an ATR ratio of exactly ``1.0``; without it a clean, steady trend
+    could never fire. Mirror for ``-1``. (Amended rule, see the plan.)
 ``reversal``
     RSI(14) above ``75`` on a bearish candle -> ``-1``; below ``25`` on a
     bullish candle -> ``+1``.
@@ -24,16 +24,25 @@ Rules
     the recovery is. Mirror for ``-1``.
 ``fvg``
     Price trading back into the nearest unfilled fair value gap
-    (:func:`~scalping.features.liquidity.fvg`), at most ``1.5`` ATR past the
+    (:func:`~scalping.features.liquidity.fvg`), less than ``1.5`` ATR past the
     near edge. Inside an up gap -> ``+1``, inside a down gap -> ``-1``.
 ``trend``
     A break of structure aligned with the running trend
-    (:func:`~scalping.features.structure.market_structure`) whose close sits
-    within ``0.5`` ATR of the bar extreme (a shallow pullback).
+    (:func:`~scalping.features.structure.market_structure`), **excluding**
+    change-of-character breaks (continuation only), whose close sits within
+    ``0.5`` ATR of the bar extreme (a shallow pullback). ``trend`` is ``bos``
+    forward filled, so the alignment conjunct alone is a tautology; the CHoCH
+    exclusion is what makes this a continuation filter.
 
 Causality: every expression is a backward window, a lag or an exponential
 seeded on the left edge. There is no ``shift(-n)``, no ``center=True`` and no
 statistic over the whole frame, so row ``i`` never depends on a bar after it.
+
+Non-finite prices are treated as unusable bars, not as evidence. Helpers are
+computed on a copy whose non-finite prices are nulled (so one bad bar cannot
+poison the EMA or the ATR for the rest of the frame), the signal predicate
+requires finite prices on the bar itself, and strength is dropped to ``0.0``
+if it is ever NaN or null.
 """
 
 from __future__ import annotations
@@ -83,6 +92,9 @@ STRENGTH_COLUMNS: tuple[str, ...] = tuple(f"strength_{s.value}" for s in ALL_STR
 #: Columns :func:`strategy_signals` needs from the bar frame.
 _REQUIRED_COLUMNS: tuple[str, ...] = ("ts", "open", "high", "low", "close")
 
+#: Columns an unusable bar may not leave non-finite.
+_PRICE_COLUMNS: tuple[str, ...] = ("open", "high", "low", "close")
+
 _MOMENTUM_EMA: int = 20
 _MOMENTUM_LOOKBACK: int = 5
 #: Expansion threshold shared by the ATR ratio and the ATR displacement.
@@ -108,9 +120,16 @@ def _over_atr(expr: pl.Expr) -> pl.Expr:
 
 
 def _pair(long: pl.Expr, short: pl.Expr, up: pl.Expr, down: pl.Expr) -> tuple[pl.Expr, pl.Expr]:
-    """Signal from the two sides; strength follows the side that fired."""
-    long = long.fill_null(False)
-    short = short.fill_null(False)
+    """Signal from the two sides; strength follows the side that fired.
+
+    A bar with a non-finite price abstains: Polars compares NaN above every
+    number (``close < NaN`` is true), so a raw predicate would fire on missing
+    inputs. Strength is NaN- and null-free before the cast because a NaN would
+    otherwise survive ``clip`` and compare above every float.
+    """
+    usable = pl.col("_finite")
+    long = long & usable
+    short = short & usable
     sig = pl.when(long).then(1).when(short).then(-1).otherwise(0)
     strength = (
         pl.when(long)
@@ -119,6 +138,8 @@ def _pair(long: pl.Expr, short: pl.Expr, up: pl.Expr, down: pl.Expr) -> tuple[pl
         .then(down)
         .otherwise(0.0)
         .clip(0.0, 1.0)
+        .fill_nan(None)
+        .fill_null(0.0)
     )
     return sig.cast(pl.Int8).alias("_sig"), strength.cast(pl.Float32).alias("_strength")
 
@@ -176,27 +197,43 @@ def _fvg() -> tuple[pl.Expr, pl.Expr]:
     dist = pl.col("_fvg_dist")
     prev = dist.shift(1)
     # Negative distance: price is inside an up gap. Positive: inside a down gap.
-    # Zero is the module's "no open gap" sentinel and never fires. Requiring the
-    # previous bar to sit outside the gap makes this a re-entry event instead of
-    # a level that stays lit for as long as price trades inside the zone.
-    up = (dist < 0.0) & (dist >= -_FVG_ATR_LIMIT) & (prev >= 0.0)
-    down = (dist > 0.0) & (dist <= _FVG_ATR_LIMIT) & (prev <= 0.0)
+    # Zero is the module's "no open gap" sentinel and never fires. The bounds are
+    # strict so a signal always carries positive evidence (strength > 0), and the
+    # previous bar must sit outside the gap, making this a re-entry event instead
+    # of a level that stays lit for as long as price trades inside the zone.
+    up = (dist < 0.0) & (dist > -_FVG_ATR_LIMIT) & (prev >= 0.0)
+    down = (dist > 0.0) & (dist < _FVG_ATR_LIMIT) & (prev <= 0.0)
     strength = (1.0 - dist.abs() / _FVG_ATR_LIMIT).clip(0.0, 1.0)
     return _pair(up, down, strength, strength)
 
 
 def _trend() -> tuple[pl.Expr, pl.Expr]:
-    """BOS in the trend direction with a shallow retracement on the bar."""
+    """BOS continuation in the trend direction with a shallow retracement."""
     close = pl.col("close")
     high = pl.col("high")
     low = pl.col("low")
     trend = pl.col("_trend")
     bos = pl.col("_bos")
+    # ``trend`` is ``bos`` forward filled, so ``trend == bos`` is a tautology on a
+    # break bar. Continuation means "not a change of character".
+    choch = pl.col("_choch")
     has_atr = pl.col("_atr14") > 0.0
     pullback_up = _over_atr(high - close)
     pullback_down = _over_atr(close - low)
-    up = (bos == 1) & (trend == 1) & has_atr & (pullback_up < _TREND_PULLBACK_ATR)
-    down = (bos == -1) & (trend == -1) & has_atr & (pullback_down < _TREND_PULLBACK_ATR)
+    up = (
+        (bos == 1)
+        & (trend == 1)
+        & (choch == 0)
+        & has_atr
+        & (pullback_up < _TREND_PULLBACK_ATR)
+    )
+    down = (
+        (bos == -1)
+        & (trend == -1)
+        & (choch == 0)
+        & has_atr
+        & (pullback_down < _TREND_PULLBACK_ATR)
+    )
     up_strength = 1.0 - pullback_up / _TREND_PULLBACK_ATR
     down_strength = 1.0 - pullback_down / _TREND_PULLBACK_ATR
     return _pair(up, down, up_strength, down_strength)
@@ -212,8 +249,14 @@ _RULES = {
 
 _EMPTY_SCHEMA: dict[str, pl.DataType | type[pl.DataType]] = {
     "ts": pl.Datetime("us", "UTC"),
-    **{name: pl.Int8 for name in SIGNAL_COLUMNS},
-    **{name: pl.Float32 for name in STRENGTH_COLUMNS},
+    **{
+        name: dtype
+        for strategy in ALL_STRATEGIES
+        for name, dtype in (
+            (f"sig_{strategy.value}", pl.Int8),
+            (f"strength_{strategy.value}", pl.Float32),
+        )
+    },
 }
 
 
@@ -221,16 +264,37 @@ def _empty_output() -> pl.DataFrame:
     return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
 
-def _work_frame(df: pl.DataFrame) -> pl.DataFrame:
-    """Attach every helper series the rules read, one row per input bar."""
+def _validate_columns(df: pl.DataFrame) -> None:
     missing = [name for name in _REQUIRED_COLUMNS if name not in df.columns]
     if missing:
         raise ValueError(f"missing bar columns: {missing}")
+
+
+def _work_frame(df: pl.DataFrame) -> pl.DataFrame:
+    """Attach every helper series the rules read, one row per input bar.
+
+    Helpers are computed on a sanitized copy: a non-finite price becomes null,
+    which the EWM and rolling windows skip instead of carrying forward. The
+    rules themselves read the original prices and are gated by ``_finite``, so
+    an unusable bar abstains without contributing half-truths.
+    """
     frame = df.sort("ts")
-    structure = market_structure(frame, 2).select(
-        pl.col("trend").alias("_trend"), pl.col("bos").alias("_bos")
+    usable = (
+        pl.col("open").is_finite()
+        & pl.col("high").is_finite()
+        & pl.col("low").is_finite()
+        & pl.col("close").is_finite()
+    ).fill_null(False)
+    clean = frame.with_columns(
+        pl.when(pl.col(name).is_finite()).then(pl.col(name)).otherwise(None).alias(name)
+        for name in _PRICE_COLUMNS
     )
-    gaps = fvg(frame).select(
+    structure = market_structure(clean, 2).select(
+        pl.col("trend").alias("_trend"),
+        pl.col("bos").alias("_bos"),
+        pl.col("choch").alias("_choch"),
+    )
+    gaps = fvg(clean).select(
         pl.col("fvg_dist").alias("_fvg_dist"),
         pl.col("fvg_up").alias("_fvg_up"),
         pl.col("fvg_down").alias("_fvg_down"),
@@ -238,10 +302,11 @@ def _work_frame(df: pl.DataFrame) -> pl.DataFrame:
     return pl.concat(
         [
             frame.with_columns(
-                atr(frame, 14).alias("_atr14"),
-                atr(frame, 60).alias("_atr60"),
-                rsi(frame, _REVERSAL_RSI_N).alias("_rsi14"),
-                liquidity_sweep(frame, _SWEEP_LOOKBACK).alias("_sweep_event"),
+                atr(clean, 14).alias("_atr14"),
+                atr(clean, 60).alias("_atr60"),
+                rsi(clean, _REVERSAL_RSI_N).alias("_rsi14"),
+                liquidity_sweep(clean, _SWEEP_LOOKBACK).alias("_sweep_event"),
+                usable.alias("_finite"),
             ),
             structure,
             gaps,
@@ -258,7 +323,11 @@ def strategy_signals(df: pl.DataFrame) -> pl.DataFrame:
     sorted by ``ts``. The result has one ``sig_<name>`` (``Int8`` in
     ``{-1, 0, 1}``) and one ``strength_<name>`` (``Float32`` in ``[0, 1]``,
     ``0.0`` wherever the signal is ``0``) per entry of :data:`ALL_STRATEGIES`.
+
+    A bar whose ``open``/``high``/``low``/``close`` is not finite produces no
+    signal (and therefore no strength) in any family.
     """
+    _validate_columns(df)
     if df.is_empty():
         return _empty_output()
     work = _work_frame(df)
