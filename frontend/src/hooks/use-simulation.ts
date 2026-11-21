@@ -24,6 +24,11 @@ function failureMessage(error: unknown): string {
   return error instanceof Error && error.message ? error.message : "unknown error";
 }
 
+/** HTTP status of a failed call; `0` means no response, null means unknown. */
+function failureStatus(error: unknown): number | null {
+  return error instanceof ApiError ? error.status : null;
+}
+
 /**
  * Live simulator feed over the backend WebSocket.
  *
@@ -214,7 +219,7 @@ export function useSimulation() {
       } catch (error) {
         bufferRef.current = [];
         startingRef.current = false;
-        dispatch({ type: "error", error: failureMessage(error) });
+        dispatch({ type: "error", error: failureMessage(error), status: failureStatus(error) });
       }
     },
     [dispatch, gate],
@@ -226,7 +231,7 @@ export function useSimulation() {
       try {
         await api.control({ action });
       } catch (error) {
-        dispatch({ type: "error", error: failureMessage(error) });
+        dispatch({ type: "error", error: failureMessage(error), status: failureStatus(error) });
       }
     },
     [dispatch],
@@ -238,10 +243,12 @@ export function useSimulation() {
     bars: snapshot.bars,
     position: snapshot.position,
     equity: snapshot.equity,
+    equityAnchor: snapshot.equityAnchor,
     trades: snapshot.trades,
     lastDecision: snapshot.lastDecision,
     riskBlocked: snapshot.riskBlocked,
     error: snapshot.error,
+    errorStatus: snapshot.errorStatus,
     start,
     control,
   };

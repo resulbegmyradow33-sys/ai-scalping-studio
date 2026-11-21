@@ -4,14 +4,14 @@ import type { TradeOpenPayload } from "@/lib/types";
 /**
  * The open position, or an explicit flat state. Unrealised PnL is not on the
  * wire yet: the backend sends account equity, so the card reports equity and
- * the session's day PnL instead of inventing a position PnL.
+ * the session's PnL instead of inventing a position PnL.
  */
 
 export interface PositionCardProps {
   position: TradeOpenPayload | null;
   equity: number | null;
-  /** Session change of equity in percent, already computed by the page. */
-  dayPnl: number | null;
+  /** Change of equity since the session's first frame, in percent. */
+  sessionPnl: number | null;
 }
 
 function pnlTone(value: number | null): string {
@@ -19,7 +19,7 @@ function pnlTone(value: number | null): string {
   return value > 0 ? "text-profit" : "text-loss";
 }
 
-export function PositionCard({ position, equity, dayPnl }: PositionCardProps) {
+export function PositionCard({ position, equity, sessionPnl }: PositionCardProps) {
   return (
     <section
       aria-labelledby="position-heading"
@@ -68,8 +68,8 @@ export function PositionCard({ position, equity, dayPnl }: PositionCardProps) {
         <dd className="tabular-nums text-slate-200">{formatMoney(equity)}</dd>
       </dl>
       <dl className="mt-1 flex items-baseline justify-between gap-2 text-xs">
-        <dt className="text-slate-400">Günlük PnL</dt>
-        <dd className={`tabular-nums ${pnlTone(dayPnl)}`}>{formatPct(dayPnl)}</dd>
+        <dt className="text-slate-400">Seans PnL</dt>
+        <dd className={`tabular-nums ${pnlTone(sessionPnl)}`}>{formatPct(sessionPnl)}</dd>
       </dl>
     </section>
   );

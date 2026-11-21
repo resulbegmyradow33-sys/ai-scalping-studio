@@ -32,11 +32,18 @@ export interface SimSnapshot {
   bars: BarPayload[];
   position: TradeOpenPayload | null;
   equity: EquityPayload[];
+  /**
+   * The session's first equity value. The buffer below is capped, so its head
+   * is not a valid baseline once 5 000 frames have been drawn.
+   */
+  equityAnchor: number | null;
   trades: TradeSummary[];
   lastDecision: DecisionPayload | null;
   /** Latest blocked action, mirrored from `decision.blocked` / `risk_blocked`. */
   riskBlocked: string | null;
   error: string | null;
+  /** HTTP status of the failed start/control call, or null when unknown. */
+  errorStatus: number | null;
 }
 
 export const initialSimSnapshot: SimSnapshot = {
@@ -47,16 +54,18 @@ export const initialSimSnapshot: SimSnapshot = {
   bars: [],
   position: null,
   equity: [],
+  equityAnchor: null,
   trades: [],
   lastDecision: null,
   riskBlocked: null,
   error: null,
+  errorStatus: null,
 };
 
 export type SimAction =
   | { type: "message"; message: SimMessage }
   | { type: "sessionAdopted"; sessionId: string }
-  | { type: "error"; error: string }
+  | { type: "error"; error: string; status?: number | null }
   | { type: "clearError" };
 
 /**
@@ -89,6 +98,7 @@ export function applySimMessage(state: SimSnapshot, message: SimMessage): SimSna
         bars: [],
         position: null,
         equity: [],
+        equityAnchor: null,
         trades: [],
         lastDecision: null,
         riskBlocked: null,
@@ -120,7 +130,14 @@ export function applySimMessage(state: SimSnapshot, message: SimMessage): SimSna
         trades: appendCapped(state.trades, message.payload, TRADE_LIMIT),
       };
     case "equity":
-      return { ...state, seq, equity: appendCapped(state.equity, message.payload, EQUITY_LIMIT) };
+      return {
+        ...state,
+        seq,
+        equity: appendCapped(state.equity, message.payload, EQUITY_LIMIT),
+        // The baseline is the session's first frame, fixed even after the cap
+        // drops it from the buffer.
+        equityAnchor: state.equityAnchor ?? message.payload.equity,
+      };
     case "decision":
       return {
         ...state,
@@ -151,7 +168,13 @@ export function simReducer(state: SimSnapshot, action: SimAction): SimSnapshot {
       // socket: adopt the epoch. The new stream restarts at seq 0. When a
       // previous session was known, a new episode must not append to the old
       // chart; when it was null the buffers hold nothing meaningful.
-      const adopted = { ...state, sessionId: action.sessionId, status: "running" as const, seq: 0 };
+      const adopted = {
+        ...state,
+        sessionId: action.sessionId,
+        status: "running" as const,
+        seq: 0,
+        equityAnchor: null,
+      };
       if (state.sessionId === null) return adopted;
       return {
         ...adopted,
@@ -164,8 +187,10 @@ export function simReducer(state: SimSnapshot, action: SimAction): SimSnapshot {
       };
     }
     case "error":
-      return { ...state, error: action.error };
+      return { ...state, error: action.error, errorStatus: action.status ?? null };
     case "clearError":
-      return state.error === null ? state : { ...state, error: null };
+      return state.error === null && state.errorStatus === null
+        ? state
+        : { ...state, error: null, errorStatus: null };
   }
 }

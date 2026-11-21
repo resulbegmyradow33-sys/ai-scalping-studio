@@ -33,10 +33,12 @@ function simulation(overrides: Record<string, unknown> = {}) {
     bars: [] as BarPayload[],
     position: null,
     equity: [] as EquityPayload[],
+    equityAnchor: null as number | null,
     trades: [],
     lastDecision: null,
     riskBlocked: null,
     error: null,
+    errorStatus: null as number | null,
     start: vi.fn(),
     control: vi.fn(),
     ...overrides,
@@ -69,16 +71,16 @@ describe("SimulatorPage", () => {
     expect(screen.getByText("—", { selector: "[data-testid=risk-blocked-value]" })).toBeInTheDocument();
   });
 
-  it("turns the equity curve into a signed, coloured day pnl", () => {
+  it("turns the equity curve into a signed, coloured session pnl", () => {
     const { rerender } = render(<SimulatorPage />);
-    state.simulation = simulation({ equity: [equity(10_000), equity(10_250)] });
+    state.simulation = simulation({ equity: [equity(10_000), equity(10_250)], equityAnchor: 10_000 });
     rerender(<SimulatorPage />);
 
     const gain = screen.getByTestId("day-pnl-value");
     expect(gain).toHaveTextContent("+%2,50");
     expect(gain).toHaveClass("text-profit");
 
-    state.simulation = simulation({ equity: [equity(10_000), equity(9_800)] });
+    state.simulation = simulation({ equity: [equity(10_000), equity(9_800)], equityAnchor: 10_000 });
     rerender(<SimulatorPage />);
 
     const loss = screen.getByTestId("day-pnl-value");
@@ -108,17 +110,104 @@ describe("SimulatorPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("keeps aria-live on the equity value and off the chart", () => {
-    state.simulation = simulation({ status: "running", equity: [equity(10_000), equity(10_050)] });
+  it("anchors the pnl to the session's first equity, not the capped buffer head", () => {
+    // The 5 000-entry buffer dropped the session's opening frame; `equity[0]`
+    // is now mid-session and must not define the baseline.
+    state.simulation = simulation({
+      equity: [equity(11_000), equity(11_100)],
+      equityAnchor: 10_000,
+    });
 
     render(<SimulatorPage />);
 
-    expect(screen.getByTestId("equity-value")).toHaveAttribute("aria-live", "polite");
+    const pnl = screen.getByTestId("day-pnl-value");
+    expect(pnl).toHaveTextContent("+%11,00");
+    expect(pnl).toHaveClass("text-profit");
+  });
+
+  it("labels the session change as Seans PnL in both places", () => {
+    render(<SimulatorPage />);
+
+    expect(screen.getByText("Seans PnL", { selector: "p" })).toBeInTheDocument();
+    expect(screen.getByText("Seans PnL", { selector: "dt" })).toBeInTheDocument();
+    expect(screen.queryByText("Günlük PnL")).not.toBeInTheDocument();
+  });
+
+  it("renders exactly 1234 as the bar count", () => {
+    const bars = Array.from({ length: 1_234 }, (_, index) => bar(2_300 + index / 100, index));
+    state.simulation = simulation({ bars });
+
+    render(<SimulatorPage />);
+
+    expect(screen.getByTestId("bar-count")).toHaveTextContent(/^1234$/);
+  });
+
+  it("shows the backend banner when health is not ok even without an error", () => {
+    state.health = { error: undefined, data: { status: "degraded", version: "0.1.0", device: "cpu" } };
+
+    render(<SimulatorPage />);
+
+    expect(
+      screen.getByText("Backend'e ulaşılamıyor (127.0.0.1:8000)"),
+    ).toBeInTheDocument();
+  });
+
+  it("uses the 409 status, not the prose, for the missing-data hint", () => {
+    state.simulation = simulation({
+      error: "Veri yok ama İngilizce bir hata",
+      errorStatus: 409,
+    });
+
+    render(<SimulatorPage />);
+
+    expect(
+      screen.getByText("Veri yok — Veri ekranından sentetik veri üret."),
+    ).toBeInTheDocument();
+  });
+
+  it("maps another 4xx to a generic Turkish message instead of backend English", () => {
+    state.simulation = simulation({
+      error: "Unprocessable Entity: speed must be positive",
+      errorStatus: 422,
+    });
+
+    render(<SimulatorPage />);
+
+    expect(
+      screen.getByText("İstek reddedildi — sunucu bu işlemi kabul etmedi."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/speed must be positive/)).not.toBeInTheDocument();
+  });
+
+  it("suppresses the start error banner while the health banner is shown", () => {
+    state.health = { error: new Error("down"), data: undefined };
+    state.simulation = simulation({ error: "fetch failed", errorStatus: 0 });
+
+    render(<SimulatorPage />);
+
+    expect(screen.getByText("Backend'e ulaşılamıyor (127.0.0.1:8000)")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("puts aria-live on the status chip instead of the streaming equity value", () => {
+    state.simulation = simulation({ status: "running", equity: [equity(10_000), equity(10_050)] });
+
+    const { rerender } = render(<SimulatorPage />);
+
+    expect(screen.getByTestId("equity-value")).not.toHaveAttribute("aria-live");
+    const chip = screen.getByTestId("status-chip");
+    expect(chip).toHaveAttribute("aria-live", "polite");
+    expect(chip).toHaveTextContent("Çalışıyor");
+
+    state.simulation = simulation({ status: "paused" });
+    rerender(<SimulatorPage />);
+
+    expect(screen.getByTestId("status-chip")).toHaveTextContent("Duraklatıldı");
     expect(screen.getByTestId("candle-chart-surface")).not.toHaveAttribute("aria-live");
   });
 
-  it("wires reset through the control channel", () => {
-    state.simulation = simulation({ status: "running" });
+  it("wires reset through the control channel when not running", () => {
+    state.simulation = simulation({ status: "paused" });
 
     render(<SimulatorPage />);
     fireEvent.click(screen.getByRole("button", { name: "Sıfırla" }));

@@ -512,6 +512,7 @@ describe("useSimulation — commands", () => {
       await result.current.start(1);
     });
     expect(result.current.error).toBe("no data");
+    expect(result.current.errorStatus).toBe(409);
 
     await act(async () => {
       await result.current.start(100);
@@ -524,6 +525,7 @@ describe("useSimulation — commands", () => {
       mode: "replay",
     } satisfies SimStartRequest);
     expect(result.current.error).toBeNull();
+    expect(result.current.errorStatus).toBeNull();
   });
 
   it("surfaces a start failure as error instead of throwing", async () => {

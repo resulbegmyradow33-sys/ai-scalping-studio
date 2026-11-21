@@ -87,8 +87,8 @@ export function SimControls({ status, onStart, onControl }: SimControlsProps) {
         <button
           type="button"
           onClick={() => onControl("reset")}
-          disabled={status === "idle"}
-          className={actionClass(status !== "idle")}
+          disabled={status === "running"}
+          className={actionClass(status !== "running")}
         >
           Sıfırla
         </button>

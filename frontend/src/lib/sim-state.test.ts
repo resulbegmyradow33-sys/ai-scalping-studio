@@ -251,8 +251,72 @@ describe("isNewSession", () => {
   });
 });
 
-describe("simReducer — sessionAdopted", () => {
-  it("keeps the buffers when no previous session was known", () => {
+describe("equityAnchor", () => {
+  it("anchors on the first equity frame and survives the buffer cap", () => {
+    let state: SimSnapshot = initialSimSnapshot;
+    for (let seq = 0; seq < EQUITY_LIMIT + 1; seq += 1) {
+      state = applySimMessage(state, equity(seq, 1_000 + seq));
+    }
+
+    expect(state.equity).toHaveLength(EQUITY_LIMIT);
+    expect(state.equity[0].equity).toBe(1_001);
+    // The buffer head moved, the session baseline did not.
+    expect(state.equityAnchor).toBe(1_000);
+  });
+
+  it("resets the anchor on a new session", () => {
+    const started = run(initialSimSnapshot, [status(), equity(1, 10_500)]);
+
+    const next = applySimMessage(started, status({ session_id: "bbbbbbbb", head_seq: 0 }));
+
+    expect(next.equityAnchor).toBeNull();
+
+    const reanchored = applySimMessage(next, equity(1, 12_000));
+    expect(reanchored.equityAnchor).toBe(12_000);
+  });
+
+  it("resets the anchor on server restart and on session adoption", () => {
+    const started = run(initialSimSnapshot, [status(), equity(1, 10_500)]);
+
+    const restarted = applySimMessage(
+      started,
+      status({ session_id: null, state: "idle", head_seq: 0 }),
+    );
+    expect(restarted.equityAnchor).toBeNull();
+
+    const adopted = simReducer(started, { type: "sessionAdopted", sessionId: "sess-B" });
+    expect(adopted.equityAnchor).toBeNull();
+  });
+
+  it("starts with no anchor", () => {
+    expect(initialSimSnapshot.equityAnchor).toBeNull();
+  });
+});
+
+describe("errorStatus", () => {
+  it("stores the HTTP status alongside the message", () => {
+    const next = simReducer(initialSimSnapshot, { type: "error", error: "no data", status: 409 });
+
+    expect(next.error).toBe("no data");
+    expect(next.errorStatus).toBe(409);
+  });
+
+  it("defaults a status-less failure to null", () => {
+    const next = simReducer(initialSimSnapshot, { type: "error", error: "fetch failed" });
+
+    expect(next.errorStatus).toBeNull();
+  });
+
+  it("clears both the message and the status", () => {
+    const failed = simReducer(initialSimSnapshot, { type: "error", error: "no data", status: 409 });
+    const cleared = simReducer(failed, { type: "clearError" });
+
+    expect(cleared.error).toBeNull();
+    expect(cleared.errorStatus).toBeNull();
+  });
+});
+
+describe("simReducer — sessionAdopted", () => {  it("keeps the buffers when no previous session was known", () => {
     const state = run(initialSimSnapshot, [bar(1)]);
 
     const next = simReducer(state, { type: "sessionAdopted", sessionId: "sess-A" });
