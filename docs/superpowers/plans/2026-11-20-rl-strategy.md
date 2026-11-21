@@ -371,7 +371,7 @@ git commit -m "feat(env): optional strategy context in observations"
 **Interfaces:**
 - Produces:
   - `TrainConfig(run_name: str, total_steps: int = 200_000, n_envs: int = 2, seed: int = 0, lr: float = 3e-4, n_steps: int = 1024, batch_size: int = 256, gamma: float = 0.99, ent_coef: float = 0.01, checkpoint_every: int = 10_000, data_hash: str = "")`
-  - `train(config: TrainConfig, features: FeatureFrame, settings: Settings, selector=None, out_dir: Path) -> TrainResult(run_id, model_path, metrics_path, steps, reward_mean)`; `features.X.shape[0] < 5_000` ise `ValueError("not enough bars: need 5000")`.
+  - `train(config: TrainConfig, features: FeatureFrame, settings: Settings, selector=None, out_dir: Path) -> TrainResult(run_id, model_path, metrics_path, steps, reward_mean)`; `features.X.shape[0] < 4_000` ise `ValueError("not enough bars: need 4000")` (3 günlük sentetik ≈ 4.320 bar; eşik 5.000 olsaydı planın kendi smoke testi düşerdi).
   - `TrainResult` + `runs/<run_id>/{model.zip, config.json, metrics.json, bandit.npz}`
   - `load_policy(run_dir: Path) -> PolicyWrapper` with `.act(obs: np.ndarray) -> int`
   - `MetricsCallback` writes `metrics.json` every checkpoint: `step, reward_mean, ep_len_mean, entropy_loss, policy_loss, value_loss, action_dist[4]`.
