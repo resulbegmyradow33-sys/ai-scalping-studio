@@ -16,7 +16,7 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="tr" className="dark">
-      <body className="bg-[#0B0F17] text-slate-200 antialiased">
+      <body className="bg-surface text-slate-200 antialiased">
         <AppShell>{children}</AppShell>
       </body>
     </html>

@@ -18,7 +18,7 @@ export function Nav() {
       <ul className="flex flex-wrap items-center gap-1">
         {items.map((item) => {
           const active =
-            item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+            pathname === item.href || pathname.startsWith(`${item.href}/`);
 
           return (
             <li key={item.href}>

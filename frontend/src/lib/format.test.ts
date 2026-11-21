@@ -7,6 +7,7 @@ describe("tr-TR formatting", () => {
   });
   it("formats money with currency", () => {
     expect(formatMoney(10000)).toBe("$10.000,00");
+    expect(formatMoney(-10000)).toBe("-$10.000,00");
   });
   it("formats percent with sign", () => {
     expect(formatPct(1.234)).toBe("+%1,23");
@@ -16,7 +17,8 @@ describe("tr-TR formatting", () => {
     expect(formatNumber(null)).toBe("—");
     expect(formatTs(null)).toBe("—");
   });
-  it("formats timestamps as DD.MM.YYYY HH:mm", () => {
-    expect(formatTs("2026-01-05T10:04:00Z")).toBe("05.01.2026 10:04");
+  it("formats timestamps as DD.MM.YYYY HH:mm in Istanbul time", () => {
+    expect(formatTs("2026-01-05T10:04:00Z")).toBe("05.01.2026 13:04");
+    expect(formatTs("2026-01-05T22:30:00Z")).toBe("06.01.2026 01:30");
   });
 });

@@ -17,6 +17,7 @@ function numberFormatter(digits: number): Intl.NumberFormat {
   return formatter;
 }
 
+// Fixed zone: server and browser must agree or the rendered text hydration-mismatches.
 const timestampFormatter = new Intl.DateTimeFormat(LOCALE, {
   day: "2-digit",
   month: "2-digit",
@@ -24,21 +25,20 @@ const timestampFormatter = new Intl.DateTimeFormat(LOCALE, {
   hour: "2-digit",
   minute: "2-digit",
   hourCycle: "h23",
-  // Backend timestamps are UTC; format in UTC so the output is stable across zones.
-  timeZone: "UTC",
+  timeZone: "Europe/Istanbul",
 });
 
-function isMissing(value: number | null): value is null {
-  return value === null || !Number.isFinite(value);
+function isPresent(value: number | null): value is number {
+  return value !== null && Number.isFinite(value);
 }
 
 export function formatNumber(value: number | null, digits = 2): string {
-  if (isMissing(value)) return DASH;
+  if (!isPresent(value)) return DASH;
   return numberFormatter(digits).format(value);
 }
 
 export function formatPct(value: number | null): string {
-  if (isMissing(value)) return DASH;
+  if (!isPresent(value)) return DASH;
   const sign = value > 0 ? "+" : value < 0 ? "-" : "";
   return `${sign}%${numberFormatter(2).format(Math.abs(value))}`;
 }
@@ -51,6 +51,7 @@ export function formatTs(ts: string | null): string {
 }
 
 export function formatMoney(value: number | null): string {
-  if (isMissing(value)) return DASH;
-  return `$${numberFormatter(2).format(value)}`;
+  if (!isPresent(value)) return DASH;
+  const sign = value < 0 ? "-" : "";
+  return `${sign}$${numberFormatter(2).format(Math.abs(value))}`;
 }

@@ -1,6 +1,8 @@
 @import "tailwindcss";
 
-@theme {
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme static {
   --color-surface: #0b0f17;
   --color-profit: #16a34a;
   --color-loss: #dc2626;
