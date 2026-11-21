@@ -1,9 +1,10 @@
 /**
  * One data provider in the store status grid.
  *
- * `GET /api/data/status` reports coverage for a symbol, not per provider, so
- * the row count and range on an active card describe the merged store; the
- * dot is the only provider-specific fact ("did this provider contribute?").
+ * `GET /api/data/status` reports coverage for a symbol, not per provider. An
+ * active card therefore shows the stored range but `—` for rows: attributing
+ * the symbol total to each contributing provider would be a lie. Inactive
+ * cards read `0 bar`.
  */
 
 import { formatNumber, formatTs } from "@/lib/format";
@@ -13,7 +14,8 @@ export interface ProviderCardProps {
   provider: ProviderName;
   label: string;
   active: boolean;
-  rows: number;
+  /** `null` when the provider contributed but the API has no per-provider split. */
+  rows: number | null;
   firstTs: string | null;
   lastTs: string | null;
 }
@@ -58,7 +60,7 @@ export function ProviderCard({
         data-testid={`provider-rows-${provider}`}
         className="text-sm font-medium tabular-nums text-slate-200"
       >
-        {formatNumber(rows, 0)} bar
+        {rows === null ? "—" : `${formatNumber(rows, 0)} bar`}
       </p>
     </article>
   );

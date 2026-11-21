@@ -61,15 +61,20 @@ describe("DataPage", () => {
     expect(screen.getByTestId("provider-card-csv")).toBeInTheDocument();
     expect(screen.getByTestId("provider-card-dukascopy")).toBeInTheDocument();
     expect(screen.getByText(/Henüz veri yok/)).toBeInTheDocument();
+    expect(screen.getByTestId("data-empty")).toBeInTheDocument();
     expect(screen.getAllByText("0 bar")).toHaveLength(3);
   });
 
-  it("shows the stored coverage and row count", () => {
+  it("shows the stored coverage, but not a per-provider row split", () => {
     statusHook.useDataStatus.mockReturnValue(statusState({ data: SEEDED }));
 
     render(<DataPage />);
 
-    expect(screen.getByTestId("provider-rows-synthetic")).toHaveTextContent("14.400 bar");
+    // The API has no per-provider breakdown, so an active card must not
+    // present the symbol total as that provider's own row count.
+    expect(screen.getByTestId("provider-rows-synthetic")).toHaveTextContent("—");
+    expect(screen.getByTestId("provider-rows-csv")).toHaveTextContent("0 bar");
+    expect(screen.getByText(/14\.400 bar/)).toBeInTheDocument();
     expect(screen.getByTestId("provider-range-synthetic")).toHaveTextContent("01.10.2024");
     expect(screen.getByTestId("provider-dot-synthetic")).toHaveAttribute(
       "data-state",
@@ -77,6 +82,19 @@ describe("DataPage", () => {
     );
     expect(screen.getByTestId("provider-dot-csv")).toHaveAttribute("data-state", "empty");
     expect(screen.queryByText(/Henüz veri yok/)).not.toBeInTheDocument();
+  });
+
+  it("renders only the status error on a backend failure", () => {
+    statusHook.useDataStatus.mockReturnValue(
+      statusState({ error: new ApiError(503, "backend down") }),
+    );
+
+    render(<DataPage />);
+
+    expect(screen.getByText("Veri durumu alınamadı (backend down).")).toBeInTheDocument();
+    expect(screen.queryByTestId("data-empty")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Henüz veri yok/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("provider-card-csv")).not.toBeInTheDocument();
   });
 
   it("will not submit an empty symbol", () => {
@@ -135,6 +153,12 @@ describe("DataPage", () => {
     expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
     expect(screen.queryByTestId("download-rows")).not.toBeInTheDocument();
 
+    // Changing the provider while the request is open must not clear the
+    // pending guard: the form would otherwise fire a second concurrent call.
+    fireEvent.change(screen.getByLabelText("Sağlayıcı"), { target: { value: "dukascopy" } });
+    expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
+    expect(screen.getByLabelText("Sağlayıcı")).toBeDisabled();
+
     resolveSecond({ rows: 120 });
     await waitFor(() =>
       expect(screen.getByTestId("download-rows")).toHaveTextContent("120"),
@@ -160,7 +184,8 @@ describe("DataPage", () => {
     expect(screen.queryByTestId("download-rows")).not.toBeInTheDocument();
   });
 
-  it("swaps the seed field for a path field on the csv provider", () => {
+  it("requires an absolute csv path and sends it in the body", async () => {
+    const download = vi.spyOn(api, "downloadData").mockResolvedValue({ rows: 5 });
     render(<DataPage />);
 
     fireEvent.change(screen.getByLabelText("Sağlayıcı"), { target: { value: "csv" } });
@@ -170,8 +195,21 @@ describe("DataPage", () => {
     expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
 
     fireEvent.change(screen.getByLabelText("CSV dosyası"), {
+      target: { value: "relative/xauusd.csv" },
+    });
+    expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
+    expect(screen.getByTestId("path-error")).toHaveTextContent(/mutlak/i);
+
+    fireEvent.change(screen.getByLabelText("CSV dosyası"), {
       target: { value: "/tmp/xauusd.csv" },
     });
+    expect(screen.queryByTestId("path-error")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "İndir" })).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "İndir" }));
+    await waitFor(() => expect(download).toHaveBeenCalledTimes(1));
+    expect(download.mock.calls[0][0]).toEqual(
+      expect.objectContaining({ provider: "csv", path: "/tmp/xauusd.csv", seed: null }),
+    );
   });
 });

@@ -9,7 +9,7 @@
  * reports the added rows, a failure shows the backend's `detail` verbatim.
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { CoverageBar } from "@/components/coverage-bar";
@@ -55,13 +55,21 @@ function errorDetail(error: unknown): string {
 export default function DataPage() {
   const [symbol, setSymbol] = useState("XAUUSD");
   const [provider, setProvider] = useState<ProviderName>("synthetic");
-  const [start, setStart] = useState(() => isoDay(-9));
-  const [end, setEnd] = useState(() => isoDay(0));
+  // Dates start empty so the prerendered HTML and the hydrated client agree;
+  // the first paint would otherwise bake the build day into the static page.
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
   const [seed, setSeed] = useState("7");
   const [path, setPath] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
+  const [pending, setPending] = useState(false);
   const [lastRows, setLastRows] = useState<number | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setStart(isoDay(-9));
+    setEnd(isoDay(0));
+  }, []);
 
   const cleanSymbol = symbol.trim();
   const statusState = useDataStatus(cleanSymbol);
@@ -78,15 +86,24 @@ export default function DataPage() {
           ? statusState.error.message
           : "bilinmeyen hata";
 
-  const busy = phase === "running";
-  const missingPath = provider === "csv" && path.trim() === "";
+  const busy = pending;
+  const cleanPath = path.trim();
+  const missingPath = provider === "csv" && cleanPath === "";
+  const relativePath =
+    provider === "csv" && cleanPath !== "" && !cleanPath.startsWith("/");
   const canSubmit =
-    cleanSymbol !== "" && start !== "" && end !== "" && !missingPath && !busy;
+    cleanSymbol !== "" &&
+    start !== "" &&
+    end !== "" &&
+    !missingPath &&
+    !relativePath &&
+    !busy;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
     if (!canSubmit) return;
 
+    setPending(true);
     setPhase("running");
     setLastRows(null);
     setDownloadError(null);
@@ -100,7 +117,7 @@ export default function DataPage() {
           start: `${start}T00:00:00Z`,
           end: `${end}T23:59:00Z`,
           seed: provider === "synthetic" && trimmedSeed !== "" ? Number(trimmedSeed) : null,
-          path: provider === "csv" ? path.trim() : null,
+          path: provider === "csv" ? cleanPath : null,
         });
         setLastRows(result.rows);
         setPhase("done");
@@ -109,6 +126,8 @@ export default function DataPage() {
       } catch (error) {
         setDownloadError(errorDetail(error));
         setPhase("error");
+      } finally {
+        setPending(false);
       }
     })();
   };
@@ -132,13 +151,11 @@ export default function DataPage() {
           <span className="text-xs tabular-nums text-slate-400">{cleanSymbol}</span>
         </div>
 
-        {statusDetail !== null && (
+        {statusDetail !== null ? (
           <p role="status" className="text-sm text-amber-200">
             Veri durumu alınamadı ({statusDetail}).
           </p>
-        )}
-
-        {cleanSymbol === "" ? (
+        ) : cleanSymbol === "" ? (
           <p className="text-sm text-slate-400">Sembol girerek kapsamı görüntüle.</p>
         ) : statusState.isLoading && status === undefined ? (
           <p className="text-sm text-slate-400">Yükleniyor…</p>
@@ -156,26 +173,32 @@ export default function DataPage() {
           </div>
         )}
 
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-          {PROVIDERS.map((item) => {
-            const active = providers.includes(item.id);
-            return (
-              <ProviderCard
-                key={item.id}
-                provider={item.id}
-                label={item.label}
-                active={active}
-                rows={active ? rows : 0}
-                firstTs={active ? (status?.first_ts ?? null) : null}
-                lastTs={active ? (status?.last_ts ?? null) : null}
-              />
-            );
-          })}
-        </div>
-        <p className="text-xs text-slate-500">
-          Kartlardaki aralık ve satır sayısı sembolün depo toplamıdır; nokta
-          sağlayıcının veriye katkısını gösterir.
-        </p>
+        {statusDetail === null && (
+          <>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              {PROVIDERS.map((item) => {
+                const active = providers.includes(item.id);
+                return (
+                  <ProviderCard
+                    key={item.id}
+                    provider={item.id}
+                    label={item.label}
+                    active={active}
+                    // The API has no per-provider row split, so an active
+                    // card cannot claim the symbol total as its own.
+                    rows={active ? null : 0}
+                    firstTs={active ? (status?.first_ts ?? null) : null}
+                    lastTs={active ? (status?.last_ts ?? null) : null}
+                  />
+                );
+              })}
+            </div>
+            <p className="text-xs text-slate-500">
+              Sağlayıcı kartlarındaki satır sayısı API sağlayıcı bazlı kırılım
+              vermediği için —; sembol toplamı üstteki kapsam satırındadır.
+            </p>
+          </>
+        )}
       </section>
 
       <form
@@ -199,12 +222,15 @@ export default function DataPage() {
             <select
               id="data-provider"
               value={provider}
+              disabled={busy}
               onChange={(event) => {
                 const next = event.target.value as ProviderName;
                 setProvider(next);
                 setLastRows(null);
                 setDownloadError(null);
-                setPhase("idle");
+                // A pending request still owns the form; only an idle form
+                // resets its job state on a provider switch.
+                if (!pending) setPhase("idle");
               }}
               className={FIELD_CLASS}
             >
@@ -286,8 +312,15 @@ export default function DataPage() {
                 autoComplete="off"
                 spellCheck={false}
                 placeholder="/yol/xauusd.csv"
+                aria-invalid={relativePath}
+                aria-describedby={relativePath ? "data-path-error" : undefined}
                 className={FIELD_CLASS}
               />
+              {relativePath && (
+                <p id="data-path-error" data-testid="path-error" className="text-xs text-rose-300">
+                  Mutlak bir yol girin (ör. /Users/adi/xauusd.csv).
+                </p>
+              )}
             </div>
           ) : (
             <p className="self-end pb-2 text-xs text-slate-400 sm:col-span-2">

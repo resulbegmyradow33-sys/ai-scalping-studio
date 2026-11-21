@@ -22,11 +22,14 @@ test("simulator streams bars and shows the data warning", async ({ page }) => {
   await expect(page.locator("[data-testid=last-price]")).toContainText(/2\.\d/);
 });
 
-test("data page survives an empty store", async ({ page }) => {
+test("data page shows the empty state for an unused symbol", async ({ page }) => {
   await page.goto("/data");
   await expect(page.getByRole("heading", { name: "Veri", exact: true })).toBeVisible();
-  // `e2e-backend` seeds XAUUSD for the simulator, so only the synthetic card
-  // has rows; csv and dukascopy render the zero state. With a truly empty
-  // store the page shows "Henüz veri yok" instead.
-  await expect(page.getByText(/Henüz veri yok|0 bar/i).first()).toBeVisible();
+
+  // The seeded backend makes XAUUSD non-empty, so query a symbol it cannot
+  // hold: this exercises the real empty branch instead of a zero-looking
+  // provider card. "0 bar" also proves inactive providers stay at zero.
+  await page.getByLabel("Sembol").fill("NOPE");
+  await expect(page.getByTestId("data-empty")).toBeVisible();
+  await expect(page.getByTestId("provider-rows-csv")).toHaveText("0 bar");
 });
