@@ -10,6 +10,7 @@ describe("SimMessage", () => {
       case "status": {
         expectTypeOf(message.payload).toEqualTypeOf<StatusPayload>();
         expectTypeOf(message.payload.head_seq).toEqualTypeOf<number>();
+        expectTypeOf(message.payload.session_id).toEqualTypeOf<string | null>();
         break;
       }
       case "bar": {

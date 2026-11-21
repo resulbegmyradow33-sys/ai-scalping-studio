@@ -37,7 +37,12 @@ export class ApiError extends Error {
 }
 
 function failureDetail(error: unknown): string {
-  if (error instanceof DOMException && error.name === "TimeoutError") {
+  // `AbortSignal.timeout` aborts with `TimeoutError`; some fetch stacks surface
+  // the abort as `AbortError` instead. Both mean the same thing to the caller.
+  if (
+    error instanceof DOMException &&
+    (error.name === "TimeoutError" || error.name === "AbortError")
+  ) {
     return "request timed out";
   }
   return error instanceof Error && error.message ? error.message : "network request failed";
@@ -53,6 +58,15 @@ async function errorDetail(response: Response): Promise<string> {
     if (typeof body === "object" && body !== null) {
       const detail = (body as { detail?: unknown }).detail;
       if (typeof detail === "string" && detail.length > 0) return detail;
+      // Pydantic validation errors send `detail` as [{loc, msg, type}].
+      if (Array.isArray(detail)) {
+        const messages = detail
+          .map((item) =>
+            typeof item === "object" && item !== null ? (item as { msg?: unknown }).msg : undefined,
+          )
+          .filter((msg): msg is string => typeof msg === "string" && msg.length > 0);
+        if (messages.length > 0) return messages.join("; ");
+      }
     }
   } catch {
     // Not JSON: fall through to the status line.
@@ -85,7 +99,15 @@ async function request<T>(
     throw new ApiError(response.status, await errorDetail(response));
   }
 
-  return (await response.json()) as T;
+  // Read text first: a 204/empty 200 must not become a JSON parse crash.
+  const text = await response.text();
+  if (text.length === 0) return undefined as T;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new ApiError(response.status, "invalid JSON response");
+  }
 }
 
 function post<T>(path: string, body: unknown, timeoutMs?: number): Promise<T> {
@@ -122,13 +144,31 @@ export const api = {
   },
 };
 
+/**
+ * Runtime mirror of the `SimMessage["type"]` union. `ReadonlySet<string>`
+ * keeps `has` cheap while the constructor still type-checks every literal.
+ */
+const SIM_MESSAGE_TYPES: ReadonlySet<string> = new Set<SimMessage["type"]>([
+  "status",
+  "bar",
+  "decision",
+  "trade_open",
+  "trade_close",
+  "equity",
+  "risk_blocked",
+  "episode_end",
+]);
+
 /** Validate an envelope in one place so the socket hook stays a switch. */
 export function isSimMessage(value: unknown): value is SimMessage {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as { seq?: unknown; type?: unknown; payload?: unknown };
   return (
     typeof candidate.seq === "number" &&
+    Number.isInteger(candidate.seq) &&
+    candidate.seq >= 0 &&
     typeof candidate.type === "string" &&
+    SIM_MESSAGE_TYPES.has(candidate.type) &&
     typeof candidate.payload === "object" &&
     candidate.payload !== null
   );

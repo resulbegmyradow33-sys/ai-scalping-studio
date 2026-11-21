@@ -137,7 +137,8 @@ export type SimState =
 export interface StatusPayload {
   state: SimState;
   symbol: string;
-  session_id: string;
+  /** Null until the first start/reset installs a session. */
+  session_id: string | null;
   head_seq: number;
 }
 
