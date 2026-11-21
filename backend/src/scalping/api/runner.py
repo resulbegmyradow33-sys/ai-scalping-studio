@@ -234,7 +234,8 @@ class SimulationRunner:
         with self._lock:
             return len(self._ring)
 
-    def _status_locked(self) -> dict[str, Any]:
+    def _status_locked(self, head_seq: int | None = None) -> dict[str, Any]:
+        """Status frame; ``head_seq`` defaults to the stream head."""
         return {
             "seq": 0,
             "type": "status",
@@ -242,7 +243,7 @@ class SimulationRunner:
                 "state": self._state,
                 "symbol": self._symbol,
                 "session_id": self._session_id,
-                "head_seq": self._seq,
+                "head_seq": self._seq if head_seq is None else head_seq,
             },
         }
 
@@ -280,11 +281,14 @@ class SimulationRunner:
                 conn.last_sent = min(conn.last_sent, self._seq)
                 return self._status_locked()
             if conn.session_id != self._session_id and conn.last_sent > 0:
-                # A start/reset rewound the sequence under a live client; the
-                # new session is announced before its first event.
+                # A start/reset rewound the sequence under a live client. The
+                # cursor goes back to 0 and the handshake advertises that same
+                # 0: a client using head_seq as its resume gate must not skip
+                # the visible start of the new session. The real head is not
+                # relevant, because this cursor will be sent every event.
                 conn.session_id = self._session_id
                 conn.last_sent = 0
-                return self._status_locked()
+                return self._status_locked(head_seq=0)
             conn.session_id = self._session_id
             return None
 
