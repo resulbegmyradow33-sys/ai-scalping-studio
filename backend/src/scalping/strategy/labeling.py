@@ -484,12 +484,20 @@ def strength_matrix(features: FeatureFrame) -> np.ndarray:
     not fire, matching the signal frame's own fill.
 
     Every input series is causal, so row ``t`` depends on bars at or before
-    ``t`` only. An empty frame returns a ``(0, 5)`` array.
+    ``t`` only. The rows are checked against the feature frame's ``ts`` before
+    they are returned: an unsorted frame would otherwise pair a row's strength
+    with another bar's features while still looking causal. An empty frame
+    returns a ``(0, 5)`` array.
     """
     height = int(features.X.shape[0])
     if height == 0:
         return np.zeros((0, len(ALL_STRATEGIES)), dtype=np.float32)
     signals = strategy_signals(_bars_frame(features))
+    stamps = signals["ts"].to_numpy()
+    if stamps.shape != (height,) or not np.array_equal(
+        stamps, features.ts.astype("datetime64[us]")
+    ):
+        raise ValueError("strength rows are not aligned with the feature frame")
     matrix = np.column_stack(
         [
             signals[f"strength_{strategy.value}"].to_numpy().astype(np.float32, copy=True)

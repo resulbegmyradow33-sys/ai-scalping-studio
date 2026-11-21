@@ -13,6 +13,7 @@ from typing import Any
 
 import gymnasium as gym
 import numpy as np
+import polars as pl
 from gymnasium import spaces
 
 from scalping.config import Settings
@@ -25,14 +26,19 @@ __all__ = ["TradingEnv"]
 class TradingEnv(gym.Env):
     """Single-position scalping environment over a :class:`FeatureFrame`.
 
-    ``strategy_selector``, when given, is called once per step with the bandit's
-    context row for the decision bar and returns an arm index (a position in
+    ``strategy_selector``, when given, is called once per decision bar with the
+    bandit's context row for that bar and returns an arm index (a position in
     :data:`~scalping.strategy.signals.ALL_STRATEGIES`). A bandit-like object
     with ``select(context)`` — :class:`~scalping.strategy.bandit.LinUCB` — is
     accepted in place of the callable. The observation gains that arm's one-hot
-    and its signal strength, and an entry made by the step is labelled with the
-    arm's name; without a selector the default label is ``"manual"``. The reset
-    observation carries an all-zero strategy block: no decision has been made.
+    and its signal strength, so the reset observation and every step describe
+    the arm of the bar they cover. An entry is labelled with the arm chosen for
+    its bar; without a selector the default label is ``"manual"``.
+
+    ``labels`` is the optional :func:`~scalping.strategy.labeling.label_events`
+    frame the context matrix's success columns are computed from. Training
+    should pass ``label_events(df, settings)`` so the context is priced with the
+    episode's account instead of the module default.
     """
 
     def __init__(
@@ -40,10 +46,10 @@ class TradingEnv(gym.Env):
         features: FeatureFrame,
         settings: Settings,
         strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
+        labels: pl.DataFrame | None = None,
     ) -> None:
         super().__init__()
-        self.sim = Simulator(features, settings, strategy_selector=strategy_selector)
-        self.strategy_selector = strategy_selector
+        self.sim = Simulator(features, settings, strategy_selector=strategy_selector, labels=labels)
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)
         self._obs = np.zeros(self.sim.obs_dim, dtype=np.float32)
