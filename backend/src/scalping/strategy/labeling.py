@@ -3,25 +3,34 @@
 Labeling
 --------
 Every bar on which a family fires gets **one** hypothetical trade for that
-family. The trade is opened at the *next* bar's executable quote — the ask for
-a long, the bid for a short — with the broker's ATR slippage, and it exits at
-the first stop, target or ``max_bars_in_trade`` bars. The exit, PnL, costs and
-``r_multiple`` all come from the same :class:`~scalping.env.broker.PaperBroker`
-the simulator and backtest use, so a label agrees with a paper backtest of the
-same signal by construction. Nothing about fills, gaps, commission or the
-stop-before-target rule is re-derived here.
+family. The trade opens at the **signal bar's** closing quote — the ask for a
+long, the bid for a short — with the broker's ATR slippage, and it exits at the
+first stop, target or ``max_bars_in_trade`` bars. Entry timing is the
+environment's, not the design document's earlier "next bar open":
+:class:`~scalping.env.simulator.Simulator` acts on the decision bar's close, and
+the bar schema carries no ask open, so a label that entered one bar later would
+price a trade the environment never takes. The exit, PnL, costs and
+``r_multiple`` all come from the same
+:class:`~scalping.env.broker.PaperBroker` the simulator uses, so a label's R is
+the R that fill sequence produces.
 
 A label whose hypothetical trade needs a bar past the end of the frame is
 dropped, not closed early: an unresolved trade has no honest R. Every label
 gets its own broker and the same starting equity, so no label can inherit state
 from the one before it.
 
-Timing: the signal is read at bar ``i``'s close. Entry is filled at bar
-``i + 1``'s closing quote (the first quote that exists after the decision) and
-the entry bar's own high/low are never tested against the stop, matching
-:class:`~scalping.env.simulator.Simulator`. Exits are evaluated from bar
-``i + 2`` onward, and ``bars`` counts those evaluation bars, so
-``exit_index == i + 1 + bars``.
+Timing detail: the entry bar's own high/low are never tested against the stop
+(they printed before the quote the entry was filled at). Exits are evaluated
+from the next bar onward, and ``bars`` counts those evaluation bars, so
+``exit_index == signal_index + bars``.
+
+Quotes
+------
+A broker CSV without ask quotes leaves ``ask_close`` and ``spread`` null. The
+frame is run through :func:`~scalping.features.prepare.prepare_bars`, the same
+spread model :func:`~scalping.features.build.build_features` uses, before any
+bar is built, so OHLC-only sources produce labels instead of a ``TypeError``.
+A frame missing a column outright still raises ``ValueError``.
 
 Context
 -------
@@ -35,7 +44,7 @@ the full frame.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from math import isfinite
 
 import numpy as np
@@ -47,6 +56,7 @@ from scalping.env.broker import PaperBroker
 from scalping.env.risk import RiskEngine
 from scalping.features.build import FEATURE_COLUMNS, FeatureFrame
 from scalping.features.indicators import atr
+from scalping.features.prepare import prepare_bars
 from scalping.strategy.signals import ALL_STRATEGIES, Strategy, strategy_signals
 from scalping.types import Bar, Side
 
@@ -97,7 +107,13 @@ _TREND_COLUMN: str = "trend"
 _SPREAD_ATR_COLUMN: str = "spread_norm"
 
 #: Trailing bars over which a family's realised success is averaged.
-_SUCCESS_WINDOW: int = 20
+_SUCCESS_WINDOW: int = 240
+
+#: Success shown when no exit of that family resolved in the window.
+_SUCCESS_NEUTRAL: float = 0.5
+
+#: Trailing bars used to standardise ``atr_pct``.
+_ATR_Z_WINDOW: int = 240
 
 #: Bandit context width: regime(3) + session(3) + 4 scalars + success(5).
 CONTEXT_COLUMNS: tuple[str, ...] = (
@@ -154,6 +170,11 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
     if frame.is_empty():
         return []
 
+    atr14 = atr(frame, _ATR_WINDOW).to_numpy()
+    # An OHLC-only source (null ask/spread) gets the feature layer's spread
+    # model before any bar is built, so a null quote cannot reach float().
+    frame = prepare_bars(frame, settings.costs, atr14)
+
     open_ = frame["open"].to_numpy()
     high = frame["high"].to_numpy()
     low = frame["low"].to_numpy()
@@ -172,7 +193,6 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
         & np.isfinite(spread)
         & np.isfinite(volume)
     )
-    atr14 = atr(frame, _ATR_WINDOW).to_numpy()
     stamps = frame["ts"].to_list()
     bars = [_bar(index, frame) for index in range(frame.height)]
 
@@ -190,16 +210,15 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
         atr_value = float(atr14[index])
         if not isfinite(atr_value) or atr_value <= 0.0:
             continue
-        entry_index = index + 1
-        if entry_index >= frame.height or not usable[entry_index]:
-            # No quote after the decision bar: the trade cannot be placed.
+        if index + 1 >= frame.height:
+            # No bar left to price the exit after the entry bar.
             continue
         for arm, strategy in enumerate(ALL_STRATEGIES):
             signal = int(signal_columns[arm][index])
             if signal == 0:
                 continue
             side = Side.LONG if signal > 0 else Side.SHORT
-            quote = ask[entry_index] if side is Side.LONG else bid[entry_index]
+            quote = ask[index] if side is Side.LONG else bid[index]
             slippage = costs.slippage_atr_frac * atr_value
             entry = quote + int(side) * slippage
             if not isfinite(entry) or entry <= 0.0:
@@ -213,16 +232,16 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
             broker.open(
                 side,
                 sizing.lot,
-                stamps[entry_index],
-                bid[entry_index],
-                ask[entry_index],
+                stamps[index],
+                bid[index],
+                ask[index],
                 sl,
                 tp,
                 strategy.value,
             )
             trade = None
             exit_index = -1
-            for current in range(entry_index + 1, frame.height):
+            for current in range(index + 1, frame.height):
                 if not usable[current]:
                     # A missing bar breaks the path; the label stays unresolved.
                     break
@@ -230,7 +249,7 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
                 if trade is not None:
                     exit_index = current
                     break
-                if risk.must_force_close(current - entry_index):
+                if risk.must_force_close(current - index):
                     trade = broker.close(bars[current], "timeout")
                     exit_index = current
                     break
@@ -245,7 +264,7 @@ def _labels(df: pl.DataFrame, settings: Settings) -> list[_Label]:
                     side=side,
                     entry=trade.entry,
                     exit=trade.exit,
-                    bars=exit_index - entry_index,
+                    bars=exit_index - index,
                     r_multiple=trade.r_multiple,
                     reason=trade.reason,
                     exit_index=exit_index,
@@ -269,10 +288,11 @@ def label_events(df: pl.DataFrame, settings: Settings) -> pl.DataFrame:
     ``side``
         ``1`` for a long, ``-1`` for a short.
     ``entry`` / ``exit``
-        Broker fill prices: next bar's ask/bid plus ATR slippage on entry, the
-        trigger level, gap open or liquidating quote on exit.
+        Broker fill prices: the signal bar's ask (long) or bid (short) plus ATR
+        slippage on entry, then the trigger level, gap open or liquidating
+        quote on exit.
     ``bars``
-        Bars between the entry bar and the exit bar; at most
+        Bars between the entry bar (the signal bar) and the exit bar; at most
         ``settings.risk.max_bars_in_trade``.
     ``r_multiple``
         ``pnl / (lot * contract.size * |entry - sl|)``, straight from the
@@ -341,23 +361,29 @@ def _bars_frame(features: FeatureFrame) -> pl.DataFrame:
     )
 
 
-def _success_matrix(labels: list[_Label], height: int) -> np.ndarray:
-    """Causal 20-bar success rate per family.
+def _success_matrix(
+    outcomes: list[tuple[Strategy, int, float]], height: int
+) -> np.ndarray:
+    """Causal 240-bar success rate per family, neutral when nothing resolved.
 
     ``success[t, arm]`` is the fraction of ``arm``'s labels that exited with a
-    positive R in bars ``t - 19 .. t``, or ``0.0`` when none exited there. A
-    label enters the series at its exit bar, the first bar on which its outcome
-    is observable, so row ``t`` never uses a trade that is still open.
+    positive R in bars ``t - 239 .. t``. A label enters the series at its exit
+    bar, the first bar on which its outcome is observable, so row ``t`` never
+    uses a trade that is still open. A window with no exit of that family reads
+    :data:`_SUCCESS_NEUTRAL` (``0.5``): "no evidence" is not "all failures",
+    which would teach the bandit to avoid an arm it has simply not seen.
     """
     success = np.zeros((height, len(ALL_STRATEGIES)), dtype=np.float64)
     for arm, strategy in enumerate(ALL_STRATEGIES):
         counts = np.zeros(height + 1, dtype=np.int64)
         wins = np.zeros(height + 1, dtype=np.int64)
-        for label in labels:
-            if label.strategy is not strategy:
+        for label_strategy, exit_index, r_multiple in outcomes:
+            if label_strategy is not strategy:
                 continue
-            counts[label.exit_index + 1] += 1
-            wins[label.exit_index + 1] += int(label.r_multiple > 0.0)
+            if not 0 <= exit_index < height:  # pragma: no cover - filtered upstream
+                continue
+            counts[exit_index + 1] += 1
+            wins[exit_index + 1] += int(r_multiple > 0.0)
         # prefix[m] = number of resolved labels with exit_index < m.
         prefix_counts = np.cumsum(counts)
         prefix_wins = np.cumsum(wins)
@@ -365,32 +391,113 @@ def _success_matrix(labels: list[_Label], height: int) -> np.ndarray:
         starts = np.maximum(0, rows - _SUCCESS_WINDOW + 1)
         resolved = prefix_counts[rows + 1] - prefix_counts[starts]
         won = prefix_wins[rows + 1] - prefix_wins[starts]
-        success[:, arm] = np.divide(
-            won, resolved, out=np.zeros(height, dtype=np.float64), where=resolved > 0
-        )
+        rates = np.full(height, _SUCCESS_NEUTRAL, dtype=np.float64)
+        np.divide(won, resolved, out=rates, where=resolved > 0)
+        success[:, arm] = rates
     return success
 
 
-def context_matrix(features: FeatureFrame) -> np.ndarray:
+def _utc(stamp: datetime) -> datetime:
+    """Timezone-aware UTC stamp; a naive value is read as UTC like ``conform_bars``."""
+    return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+
+
+def _feature_stamps(features: FeatureFrame) -> list[datetime]:
+    return [
+        np.datetime64(value, "us").astype(datetime).replace(tzinfo=UTC)
+        for value in features.ts
+    ]
+
+
+def _outcomes_from_table(
+    table: pl.DataFrame, features: FeatureFrame
+) -> list[tuple[Strategy, int, float]]:
+    """Turn a :func:`label_events` frame into ``(strategy, exit index, R)``.
+
+    Labels for a timestamp outside ``features`` are ignored (a caller may pass
+    the labels of a wider frame), and so are labels whose exit bar lies past the
+    frame: neither can be observed inside it.
+    """
+    required = {"ts", "strategy", "bars", "r_multiple"}
+    missing = sorted(required - set(table.columns))
+    if missing:
+        raise ValueError(f"labels missing columns: {missing}")
+    height = int(features.X.shape[0])
+    positions = {_utc(stamp): index for index, stamp in enumerate(_feature_stamps(features))}
+    outcomes: list[tuple[Strategy, int, float]] = []
+    for row in table.iter_rows(named=True):
+        stamp = row["ts"]
+        if stamp is None:
+            continue
+        index = positions.get(_utc(stamp))
+        if index is None:
+            continue
+        exit_index = index + int(row["bars"])
+        if exit_index >= height:
+            continue
+        outcomes.append((Strategy(row["strategy"]), exit_index, float(row["r_multiple"])))
+    return outcomes
+
+
+def _atr_z_score(features: FeatureFrame, index: dict[str, int]) -> np.ndarray:
+    """ATR/close standardised against the previous 240 bars.
+
+    The mean and standard deviation are shifted one bar, so the current bar does
+    not contribute to the window it is compared against (the same convention the
+    volatility-regime feature uses). A zero-variance or too-short history reads
+    ``0.0``.
+    """
+    values = pl.Series(
+        "atr_pct", features.X[:, index[_ATR_PCT_COLUMN]].astype(np.float64)
+    ).fill_nan(None)
+    work = pl.DataFrame({"value": values}).with_columns(
+        pl.col("value")
+        .rolling_mean(window_size=_ATR_Z_WINDOW, min_samples=1)
+        .shift(1)
+        .alias("mean"),
+        pl.col("value")
+        .rolling_std(window_size=_ATR_Z_WINDOW, min_samples=2)
+        .shift(1)
+        .alias("std"),
+    )
+    return (
+        work.select(
+            pl.when(pl.col("std") > 0.0)
+            .then((pl.col("value") - pl.col("mean")) / pl.col("std"))
+            .otherwise(0.0)
+            .fill_nan(0.0)
+            .fill_null(0.0)
+            .alias("z")
+        )["z"]
+        .to_numpy()
+    )
+
+
+def context_matrix(features: FeatureFrame, labels: pl.DataFrame | None = None) -> np.ndarray:
     """The bandit's ``(T, CONTEXT_DIM)`` context, one row per feature row.
 
     Column order is :data:`CONTEXT_COLUMNS`: a one-hot of the volatility regime
     (down/flat/up), a one-hot of the session (Asia/London/New York; the hours
-    after 21:00 UTC set none), ATR as a fraction of price, RSI/100, the trend
-    state, spread/ATR, and per family the share of its labels that finished
-    positive over the trailing 20 bars.
+    after 21:00 UTC set none), ATR/close as a causal 240-bar z-score
+    (the current bar is not part of the window; zero variance reads ``0.0``),
+    RSI/100, the trend state, spread/ATR, and per family the share of its labels
+    that finished positive among the exits of the trailing 240 bars.
+
+    ``labels`` is an optional :func:`label_events` frame. Passing it avoids
+    recomputing every hypothetical trade here, which matters once the caller
+    already labeled the same frame. When it is ``None`` the labels are rebuilt
+    from the feature bars with default :class:`~scalping.config.Settings`
+    (10 000 initial balance, 0.5% risk, 120-bar limit); a ``FeatureFrame``
+    carries no account, so the success indicator has no caller settings to use.
+    Pass ``labels=label_events(df, settings)`` to make the indicator match a
+    specific account. Rows with no exit of that family in the window read the
+    neutral ``0.5``, never ``0.0``.
 
     Everything is causal. The scalar columns are copied from the feature
     builder's backward-looking matrix, and the success columns only consume a
-    label once its exit bar has printed. Warm-up rows (before the feature
-    matrix is valid) carry neutral values instead of NaN: ``0`` for the
-    continuous columns and ``0.5`` for RSI. An empty frame returns a
-    ``(0, CONTEXT_DIM)`` array.
-
-    A ``FeatureFrame`` carries no account, so the labels behind the success
-    columns are resolved with default :class:`~scalping.config.Settings`
-    (10 000 initial balance, 0.5% risk, 120-bar limit). They are a success
-    indicator, not a PnL report; :func:`label_events` is the priced output.
+    label once its exit bar has printed. Warm-up rows carry neutral values
+    instead of NaN: ``0`` for the continuous columns and ``0.5`` for RSI. An
+    empty frame returns a ``(0, CONTEXT_DIM)`` array.
     """
     height = int(features.X.shape[0])
     if height == 0:
@@ -401,7 +508,7 @@ def context_matrix(features: FeatureFrame) -> np.ndarray:
     regime = np.clip(regime, -1, 1)
     scalars = np.column_stack(
         [
-            _feature_column(features, index, _ATR_PCT_COLUMN, 0.0),
+            _atr_z_score(features, index),
             np.clip(_feature_column(features, index, _RSI_COLUMN, 0.5), 0.0, 1.0),
             np.clip(_feature_column(features, index, _TREND_COLUMN, 0.0), -1.0, 1.0),
             _feature_column(features, index, _SPREAD_ATR_COLUMN, 0.0),
@@ -411,8 +518,14 @@ def context_matrix(features: FeatureFrame) -> np.ndarray:
         [_feature_column(features, index, name, 0.0) for name in _SESSION_COLUMNS]
     )
 
-    labels = _labels(_bars_frame(features), Settings())
-    success = _success_matrix(labels, height)
+    if labels is None:
+        outcomes = [
+            (label.strategy, label.exit_index, label.r_multiple)
+            for label in _labels(_bars_frame(features), Settings())
+        ]
+    else:
+        outcomes = _outcomes_from_table(labels, features)
+    success = _success_matrix(outcomes, height)
 
     matrix = np.column_stack(
         [
