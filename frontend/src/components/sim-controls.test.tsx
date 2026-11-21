@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { SimControls } from "./sim-controls";
+import { SimControls, formatDataSources } from "./sim-controls";
 
 const dataStatus = vi.hoisted(() => ({
   useDataStatus: vi.fn(),
@@ -94,7 +94,7 @@ describe("SimControls", () => {
     render(controls());
 
     expect(
-      screen.getByText("Veri kaynağı: synthetic, csv — Gerçek para değil."),
+      screen.getByText("Veri kaynağı: sentetik, CSV · Gerçek para değil"),
     ).toBeInTheDocument();
     expect(dataStatus.useDataStatus).toHaveBeenCalledWith("XAUUSD");
   });
@@ -131,5 +131,21 @@ describe("SimControls", () => {
     expect(resume).toBeEnabled();
     fireEvent.click(resume);
     expect(onControl).toHaveBeenCalledWith("resume");
+  });
+});
+
+describe("formatDataSources", () => {
+  it("maps provider ids to Turkish display labels", () => {
+    expect(formatDataSources(["synthetic", "csv", "csv_no_spread", "dukascopy"])).toBe(
+      "sentetik, CSV, CSV, Dukascopy",
+    );
+  });
+
+  it("passes an unknown provider id through unchanged", () => {
+    expect(formatDataSources(["oanda", "synthetic"])).toBe("oanda, sentetik");
+  });
+
+  it("falls back to bilinmiyor without providers", () => {
+    expect(formatDataSources([])).toBe("bilinmiyor");
   });
 });

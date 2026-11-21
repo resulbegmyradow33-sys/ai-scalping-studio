@@ -29,6 +29,20 @@ export interface SimControlsProps {
   onControl: (action: ControlAction) => void;
 }
 
+/** Wire provider ids → display labels; unknown ids stay readable as-is. */
+const PROVIDER_LABELS: Readonly<Record<string, string>> = {
+  synthetic: "sentetik",
+  csv: "CSV",
+  csv_no_spread: "CSV",
+  dukascopy: "Dukascopy",
+};
+
+/** `["synthetic", "csv"]` → `sentetik, CSV`; no providers → `bilinmiyor`. */
+export function formatDataSources(providers: readonly string[]): string {
+  if (providers.length === 0) return "bilinmiyor";
+  return providers.map((id) => PROVIDER_LABELS[id] ?? id).join(", ");
+}
+
 const BUTTON_BASE =
   "rounded-sm border px-3 py-1.5 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent";
 
@@ -55,7 +69,7 @@ export function SimControls({ status, symbol, onStart, onControl }: SimControlsP
   // The data page owns the same SWR key, so this is not a second poll loop;
   // SWR dedupes and shares the 30 s refresh.
   const providers = useDataStatus(symbol).data?.providers ?? [];
-  const source = providers.length > 0 ? providers.join(", ") : "bilinmiyor";
+  const source = formatDataSources(providers);
 
   const running = status === "running";
   const paused = status === "paused";
@@ -104,7 +118,7 @@ export function SimControls({ status, symbol, onStart, onControl }: SimControlsP
 
       <div className="flex flex-wrap items-center gap-3">
         <p className="text-xs text-slate-400">
-          Veri kaynağı: {source} — Gerçek para değil.
+          Veri kaynağı: {source} · Gerçek para değil
         </p>
         <div role="group" aria-label="Oynatma hızı" className="flex items-center gap-1">
           {SPEEDS.map((option) => (
