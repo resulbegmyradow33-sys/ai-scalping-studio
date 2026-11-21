@@ -117,11 +117,39 @@ export interface RunSummary {
   reward_mean: number | null;
 }
 
+/** One checkpoint of a training curve; `step` is the x axis. */
+export interface TrainingPoint {
+  step: number;
+  value: number;
+}
+
+/** Training curves; every series is optional until the RL API fills them. */
+export interface TrainingSeries {
+  reward: TrainingPoint[];
+  episode_length: TrainingPoint[];
+  entropy: TrainingPoint[];
+  loss: TrainingPoint[];
+}
+
+/** LinUCB arm weight; one row per strategy in `BANDIT_STRATEGIES`. */
+export interface BanditWeight {
+  strategy: string;
+  weight: number;
+}
+
+/** `pause` / `resume` / `stop` for a training run. */
+export type RunControlAction = "pause" | "resume" | "stop";
+
 /** `GET /api/runs/{id}`; config is free-form run metadata. */
 export interface RunDetail {
   config: Record<string, unknown>;
   metrics: Metrics;
   status: string;
+  /** Present once the RL training API lands; absent on the current backend. */
+  step?: number;
+  total_steps?: number;
+  series?: Partial<TrainingSeries>;
+  bandit?: BanditWeight[];
 }
 
 // --- WebSocket ---------------------------------------------------------------

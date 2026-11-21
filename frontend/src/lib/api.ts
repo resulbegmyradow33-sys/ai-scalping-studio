@@ -4,6 +4,7 @@ import type {
   DownloadResponse,
   Health,
   OkResponse,
+  RunControlAction,
   RunDetail,
   RunSummary,
   SimControl,
@@ -141,6 +142,10 @@ export const api = {
 
   getRun(id: string): Promise<RunDetail> {
     return request<RunDetail>(`/api/runs/${encodeURIComponent(id)}`);
+  },
+
+  controlRun(id: string, action: RunControlAction): Promise<OkResponse> {
+    return post<OkResponse>(`/api/runs/${encodeURIComponent(id)}/control`, { action });
   },
 };
 
