@@ -20,13 +20,25 @@ evaluated on the first bar priced *after* the fill.
 
 The simulator, not the broker, owns the balance, equity and day anchor; the
 broker only reports fills and the unrealized PnL of its one position.
+
+Strategy context
+----------------
+With a ``strategy_selector`` the observation gains six values at the end: a
+one-hot of the arm the selector chose for the decision bar plus that arm's
+signal strength on the same bar. The bandit's context matrix and the strength
+matrix are built once, in ``__init__``; a step only indexes the current row, so
+the labelling cost is never paid per bar. ``info["strategy"]`` and the label an
+entry carries become the chosen arm's name, and a selector is called exactly
+once per step, before the action is applied. ``reset`` makes no choice: the
+reset observation's strategy block is all zeros.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from math import isfinite
-from typing import Any, Final, NamedTuple
+from typing import Any, Final, NamedTuple, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -34,9 +46,18 @@ from scalping.config import Settings
 from scalping.env.broker import PaperBroker
 from scalping.env.risk import RiskEngine
 from scalping.features.build import FeatureFrame
+from scalping.strategy.signals import ALL_STRATEGIES
 from scalping.types import AccountState, Bar, Position, Side, Trade
 
-__all__ = ["MAX_STEPS", "WINDOW", "Simulator", "StepResult"]
+__all__ = ["MAX_STEPS", "WINDOW", "ArmSelector", "Simulator", "StepResult"]
+
+
+@runtime_checkable
+class ArmSelector(Protocol):
+    """A bandit-like selector: one call returns the arm for a context row."""
+
+    def select(self, context: np.ndarray) -> int: ...
+
 
 #: Bars of ``X`` in one observation window.
 WINDOW: Final[int] = 60
@@ -46,6 +67,9 @@ MAX_STEPS: Final[int] = 20_000
 
 #: Position features appended after the flattened window.
 POSITION_FEATURES: Final[int] = 5
+
+#: Strategy context appended when a selector is present: one-hot plus strength.
+_STRATEGY_CONTEXT: Final[int] = len(ALL_STRATEGIES) + 1
 
 #: Normaliser of ``bars_in_trade`` in the position features (v1 holding limit).
 _BARS_NORM: Final[float] = 120.0
@@ -100,7 +124,9 @@ class Simulator:
     close before truncating, so an episode never ends with an open position.
     ``info`` carries ``equity``, ``position``, ``opened`` (the position this
     step created, or ``None``), ``trade`` (closed this step), ``blocked``,
-    ``strategy`` and ``reason``.
+    ``strategy`` and ``reason``. With a ``strategy_selector``, ``strategy`` is
+    the chosen arm's :class:`~scalping.strategy.signals.Strategy` value;
+    otherwise it is the constructor's ``strategy`` argument.
     """
 
     def __init__(
@@ -110,16 +136,49 @@ class Simulator:
         start: int = 0,
         end: int | None = None,
         strategy: str = "manual",
+        strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
     ) -> None:
         self.features = features
         self.settings = settings
         self.risk = RiskEngine(settings.risk, settings.contract)
         self.strategy = strategy
+        self._base_strategy = strategy
+        # ``LinUCB`` is called through ``select``; a bare callable is used as is.
+        self._strategy_selector: Callable[[np.ndarray], int] | None
+        if strategy_selector is None:
+            self._strategy_selector = None
+        elif callable(strategy_selector):
+            self._strategy_selector = strategy_selector
+        elif isinstance(strategy_selector, ArmSelector):
+            self._strategy_selector = strategy_selector.select
+        else:
+            raise TypeError(
+                "strategy_selector must be callable or expose select(context), "
+                f"got {strategy_selector!r}"
+            )
+        self._arm = -1
+        self._arm_strength = 0.0
         self._initial = float(settings.contract.initial_balance)
         self._n_features = int(features.X.shape[1])
         self.obs_dim = WINDOW * self._n_features + POSITION_FEATURES
+        if self._strategy_selector is not None:
+            self.obs_dim += _STRATEGY_CONTEXT
         self._last_index = (len(features.X) if end is None else min(int(end), len(features.X))) - 1
         self._first_index = max(int(start), features.valid_from + WINDOW - 1, WINDOW - 1)
+
+        # Both matrices are frame-wide but causal for the rows they expose, so
+        # building them once is equivalent to rebuilding a row per step without
+        # the per-step labelling cost.
+        self._strategy_context: np.ndarray | None = None
+        self._strategy_strengths: np.ndarray | None = None
+        if strategy_selector is not None:
+            # Local import: labeling imports the env package (broker, risk), so a
+            # module-level import here would break `import scalping.strategy.labeling`
+            # while ``scalping.env`` is still initialising this module.
+            from scalping.strategy.labeling import context_matrix, strength_matrix
+
+            self._strategy_context = context_matrix(features)
+            self._strategy_strengths = strength_matrix(features)
 
         # Episode state, fully established by reset().
         self.balance = self._initial
@@ -162,6 +221,9 @@ class Simulator:
         self._terminated = False
         self._reason = None
         self.session = None
+        self.strategy = self._base_strategy
+        self._arm = -1
+        self._arm_strength = 0.0
         self._no_bars = not self._has_window()
         self.broker = PaperBroker(
             self.settings.contract,
@@ -191,6 +253,9 @@ class Simulator:
         action = int(action)
         if action not in _ACTIONS:
             raise ValueError(f"action must be 0, 1, 2 or 3, got {action!r}")
+        # Once per step, on the bar the action acts on: the choice labels the
+        # entry and describes the observation this step returns.
+        self._choose_strategy()
 
         bar = self._bar(self._i)
         self.broker.atr = self._atr(self._i)
@@ -350,10 +415,43 @@ class Simulator:
         self.balance += trade.pnl
         return trade
 
+    # --- strategy ----------------------------------------------------------
+
+    def _choose_strategy(self) -> None:
+        """Select the arm for the current decision bar and stash its context.
+
+        The selector gets the context row of the bar the action will act on, so
+        nothing past ``bar_index`` reaches it. Its return value is validated
+        here rather than failing later inside an index expression.
+        """
+        selector = self._strategy_selector
+        if selector is None:
+            return
+        context = self._strategy_context
+        strengths = self._strategy_strengths
+        if context is None or strengths is None:  # pragma: no cover - built together
+            raise RuntimeError("strategy context missing for a selector-equipped simulator")
+        # A copy: a selector may keep or mutate the vector it is handed, and the
+        # matrix is shared with every later bar.
+        choice = selector(context[self._i].copy())
+        if isinstance(choice, (bool, np.bool_)) or not isinstance(choice, (int, np.integer)):
+            raise TypeError(f"strategy_selector must return an arm index, got {choice!r}")
+        arm = int(choice)
+        if not 0 <= arm < len(ALL_STRATEGIES):
+            raise ValueError(f"strategy arm {arm} outside 0..{len(ALL_STRATEGIES) - 1}")
+        self._arm = arm
+        self._arm_strength = float(strengths[self._i, arm])
+        self.strategy = ALL_STRATEGIES[arm].value
+
     # --- observation and accounting ---------------------------------------
 
     def _observe(self) -> np.ndarray:
-        """Flattened window of rows ``i-59 .. i`` plus the five position features."""
+        """Flattened window of rows ``i-59 .. i`` plus the five position features.
+
+        With a selector, the chosen arm's one-hot and strength on the decision
+        bar follow the position features. Before the first step the arm is
+        undecided and that block is all zeros.
+        """
         start = self._i - WINDOW + 1
         window = self.features.X[start : self._i + 1].reshape(-1)
         flat = window.astype(np.float32, copy=True)
@@ -374,7 +472,14 @@ class Simulator:
                 self._day_pnl_pct(account),
                 self._risk_used(position, account.equity),
             )
-        return np.concatenate((flat, np.asarray(extras, dtype=np.float32)))
+        position_features = np.asarray(extras, dtype=np.float32)
+        if self._strategy_selector is None:
+            return np.concatenate((flat, position_features))
+        context = np.zeros(_STRATEGY_CONTEXT, dtype=np.float32)
+        if self._arm >= 0:
+            context[self._arm] = 1.0
+            context[-1] = self._arm_strength
+        return np.concatenate((flat, position_features, context))
 
     @staticmethod
     def _day_pnl_pct(account: AccountState) -> float:

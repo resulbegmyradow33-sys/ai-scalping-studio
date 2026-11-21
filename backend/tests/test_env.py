@@ -538,12 +538,13 @@ def test_strategy_selector_labels_the_entry():
     df = SyntheticProvider(seed=5).fetch(
         "XAUUSD", datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 7, tzinfo=UTC)
     )
-    env = TradingEnv(build_features(df), Settings(), strategy_selector=lambda obs: "breakout")
+    # The selector returns an arm index in ALL_STRATEGIES order; 4 is "trend".
+    env = TradingEnv(build_features(df), Settings(), strategy_selector=lambda ctx: 4)
     env.reset(seed=1)
     _, _, _, _, info = env.step(1)
-    assert info["strategy"] == "breakout"
+    assert info["strategy"] == "trend"
     assert info["position"] is not None
-    assert info["position"].strategy == "breakout"
+    assert info["position"].strategy == "trend"
 
 
 def test_ohlc_only_csv_round_trips_through_the_environment(nospread_csv):

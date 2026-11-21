@@ -66,6 +66,7 @@ __all__ = [
     "LABEL_COLUMNS",
     "context_matrix",
     "label_events",
+    "strength_matrix",
 ]
 
 #: Column order of :func:`label_events`. ``ts`` is the signal (decision) bar.
@@ -471,6 +472,35 @@ def _atr_z_score(features: FeatureFrame, index: dict[str, int]) -> np.ndarray:
         )["z"]
         .to_numpy()
     )
+
+
+def strength_matrix(features: FeatureFrame) -> np.ndarray:
+    """The arms' ``(T, len(ALL_STRATEGIES))`` signal strength, one row per feature row.
+
+    Column ``k`` is ``strength_<ALL_STRATEGIES[k]>`` from
+    :func:`~scalping.strategy.signals.strategy_signals`, so it follows the same
+    frozen arm order the bandit indexes. The environment appends the chosen
+    arm's value to its observation; ``0.0`` is the strength of an arm that did
+    not fire, matching the signal frame's own fill.
+
+    Every input series is causal, so row ``t`` depends on bars at or before
+    ``t`` only. An empty frame returns a ``(0, 5)`` array.
+    """
+    height = int(features.X.shape[0])
+    if height == 0:
+        return np.zeros((0, len(ALL_STRATEGIES)), dtype=np.float32)
+    signals = strategy_signals(_bars_frame(features))
+    matrix = np.column_stack(
+        [
+            signals[f"strength_{strategy.value}"].to_numpy().astype(np.float32, copy=True)
+            for strategy in ALL_STRATEGIES
+        ]
+    )
+    if matrix.shape != (height, len(ALL_STRATEGIES)):  # pragma: no cover - guard only
+        raise RuntimeError(f"strength matrix shape drifted: {matrix.shape}")
+    if not np.isfinite(matrix).all():  # pragma: no cover - signals fill this
+        raise ValueError("strength matrix contains a non-finite value")
+    return matrix
 
 
 def context_matrix(features: FeatureFrame, labels: pl.DataFrame | None = None) -> np.ndarray:
