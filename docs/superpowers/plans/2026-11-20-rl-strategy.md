@@ -107,11 +107,11 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement the five rules**
 
-- momentum: `close > ema(20)` and `close > close.shift(5)` and `atr_ratio > 1.1` → +1; mirror for -1.
+- momentum: `close > ema(20)` and `close > close.shift(5)` and `max(atr_ratio, 5-bar displacement / ATR) > 1.1` → +1; mirror for -1. (Amended: a constant-range trend forces `atr_ratio == 1.0`, so the volatility-only gate could never fire on the brief's own trend test.)
 - reversal: `rsi(14) > 75` and bearish candle → -1; `rsi < 25` and bullish candle → +1.
 - sweep: `low < min(low, 20).shift(1)` and `close > prior_low` → +1; mirror → -1.
 - fvg: last unfilled FVG within 1.5 ATR and price re-entering it → +1 (bull) / -1 (bear).
-- trend: `bos` aligned with `trend` and pullback < 0.5 ATR → +1/-1.
+- trend: `bos` aligned with `trend`, `choch == 0` (continuation, not a reversal break) and pullback < 0.5 ATR → +1/-1. (Amended: `trend` is `bos` forward-filled, so the alignment conjunct alone is a tautology; the CHoCH exclusion is what makes it a continuation filter.)
 `strength` = normalized |signal evidence| clipped to [0,1] (e.g. ATR ratio scaled, RSI distance / 25). All inputs already causal from `features`.
 
 - [ ] **Step 4: Run test to verify it passes**
