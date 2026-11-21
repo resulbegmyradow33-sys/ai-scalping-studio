@@ -9,6 +9,7 @@ frame is left to the caller, who can select ``ts >= start`` and ``ts < end``.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -39,10 +40,17 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _add_months(value: datetime, months: int) -> datetime:
-    """Shift by whole calendar months, keeping the time of day."""
+    """Shift by whole calendar months, keeping the time of day.
+
+    The day is clamped to the target month's length: 2026-03-31 plus one month
+    is 2026-04-30, and 2024-02-29 plus twelve months is 2025-02-28. Without the
+    clamp ``datetime.replace`` raises for a day the target month does not have.
+    """
     total = value.year * 12 + (value.month - 1) + months
     year, month = divmod(total, 12)
-    return value.replace(year=year, month=month + 1)
+    month += 1
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)
 
 
 def _check_positive(name: str, value: int) -> int:

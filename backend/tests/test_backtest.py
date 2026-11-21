@@ -7,18 +7,22 @@ backtest against a hand-driven simulator loop.
 
 from __future__ import annotations
 
+import calendar
 import itertools
 import math
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 
 import numpy as np
+import polars as pl
 import pytest
 
 from scalping.backtest.engine import run_backtest
 from scalping.backtest.metrics import compute
 from scalping.backtest.walkforward import walkforward_split
 from scalping.config import CostConfig, Settings
+from scalping.data.base import BAR_SCHEMA
 from scalping.data.synthetic import SyntheticProvider
 from scalping.env.simulator import Simulator
 from scalping.features.build import build_features
@@ -93,8 +97,11 @@ def test_metrics_two_trades_hand_computed():
     total_costs      = 20 + 10                    = 30
     cost_ratio       = 30 / 200                   = 0.15
     avg_bars         = (10 + 6) / 2               = 8
-    bar returns      = +2%, -100/10200%
-    sharpe           = (13/38) * sqrt(525 600)    = 248.02...
+
+    The curve used by drawdown/Sharpe starts at the initial balance, so the
+    bar returns are 0, +2%, -100/10200. Their mean is 13/3825, their squared
+    deviations sum to 27006/7650^2, and the annualised ratio is
+    26/sqrt(9002) * sqrt(525 600) = 198.67...
     """
     trades = [
         make_trade(pnl=200.0, costs=20.0, r_multiple=2.0, entry_min=0, exit_min=10),
@@ -111,7 +118,7 @@ def test_metrics_two_trades_hand_computed():
     assert m.total_costs == pytest.approx(30.0)
     assert m.cost_ratio == pytest.approx(0.15)
     assert m.avg_bars == pytest.approx(8.0)
-    assert m.sharpe == pytest.approx(13.0 / 38.0 * math.sqrt(525_600))
+    assert m.sharpe == pytest.approx(26.0 / math.sqrt(9_002.0) * math.sqrt(525_600))
 
 
 def test_profit_factor_is_inf_with_wins_and_no_losses():
@@ -125,6 +132,22 @@ def test_cost_ratio_is_capped_at_one():
     trades = [make_trade(pnl=100.0, costs=500.0, r_multiple=1.0, entry_min=0, exit_min=5)]
     m = compute(trades, equity=np.array([10_000.0, 10_100.0]), initial_balance=10_000.0)
     assert m.cost_ratio == 1.0
+
+
+def test_cost_ratio_is_clamped_to_the_unit_interval():
+    # Negative costs cannot happen from the broker, but the ratio must stay a
+    # fraction even if a caller passes a hand-made Trade.
+    trades = [make_trade(pnl=100.0, costs=-10.0, r_multiple=1.0, entry_min=0, exit_min=5)]
+    m = compute(trades, equity=np.array([10_000.0, 10_100.0]), initial_balance=10_000.0)
+    assert m.cost_ratio == 0.0
+
+
+def test_drawdown_and_sharpe_include_the_initial_balance():
+    """The equity array is post-step, so the first bar's loss needs the initial point."""
+    m = compute([], equity=np.array([9_900.0, 9_900.0]), initial_balance=10_000.0)
+    assert m.net_profit == pytest.approx(-100.0)
+    assert m.max_drawdown == pytest.approx(0.01)
+    assert m.sharpe < 0.0
 
 
 def test_max_drawdown_is_a_positive_fraction():
@@ -175,11 +198,46 @@ def test_walkforward_test_end_never_exceeds_last_bar():
 
 
 def test_walkforward_rejects_empty_frame():
-    import polars as pl
-
-    from scalping.data.base import BAR_SCHEMA
-
     assert walkforward_split(pl.DataFrame(schema=BAR_SCHEMA)) == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "train_months", "train_end"),
+    [
+        # Mar 31 + 6 months has no April 31; September has 30 days.
+        (datetime(2026, 3, 31, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC), 6,
+         datetime(2026, 9, 30, tzinfo=UTC)),
+        # Aug 31 + 6 months lands in a non-leap February.
+        (datetime(2026, 8, 31, tzinfo=UTC), datetime(2027, 5, 31, tzinfo=UTC), 6,
+         datetime(2027, 2, 28, tzinfo=UTC)),
+        # April 30 exists in every target month, so the day is preserved.
+        (datetime(2026, 4, 30, tzinfo=UTC), datetime(2027, 1, 31, tzinfo=UTC), 6,
+         datetime(2026, 10, 30, tzinfo=UTC)),
+        # Leap-day start: 2024-02-29 + 12 months clamps to 2025-02-28.
+        (datetime(2024, 2, 29, tzinfo=UTC), datetime(2026, 6, 30, tzinfo=UTC), 12,
+         datetime(2025, 2, 28, tzinfo=UTC)),
+    ],
+)
+def test_walkforward_clamps_month_end_starts(start, end, train_months, train_end):
+    df = _ts_frame(start, end)
+    splits = walkforward_split(df, train_months=train_months)
+
+    assert splits, f"no fold fits between {start.date()} and {end.date()}"
+    assert splits[0].train.start == start
+    assert splits[0].train.end == train_end
+    last = df["ts"].max()
+    for split in splits:
+        assert split.train.start < split.val.start < split.test.start
+        assert split.train.end <= split.val.start and split.val.end <= split.test.start
+        assert split.test.end <= last
+    for earlier, later in itertools.pairwise(splits):
+        assert later.train.start == _next_month(earlier.train.start)
+
+
+def test_walkforward_rejects_non_positive_lengths():
+    df = _ts_frame(datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 12, 31, tzinfo=UTC))
+    with pytest.raises(ValueError, match="train_months"):
+        walkforward_split(df, train_months=0)
 
 
 def test_backtest_matches_a_direct_simulator_loop():
@@ -217,6 +275,53 @@ def test_run_id_changes_with_the_feature_matrix():
     )
 
 
+def test_run_id_covers_the_raw_price_data():
+    """Identical X but different OHLC must not share a run id."""
+    f, _ = make()
+    settings = Settings()
+    shifted = replace(f, ohlc=f.ohlc + 1.0)
+    assert np.array_equal(shifted.X, f.X, equal_nan=True)
+    hold = lambda o: 0
+    assert run_backtest(hold, f, settings).run_id != run_backtest(hold, shifted, settings).run_id
+
+
+def test_policy_identity_uses_source_bytecode_and_explicit_name():
+    f, _ = make()
+    settings = Settings()
+    plain = lambda o: 0
+    inline = lambda o: len(o) * 0
+
+    assert run_backtest(plain, f, settings).run_id == run_backtest(plain, f, settings).run_id
+    assert run_backtest(plain, f, settings).run_id != run_backtest(inline, f, settings).run_id
+
+    named_plain = run_backtest(plain, f, settings, policy_name="always-hold")
+    named_inline = run_backtest(inline, f, settings, policy_name="always-hold")
+    assert named_plain.run_id == named_inline.run_id
+    assert named_plain.run_id != run_backtest(plain, f, settings).run_id
+
+
+def test_avg_bars_uses_the_bar_index_when_ts_is_given():
+    friday = datetime(2026, 1, 9, 23, 0, tzinfo=UTC)  # Friday
+    monday = datetime(2026, 1, 12, 0, 0, tzinfo=UTC)  # Monday, ~2 days later
+    stamps = [friday - timedelta(minutes=1), friday, monday, monday + timedelta(minutes=1)]
+    ts = np.array([stamp.replace(tzinfo=None) for stamp in stamps], dtype="datetime64[us]")
+    trade = replace(make_trade(10.0, 1.0, 1.0, 0, 1), entry_ts=friday, exit_ts=monday)
+    equity = np.array([10_000.0, 10_010.0])
+
+    indexed = compute([trade], equity, 10_000.0, ts=ts)
+    minutes = compute([trade], equity, 10_000.0)
+    assert indexed.avg_bars == 1.0
+    assert minutes.avg_bars == pytest.approx(2_940.0)
+
+
+def test_backtest_passes_the_frame_timestamps_to_avg_bars():
+    f, _ = make()
+    res = run_backtest(lambda o: 1 if o[0] > 0 else 0, f, Settings())
+    direct = compute(res.trades, res.equity, 10_000.0, ts=f.ts)
+    assert res.trades
+    assert res.metrics.avg_bars == pytest.approx(direct.avg_bars)
+
+
 def test_backtest_instantiates_one_simulator(monkeypatch):
     from scalping.backtest import engine
 
@@ -243,6 +348,12 @@ def test_same_config_same_run_id_different_config_differs():
     assert run_backtest(lambda o: 0, f, s).config_hash != run_backtest(lambda o: 0, f, s2).config_hash
 
 
+def _ts_frame(start: datetime, end: datetime) -> pl.DataFrame:
+    stamps = pl.datetime_range(start, end, interval="1d", time_zone="UTC", eager=True)
+    return pl.DataFrame({"ts": stamps})
+
+
 def _next_month(value: datetime) -> datetime:
     year, month = (value.year + 1, 1) if value.month == 12 else (value.year, value.month + 1)
-    return value.replace(year=year, month=month)
+    day = min(value.day, calendar.monthrange(year, month)[1])
+    return value.replace(year=year, month=month, day=day)

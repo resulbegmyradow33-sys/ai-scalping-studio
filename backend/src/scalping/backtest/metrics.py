@@ -13,14 +13,18 @@ Conventions:
   ``0.0`` when there is neither, and ``inf`` when there are wins without losses
   (a finite denominator would invent a number).
 * ``max_drawdown`` is the deepest drop from a running peak as a positive
-  fraction of that peak, clamped to ``[0, 1]``.
+  fraction of that peak, clamped to ``[0, 1]``. The equity series is prefixed
+  with ``initial_balance`` so a first-bar loss is included.
 * ``sharpe`` annualises the per-bar equity returns with
   ``sqrt(bars_per_year)`` and returns ``0.0`` when the return series is flat or
-  shorter than two returns.
-* ``cost_ratio`` reports costs against gross profit, capped at ``1.0``; with no
-  gross profit it is ``0.0`` because a ratio against zero is undefined.
-* ``avg_bars`` is the mean holding time in M1 bars, derived from the trade
-  timestamps (one minute per bar).
+  shorter than two returns. The same prefixed series is used.
+* ``cost_ratio`` reports the broker's cost breakdown against gross profit,
+  capped at ``1.0``; with no gross profit it is ``0.0``. The breakdown omits
+  the exit half-spread on SL/TP fills, so this is not economic cost drag.
+* ``avg_bars`` is the mean holding time. With the frame's ``ts`` array it is
+  the index distance between entry and exit (weekend gaps excluded); without
+  it the fallback is wall-clock minutes, which equals bars on a gapless M1
+  series.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 import numpy as np
 
@@ -41,7 +46,16 @@ BARS_PER_YEAR: int = 525_600
 
 @dataclass(frozen=True, slots=True)
 class Metrics:
-    """Summary of one backtest run. All values are plain floats, never NaN."""
+    """Summary of one backtest run. All values are plain floats, never NaN.
+
+    ``total_costs`` is the broker's reported cost breakdown, not economic cost
+    drag: it contains the entry half-spread, entry slippage and the round-turn
+    commission, plus the exit half-spread only on quote exits. SL/TP fills are
+    level fills and report no exit half-spread, so ``total_costs`` and the
+    ``cost_ratio`` derived from it understate the true friction. ``net_profit``
+    stays the authoritative PnL; costs are already embedded in the fill prices
+    and are never subtracted from it again.
+    """
 
     net_profit: float
     profit_factor: float
@@ -89,9 +103,32 @@ def _max_drawdown(equity: np.ndarray) -> float:
 
 
 def _avg_bars(trades: Sequence[Trade]) -> float:
+    """Fallback holding time in minutes (the frame is M1, so minutes are bars)."""
     if not trades:
         return 0.0
     holding = [(trade.exit_ts - trade.entry_ts).total_seconds() / 60.0 for trade in trades]
+    return float(np.mean(holding))
+
+
+def _to_us(value: datetime) -> np.datetime64:
+    """Convert an aware or naive datetime to the naive UTC unit used by ``ts``."""
+    if value.tzinfo is not None:
+        value = value.astimezone(UTC).replace(tzinfo=None)
+    return np.datetime64(value, "us")
+
+
+def _avg_bars_indexed(trades: Sequence[Trade], ts: np.ndarray) -> float:
+    """Mean index distance between entry and exit in the sorted ``ts`` array."""
+    if not trades:
+        return 0.0
+    stamps = np.asarray(ts, dtype="datetime64[us]").reshape(-1)
+    if stamps.size == 0:  # pragma: no cover - a trade cannot exist without bars
+        return _avg_bars(trades)
+    holding = []
+    for trade in trades:
+        entry = int(np.searchsorted(stamps, _to_us(trade.entry_ts), side="left"))
+        exit_ = int(np.searchsorted(stamps, _to_us(trade.exit_ts), side="left"))
+        holding.append(max(exit_ - entry, 0))
     return float(np.mean(holding))
 
 
@@ -100,9 +137,30 @@ def compute(
     equity: np.ndarray,
     initial_balance: float,
     bars_per_year: int = BARS_PER_YEAR,
+    *,
+    ts: np.ndarray | None = None,
 ) -> Metrics:
-    """Summarise ``trades`` and the per-step ``equity`` curve."""
+    """Summarise ``trades`` and the post-step ``equity`` curve.
+
+    ``equity`` holds the marked equity after each simulator step and therefore
+    starts *after* the first bar. Drawdown and Sharpe prepend ``initial_balance``
+    so a loss on the first bar is visible; ``net_profit`` is still
+    ``equity[-1] - initial_balance``.
+
+    ``total_costs`` is the broker's reported cost breakdown. It excludes the
+    exit half-spread on SL/TP fills, so ``cost_ratio`` is a reporting ratio, not
+    economic cost drag; it is clamped to ``[0, 1]``. When ``ts`` (the frame's
+    sorted timestamps) is given, ``avg_bars`` is the mean index distance between
+    a trade's entry and exit in that array, so weekend and holiday gaps count as
+    bars that actually traded. Without ``ts`` the fallback is wall-clock
+    minutes, which equals bars only on a gapless M1 series.
+    """
     values = np.asarray(equity, dtype=np.float64).reshape(-1)
+    curve = (
+        np.concatenate(([float(initial_balance)], values))
+        if values.size
+        else np.asarray([float(initial_balance)])
+    )
     pnls = np.asarray([trade.pnl for trade in trades], dtype=np.float64)
     wins = pnls[pnls > 0.0]
     losses = pnls[pnls < 0.0]
@@ -111,15 +169,18 @@ def compute(
     total_costs = float(sum(trade.costs for trade in trades))
 
     net_profit = float(values[-1] - initial_balance) if values.size else 0.0
+    cost_ratio = (
+        min(max(total_costs / gross_profit, 0.0), 1.0) if gross_profit > 0.0 else 0.0
+    )
     return Metrics(
         net_profit=net_profit,
         profit_factor=_profit_factor(gross_profit, gross_loss),
-        sharpe=_sharpe(values, bars_per_year),
-        max_drawdown=_max_drawdown(values),
+        sharpe=_sharpe(curve, bars_per_year),
+        max_drawdown=_max_drawdown(curve),
         win_rate=float(wins.size / pnls.size) if pnls.size else 0.0,
         expectancy_r=float(np.mean([trade.r_multiple for trade in trades])) if trades else 0.0,
         trades=len(trades),
         total_costs=total_costs,
-        cost_ratio=min(total_costs / gross_profit, 1.0) if gross_profit > 0.0 else 0.0,
-        avg_bars=_avg_bars(trades),
+        cost_ratio=cost_ratio,
+        avg_bars=_avg_bars_indexed(trades, ts) if ts is not None else _avg_bars(trades),
     )

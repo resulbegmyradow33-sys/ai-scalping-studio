@@ -95,9 +95,10 @@ class Simulator:
     ``risk_ok`` is a one-time 1.0 on that same gate-approved step (flat, hold
     and close steps earn no shaping bonus). The episode terminates once equity reaches 80% of the initial balance and
     truncates at ``MAX_STEPS`` or when the data ends; an open position is
-    billed through a ``"data_end"`` close before truncating. ``info`` carries
-    ``equity``, ``position``, ``trade`` (closed this step), ``blocked``,
-    ``strategy`` and ``reason``.
+    force-closed with reason ``"liquidation"`` when equity depletion terminates
+    the episode and billed through a ``"data_end"`` close before truncating.
+    ``info`` carries ``equity``, ``position``, ``trade`` (closed this step),
+    ``blocked``, ``strategy`` and ``reason``.
     """
 
     def __init__(
@@ -220,6 +221,13 @@ class Simulator:
                     trade = self._close(next_bar, "timeout")
             equity = self._equity()
             reason = None
+
+        if self.broker.position is not None and equity <= _TERMINATE_FRACTION * self._initial:
+            # Equity depletion with a live position: book the exit at this bar
+            # so the episode never ends with an unaccounted trade. The close is
+            # a quote exit, priced like the mark that triggered the termination.
+            trade = self._close(self._bar(self._i), "liquidation")
+            equity = self._equity()
 
         # Keep the broker's ATR current for the bar the next step will act on.
         # ``opened`` is only set after ``allow_new`` and ``size`` accepted the

@@ -11,6 +11,7 @@ from datetime import UTC, date, datetime
 import numpy as np
 import pytest
 
+from scalping.backtest.metrics import compute
 from scalping.config import RiskConfig, Settings
 from scalping.data.synthetic import SyntheticProvider
 from scalping.env.simulator import Simulator
@@ -146,6 +147,58 @@ def test_equity_drop_terminates_episode():
     env.sim._force_equity(8_000)  # test hook on the Simulator
     _, _, term, _, _ = env.step(0)
     assert term
+
+
+def test_equity_depletion_liquidates_the_open_trade():
+    """A termination must not end the episode with an unbooked position.
+
+    The frame starts at 15:00 so the first decision bar (index 119) is 16:59
+    and the 17:00 session roll resets ``day_start_equity`` after the forced
+    8 030.00 balance, which lets the buy through the daily loss gate. The 0.80
+    lot opens at 1 000.225 and the 17:01 mark at 1 000.00 already costs the
+    entry spread (18.00), leaving 8 012.00. The 17:02 bar then falls to 999.80
+    (still above the 999.725 stop) for another 16.00, so equity reaches 7 996.00
+    and terminates the episode with the position open.
+    """
+    n = 124
+    start = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
+    ts = np.datetime64(start.replace(tzinfo=None), "us") + np.arange(n).astype("timedelta64[m]")
+    close = np.full(n, 1000.0)
+    ohlc = np.column_stack(
+        [close, np.full(n, 1000.001), np.full(n, 999.999), close]
+    )
+    ohlc[122] = (1000.0, 1000.0, 999.80, 999.80)  # deep red, but above the 999.725 stop
+    frame = FeatureFrame(
+        X=np.zeros((n, 3), dtype=np.float32),
+        ts=ts.astype("datetime64[us]"),
+        ohlc=ohlc,
+        spread=np.full(n, 0.20),
+        atr=np.full(n, 0.5),
+        valid_from=60,
+        columns=["a", "b", "c"],
+    )
+    sim = Simulator(frame, Settings())
+    sim.reset(seed=0)
+    assert sim.bar_index == 119
+
+    sim._force_equity(8_030.0)
+    held = sim.step(0)  # 16:59 -> 17:00, flat through the session roll
+    assert not held.terminated and held.info["position"] is None
+    opened = sim.step(1)  # buy at 17:00, marked flat on 17:01
+    assert opened.info["position"] is not None and not opened.terminated
+
+    result = sim.step(0)  # 17:02 drops equity below 80% with the position open
+    trade = result.info["trade"]
+    assert result.terminated
+    assert trade is not None, "the terminating step must book the liquidation"
+    assert trade.reason == "liquidation"
+    assert trade.exit_ts == datetime(2026, 1, 5, 17, 2, tzinfo=UTC)
+    assert sim.broker.position is None
+    assert sim.balance == pytest.approx(8_030.0 + trade.pnl)
+
+    metrics = compute([trade], np.array([result.info["equity"]]), 10_000.0)
+    assert metrics.trades == 1
+    assert metrics.net_profit == pytest.approx(result.info["equity"] - 10_000.0)
 
 
 # --- risk gate, observation contract and accounting ------------------------
