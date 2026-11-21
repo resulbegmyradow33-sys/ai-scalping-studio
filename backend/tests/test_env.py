@@ -230,6 +230,14 @@ def test_non_finite_feature_raises():
         sim.step(0)
 
 
+def test_reset_obs_is_isolated_from_env_state():
+    env = make_env()
+    obs, _ = env.reset(seed=1)
+    assert not np.shares_memory(obs, env._obs)
+    obs[:] = np.nan
+    assert np.isfinite(env._obs).all()
+
+
 def test_step_obs_is_isolated_from_env_state():
     env = make_env()
     env.reset(seed=1)
@@ -286,7 +294,27 @@ def test_reward_arithmetic_for_an_opened_step():
     assert reward == pytest.approx(-0.225 - 0.05 + 0.02)
     _, held, _, _, info = sim.step(0)
     assert info["position"] is not None
-    assert held == pytest.approx(0.02), "flat price: only the risk bonus applies"
+    assert held == 0.0, "the risk bonus is paid once, on the opening step"
+
+
+def test_risk_bonus_is_one_time_on_the_opening_step():
+    sim = Simulator(trend_frame(slope=-1.0), Settings())
+    sim.reset(seed=1)
+    _, _, _, _, info = sim.step(1)  # long into a falling price
+    assert info["position"] is not None
+    previous = info["equity"]
+    rewards, deltas = [], []
+    for _ in range(5):
+        _, reward, _, _, info = sim.step(0)
+        delta = (info["equity"] - previous) / 10_000.0 * 100.0
+        previous = info["equity"]
+        rewards.append(reward)
+        deltas.append(delta)
+        assert reward == pytest.approx(delta), "hold steps pay no risk bonus"
+        assert reward != pytest.approx(0.02)
+    assert all(reward <= 0 for reward in rewards), "no positive shaping on holds"
+    assert sum(rewards) < 0, "the falling long must lose"
+    assert sum(rewards) == pytest.approx(sum(deltas))
 
 
 def test_small_max_bars_books_a_timeout_exit():

@@ -57,6 +57,7 @@ _TERMINATE_FRACTION: Final[float] = 0.8
 _DD_LIMIT: Final[float] = 0.03
 
 #: Reward shaping weights (spec 2026-11-20, reward rebalance d48fc51).
+#: ``_RISK_BONUS`` is a one-time entry credit, never a per-bar payment.
 _DD_PENALTY: Final[float] = 50.0
 _OPEN_PENALTY: Final[float] = 0.05
 _RISK_BONUS: Final[float] = 0.02
@@ -91,8 +92,8 @@ class Simulator:
     - 50 * max(0, drawdown - 0.03) - 0.05 * opened + 0.02 * risk_ok`` clipped
     to ``[-5, 5]``, where ``drawdown`` is the fractional drop from the episode
     peak, ``opened`` is 1.0 only on the step that opens a position, and
-    ``risk_ok`` is 1.0 only while a risk-gate-approved position is open.
-    The episode terminates once equity reaches 80% of the initial balance and
+    ``risk_ok`` is a one-time 1.0 on that same gate-approved step (flat, hold
+    and close steps earn no shaping bonus). The episode terminates once equity reaches 80% of the initial balance and
     truncates at ``MAX_STEPS`` or when the data ends; an open position is
     billed through a ``"data_end"`` close before truncating. ``info`` carries
     ``equity``, ``position``, ``trade`` (closed this step), ``blocked``,
@@ -132,7 +133,6 @@ class Simulator:
         self._done = False
         self._terminated = False
         self._no_bars = False
-        self._risk_approved = False
         self._reason: str | None = None
         self.reset()
 
@@ -157,7 +157,6 @@ class Simulator:
         self._equity_value = self._initial
         self._done = False
         self._terminated = False
-        self._risk_approved = False
         self._reason = None
         self.session = None
         self._no_bars = not self._has_window()
@@ -223,10 +222,11 @@ class Simulator:
             reason = None
 
         # Keep the broker's ATR current for the bar the next step will act on.
+        # ``opened`` is only set after ``allow_new`` and ``size`` accepted the
+        # entry, so it marks the one step that earns the risk-gate credit. The
+        # bonus never repeats on hold steps, which would farm +0.02 per bar.
         self.broker.atr = self._atr(self._i)
-        if self.broker.position is None:
-            self._risk_approved = False
-        risk_ok = 1.0 if self._risk_approved else 0.0
+        risk_ok = 1.0 if opened > 0.0 else 0.0
 
         self._peak = max(self._peak, equity)
         drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0.0
@@ -315,7 +315,6 @@ class Simulator:
                             self.strategy,
                         )
                         opened = 1.0
-                        self._risk_approved = True
         elif action == _CLOSE:
             if self.broker.position is None:
                 blocked = "no_position"

@@ -53,7 +53,9 @@ class TradingEnv(gym.Env):
     ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self._obs = self.sim.reset(seed=seed)
-        return self._obs, {}
+        # Same isolation as step: the caller owns its vector, the selector owns
+        # the private one.
+        return self._obs.copy(), {}
 
     def step(self, action: int) -> StepResult:
         if self.strategy_selector is not None:
