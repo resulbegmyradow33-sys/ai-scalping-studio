@@ -27,6 +27,11 @@ packages = ["src/scalping"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+filterwarnings = [
+  # Starlette 1.10 warns on import while httpx2 is not installed; the httpx
+  # TestClient still works and the warning would otherwise print on every run.
+  "ignore:Using `httpx` with `starlette.testclient` is deprecated:starlette.exceptions.StarletteDeprecationWarning",
+]
 
 [tool.ruff]
 line-length = 100
