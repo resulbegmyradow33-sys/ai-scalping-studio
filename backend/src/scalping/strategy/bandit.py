@@ -31,19 +31,31 @@ every arm identically and therefore picks arm ``0``; after that pull its bonus i
 the smallest, so the remaining untouched arms are tried in index order. The same
 inputs always produce the same arm.
 
+Reading the model
+-----------------
+``weights()`` drops the intercept, so ``weights() @ x`` is neither the predicted
+reward nor the score and can rank arms differently from ``select``. Use
+``predict(arm, x)`` for the mean term and ``scores(x)`` for the value ``select``
+argmaxes (mean plus bonus).
+
 Persistence
 -----------
-:meth:`LinUCB.save` writes :func:`numpy.savez` only (no joblib, no pickle), and
-:meth:`LinUCB.load` refuses a file whose arrays disagree with its metadata or
-with the bandit it is restored into, rather than silently reinterpreting the
-weights.
+:meth:`LinUCB.save` writes :func:`numpy.savez` only (no joblib, no pickle) to a
+sibling temp file and atomically replaces the target, so an interrupted write
+leaves the previous model readable. :meth:`LinUCB.load` refuses a file whose
+arrays disagree with its metadata, and :meth:`LinUCB.restore` refuses a file
+trained for a different ``dim`` or ``n_arms`` instead of silently reinterpreting
+the weights. ``load`` is a classmethod; ``restore`` is the in-place instance
+path.
 """
 
 from __future__ import annotations
 
+import os
+import tempfile
+from collections.abc import Sequence
 from math import isfinite
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -124,7 +136,7 @@ class LinUCB:
 
     # -- validation ---------------------------------------------------------
 
-    def _context(self, x: Any) -> np.ndarray:
+    def _context(self, x: np.ndarray | Sequence[float]) -> np.ndarray:
         """``x`` as a finite float64 vector of width ``dim``, or ``ValueError``."""
         vector = np.asarray(x, dtype=np.float64)
         if vector.ndim != 1 or vector.shape[0] != self.dim:
@@ -136,7 +148,7 @@ class LinUCB:
             raise ValueError("context contains a non-finite value")
         return vector
 
-    def _arm(self, arm: Any) -> int:
+    def _arm(self, arm: int) -> int:
         """``arm`` as an in-range index; ``TypeError`` for a non-integer."""
         if isinstance(arm, bool) or not isinstance(arm, (int, np.integer)):
             raise TypeError(f"arm must be an integer, got {arm!r}")
@@ -185,13 +197,28 @@ class LinUCB:
 
     # -- public API ---------------------------------------------------------
 
-    def select(self, x: Any) -> int:
+    def select(self, x: np.ndarray | Sequence[float]) -> int:
         """The highest-scoring arm for context ``x``, lowest index on a tie."""
-        scores = self._scores(self._design(self._context(x)))
         # np.argmax returns the first maximum, i.e. the lowest arm index.
-        return int(np.argmax(scores))
+        return int(np.argmax(self.scores(x)))
 
-    def update(self, arm: int, x: Any, reward: float) -> None:
+    def scores(self, x: np.ndarray | Sequence[float]) -> np.ndarray:
+        """The ``(n_arms,)`` LinUCB scores ``select`` argmaxes, bonus included."""
+        return self._scores(self._design(self._context(x)))
+
+    def predict(self, arm: int, x: np.ndarray | Sequence[float]) -> float:
+        """``arm``'s predicted reward ``theta_i . z``, without the bonus.
+
+        This is the mean term of the score, the part that says what the arm has
+        actually paid so far; :meth:`scores` adds the exploration width. The
+        intercept the model is fitted with is part of this value, which is why
+        ``weights() @ x`` is not a substitute for it.
+        """
+        index = self._arm(arm)
+        design = self._design(self._context(x))
+        return float(self._b[index] @ self._solve(index, design))
+
+    def update(self, arm: int, x: np.ndarray | Sequence[float], reward: float) -> None:
         """Fold one observed ``(context, reward)`` pair into ``arm``."""
         index = self._arm(arm)
         design = self._design(self._context(x))
@@ -203,7 +230,12 @@ class LinUCB:
         self._pulls[index] += 1
         self._reward_sum[index] += value
 
-    def fit_offline(self, X: Any, arms: Any, rewards: Any) -> LinUCB:
+    def fit_offline(
+        self,
+        X: np.ndarray | Sequence[Sequence[float]],
+        arms: np.ndarray | Sequence[int],
+        rewards: np.ndarray | Sequence[float],
+    ) -> LinUCB:
         """Replace the state with the closed-form ridge fit of a batch.
 
         ``X`` is ``(n, dim)``, ``arms`` an ``(n,)`` integer array of arm indices
@@ -268,8 +300,11 @@ class LinUCB:
     def weights(self) -> np.ndarray:
         """``(n_arms, dim)`` closed-form slopes, the intercept column dropped.
 
-        The dropped intercept is the bias term the context is augmented with; it
-        is per-arm and available from :meth:`arm_stats`.
+        This is not the model. The intercept the fit is built with is dropped, so
+        ``weights() @ x`` gives neither the predicted reward nor the score and can
+        rank arms differently from :meth:`select`. Use :meth:`predict` for the
+        mean reward and :meth:`scores` for the value ``select`` argmaxes; the
+        intercept itself is reported by :meth:`arm_stats`.
         """
         theta = np.empty((self.n_arms, self._width), dtype=np.float64)
         for arm in range(self.n_arms):
@@ -301,29 +336,46 @@ class LinUCB:
     # -- persistence --------------------------------------------------------
 
     def save(self, path: str | Path) -> Path:
-        """Write the state with :func:`numpy.savez`; returns the file written."""
+        """Write the state atomically with :func:`numpy.savez`.
+
+        The archive goes to a sibling temp file first and is moved onto ``target``
+        with an atomic replace, so an interrupt or a full disk mid-write leaves
+        the previous file readable. Returns the file written.
+        """
         target = _npz_path(path)
-        np.savez(
-            target,
-            dim=np.array(self.dim),
-            n_arms=np.array(self.n_arms),
-            alpha=np.array(self.alpha),
-            ridge=np.array(self.ridge),
-            A=self._A,
-            b=self._b,
-            pulls=self._pulls,
-            reward_sum=self._reward_sum,
-        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+        os.close(fd)
+        tmp = Path(tmp_name)
+        try:
+            # A file object (not a path): np.savez would otherwise append ".npz"
+            # to the temp name and the replace below would miss it.
+            with open(tmp, "wb") as handle:
+                np.savez(
+                    handle,
+                    dim=np.array(self.dim),
+                    n_arms=np.array(self.n_arms),
+                    alpha=np.array(self.alpha),
+                    ridge=np.array(self.ridge),
+                    A=self._A,
+                    b=self._b,
+                    pulls=self._pulls,
+                    reward_sum=self._reward_sum,
+                )
+            tmp.replace(target)
+        finally:
+            tmp.unlink(missing_ok=True)
         return target
 
     @classmethod
     def load(cls, path: str | Path) -> LinUCB:
         """Rebuild a bandit from a :meth:`save` file.
 
-        The stored metadata has to agree with the stored arrays (``A`` must be
-        ``(n_arms, dim + 1, dim + 1)``), and every number has to be finite; a
-        mismatch raises ``ValueError`` instead of silently loading weights into
-        the wrong shape.
+        Classmethod — call as ``LinUCB.load(path)``; use :meth:`restore` to update
+        an instance. The stored metadata has to agree with the stored arrays
+        (``A`` must be ``(n_arms, dim + 1, dim + 1)``), and every number has to
+        be finite; a mismatch raises ``ValueError`` instead of silently loading
+        weights into the wrong shape.
         """
         target = _npz_path(path)
         with np.load(target, allow_pickle=False) as data:
@@ -390,6 +442,16 @@ class LinUCB:
         self._pulls = other._pulls
         self._reward_sum = other._reward_sum
         return self
+
+    def restore(self, path: str | Path) -> None:
+        """Update this instance from a :meth:`save` file, in place.
+
+        :meth:`load` is a classmethod, so ``self.bandit.load(path)`` throws the new
+        model away and leaves ``self`` untrained; this is the instance path. A
+        file whose ``dim`` or ``n_arms`` differs raises ``ValueError`` from
+        :meth:`load_into` and leaves ``self`` untouched.
+        """
+        self.load_into(path)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (

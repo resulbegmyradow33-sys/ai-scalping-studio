@@ -8,9 +8,14 @@ touching the live object.
 
 from __future__ import annotations
 
+import inspect
+import typing
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from scalping.strategy import bandit
 from scalping.strategy.bandit import LinUCB
 from scalping.strategy.labeling import CONTEXT_DIM
 
@@ -227,3 +232,113 @@ def test_invalid_hyperparameters_rejected():
         LinUCB(alpha=-0.1)
     with pytest.raises(ValueError):
         LinUCB(ridge=0.0)
+
+
+def test_annotations_avoid_typing_any():
+    functions = [obj for _, obj in inspect.getmembers(bandit, inspect.isfunction)]
+    functions += [
+        obj
+        for _, obj in inspect.getmembers(
+            LinUCB, lambda member: inspect.isfunction(member) or inspect.ismethod(member)
+        )
+    ]
+    assert functions
+    for function in functions:
+        hints = typing.get_type_hints(function)
+        assert "typing.Any" not in repr(hints), function.__qualname__
+
+
+def test_restore_updates_instance_in_place(tmp_path):
+    source = LinUCB(dim=4)
+    source.update(0, np.ones(4), 1.0)
+    snapshot = source.weights().copy()
+    path = source.save(tmp_path / "bandit.npz")
+
+    live = LinUCB(dim=4)
+    assert live.restore(path) is None
+    assert np.allclose(live.weights(), snapshot)
+    assert live.arm_stats()[0]["pulls"] == 1
+
+    mismatched = LinUCB(dim=5)
+    with pytest.raises(ValueError, match="dim"):
+        mismatched.restore(path)
+    assert not mismatched.weights().any()
+
+
+def test_weights_are_not_the_model():
+    b = LinUCB(dim=2, n_arms=2, alpha=0.0)
+    b.update(0, np.array([1.0, 0.0]), 2.0)
+    b.update(1, np.array([1.0, 1.0]), 1.0)
+
+    # The dropped intercept is not recoverable from the slopes: at [0, 1] the
+    # slope-only scores rank arm 1 first, the model ranks arm 0 first.
+    query = np.array([0.0, 1.0])
+    slope_scores = b.weights() @ query
+    model_scores = np.array([b.predict(0, query), b.predict(1, query)])
+    assert not np.allclose(slope_scores, model_scores)
+    assert int(np.argmax(slope_scores)) == 1
+    assert int(np.argmax(model_scores)) == 0
+    assert b.select(query) == 0
+
+    # At the reviewer's query the same disagreement shows as a value gap: the
+    # model sees the intercept (4/3) while the slope-only dot product sees 2/3.
+    reviewer_query = np.array([1.0, 1.0])
+    assert b.predict(0, reviewer_query) == pytest.approx(4.0 / 3.0)
+    assert b.predict(1, reviewer_query) == pytest.approx(0.75)
+    assert not np.allclose(
+        b.weights() @ reviewer_query,
+        [b.predict(0, reviewer_query), b.predict(1, reviewer_query)],
+    )
+
+
+def test_predict_is_the_mean_and_scores_the_ucb():
+    b = LinUCB(dim=4, alpha=0.5)
+    x = np.array([0.5, -0.25, 0.75, 0.0])
+    # Nothing pulled: no mean, but a positive bonus, so scores stay ordered.
+    assert b.predict(0, x) == 0.0
+    scores = b.scores(x)
+    assert scores.shape == (5,)
+    assert (scores > 0.0).all()
+    assert b.select(x) == int(np.argmax(scores))
+
+    b.update(2, x, 1.0)
+    bonus = b.scores(x)[2] - b.predict(2, x)
+    assert bonus > 0.0
+    assert b.select(x) == 2
+
+
+def test_failed_save_keeps_previous_file(tmp_path, monkeypatch):
+    b = LinUCB(dim=4)
+    b.update(0, np.ones(4), 1.0)
+    path = b.save(tmp_path / "bandit.npz")
+    snapshot = LinUCB.load(path).weights()
+
+    def partial_write(target, *args, **kwargs):
+        # Simulate a write that dies halfway: bytes land, then the call raises.
+        if hasattr(target, "write"):
+            target.write(b"partial")
+        else:
+            Path(target).write_bytes(b"partial")
+        raise OSError("disk full")
+
+    monkeypatch.setattr(np, "savez", partial_write)
+    with pytest.raises(OSError, match="disk full"):
+        b.save(path)
+    monkeypatch.undo()
+
+    assert np.allclose(LinUCB.load(path).weights(), snapshot)
+    assert sorted(entry.name for entry in tmp_path.iterdir()) == ["bandit.npz"]
+
+
+def test_predict_and_scores_validate_input():
+    b = LinUCB(dim=4)
+    with pytest.raises(ValueError, match="dim=4"):
+        b.scores(np.ones(3))
+    with pytest.raises(ValueError, match="dim=4"):
+        b.predict(0, np.ones(3))
+    with pytest.raises(ValueError, match="arm"):
+        b.predict(5, np.ones(4))
+    nan = np.ones(4)
+    nan[0] = np.nan
+    with pytest.raises(ValueError, match="non-finite"):
+        b.scores(nan)
