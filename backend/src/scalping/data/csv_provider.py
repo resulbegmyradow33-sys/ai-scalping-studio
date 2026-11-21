@@ -40,7 +40,9 @@ PROVIDER_NAME: Final[str] = "csv"
 #: Provider label when the file has no quotes; the env must add the spread.
 PROVIDER_NAME_NO_SPREAD: Final[str] = "csv_no_spread"
 
-#: Offset assumed when auto-detection has no DST gap to work with.
+#: Broker offset **assumed** when the export has no DST gap to prove one: ``+3``
+#: for Turkish brokers. It is never auto-detected; the one-hour-gap heuristic can
+#: confirm that the file is offset, but cannot distinguish ``+2`` from ``+3``.
 DEFAULT_BROKER_OFFSET_HOURS: Final[int] = 3
 
 _TS_FORMAT: Final[str] = "%Y.%m.%d %H:%M"

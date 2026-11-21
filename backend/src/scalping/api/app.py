@@ -16,6 +16,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from scalping import __version__
 from scalping.api.routes import router
@@ -23,11 +24,16 @@ from scalping.api.runner import SimulationRunner
 from scalping.config import Settings
 from scalping.data.store import ParquetStore
 
-__all__ = ["DEFAULT_DATA_ROOT", "DEFAULT_RUNS_ROOT", "app", "create_app"]
+__all__ = ["ALLOWED_ORIGINS", "DEFAULT_DATA_ROOT", "DEFAULT_RUNS_ROOT", "app", "create_app"]
 
 #: Defaults mirror the CLI's ``--root data`` and the plan's ``runs/`` folder.
 DEFAULT_DATA_ROOT = Path("data")
 DEFAULT_RUNS_ROOT = Path("runs")
+
+#: Local panel origins. Never ``*``: ``/api/data/download`` reads a path from
+#: the request body, so a wildcard would let any page ask this process to read a
+#: local file.
+ALLOWED_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
 
 
 def create_app(
@@ -41,6 +47,12 @@ def create_app(
     settings = Settings.load(settings_path) if settings_path is not None else Settings()
 
     app = FastAPI(title="AI Scalping Studio", version=__version__)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(ALLOWED_ORIGINS),
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
     app.state.data_root = root
     app.state.runs_root = runs
     app.state.settings = settings

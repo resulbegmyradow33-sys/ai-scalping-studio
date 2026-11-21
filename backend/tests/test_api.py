@@ -8,7 +8,9 @@ is open, so the first two frames are always ``seq 0`` and ``seq 1``.
 
 from __future__ import annotations
 
+import json
 import logging
+import math
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +19,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scalping.api.app import create_app
+from scalping.api.schemas import metrics_payload
+from scalping.backtest.metrics import Metrics
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 
@@ -334,10 +338,13 @@ def test_restart_resets_the_sequence_and_bumps_the_session(client, seed_data):
         client.post("/api/sim/control", json={"action": "stop"})
         client.post("/api/sim/start", json={"speed": 1, "mode": "replay"})
         # Frames from the old session that were already queued arrive first;
-        # the handshake is the first status frame after the restart.
-        for _ in range(10):
+        # the restart handshake is the first status frame that names the new
+        # session (the stop itself also announces a status).
+        for _ in range(20):
             handshake = ws.receive_json()
-            if handshake["type"] == "status":
+            if handshake["type"] == "status" and (
+                handshake["payload"]["session_id"] != first_session
+            ):
                 break
         else:
             pytest.fail("the restarted run never sent a status handshake")
@@ -364,7 +371,9 @@ def test_restart_handshake_matches_the_rewound_cursor(client, seed_data):
         handshake = None
         for _ in range(20):
             message = second.receive_json()
-            if message["type"] == "status":
+            # The stop announces its own status first; the restart handshake is
+            # the one that advertises the rewound head.
+            if message["type"] == "status" and message["payload"]["head_seq"] == 0:
                 handshake = message
                 break
         assert handshake is not None, "the second client never received a restart handshake"
@@ -388,3 +397,86 @@ def test_step_failure_ends_the_episode_with_an_error(client, seed_data, monkeypa
     assert message["payload"] == {"reason": "error"}
     assert runner.state == "error"
     assert "simulator step failed" in caplog.text
+
+
+# --- CORS, CSV without quotes and status announcements ----------------------
+
+
+def test_cors_allows_the_local_panel():
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.options(
+            "/api/sim/start",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+    assert r.status_code < 400
+    assert r.headers["access-control-allow-origin"] == "http://localhost:3000"
+
+
+def test_cors_has_no_wildcard_for_other_origins():
+    app = create_app()
+    with TestClient(app) as client:
+        r = client.get("/api/health", headers={"Origin": "http://evil.example"})
+    assert r.status_code == 200
+    assert "access-control-allow-origin" not in r.headers
+
+
+def test_sim_start_accepts_a_store_written_from_a_no_spread_csv(tmp_path, nospread_csv):
+    """CSV is the realistic path (spec 5.1): a 6-column export must start."""
+    app = create_app(data_root=tmp_path / "data")
+    body = {
+        "provider": "csv",
+        "symbol": "XAUUSD",
+        "start": "2026-01-05T00:00:00Z",
+        "end": "2026-01-06T00:00:00Z",
+        "path": str(nospread_csv),
+        "tz_offset": 0,
+    }
+    with TestClient(app) as client:
+        download = client.post("/api/data/download", json=body)
+        assert download.status_code == 200
+        r = client.post("/api/sim/start", json={"speed": 1, "mode": "replay"})
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize(
+    ("action", "state"),
+    [("stop", "stopped"), ("pause", "paused")],
+)
+def test_control_announces_its_state_on_a_live_socket(client, seed_data, action, state):
+    with client.websocket_connect("/ws/sim") as ws:
+        ws.receive_json()  # status, idle
+        client.post("/api/sim/start", json={"speed": 10, "mode": "replay"})
+        ws.receive_json()
+        ws.receive_json()
+        assert client.post("/api/sim/control", json={"action": action}).json()["ok"] is True
+        for _ in range(50):
+            message = ws.receive_json()
+            if message["type"] == "status":
+                break
+        else:  # pragma: no cover - only a regression reaches this branch
+            pytest.fail(f"{action} never announced a status frame")
+    assert message["payload"]["state"] == state
+
+
+def test_metrics_payload_maps_non_finite_values_to_null():
+    metrics = Metrics(
+        net_profit=50.0,
+        profit_factor=math.inf,
+        sharpe=0.0,
+        max_drawdown=0.0,
+        win_rate=1.0,
+        expectancy_r=1.0,
+        trades=1,
+        total_costs=5.0,
+        cost_ratio=0.1,
+        avg_bars=5.0,
+    )
+    payload = metrics_payload(metrics)
+    assert payload["profit_factor"] is None
+    assert payload["trades"] == 1
+    assert json.loads(json.dumps(payload, allow_nan=False)) == payload
+

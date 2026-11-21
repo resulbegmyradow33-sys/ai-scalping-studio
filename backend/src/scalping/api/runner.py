@@ -27,6 +27,10 @@ Contract, stated explicitly because it is unusual:
   (or paused, or finished) pump does not poll: it blocks on a wake event with a
   timeout until start/resume. A new start/resume sets that wake event, so the
   latency is a state change, not a poll interval.
+* **Control actions announce themselves.** ``stop``/``pause``/``resume``/
+  ``reset`` mark every live connection's cursor dirty, and the next pump sends a
+  fresh ``status`` frame, so the panel never keeps showing ``running`` after the
+  run stopped.
 
 v1 has no agent, so the replay policy is a fixed five-bar momentum rule: open
 with the momentum sign when flat, close when it flips. It is deterministic, it
@@ -197,6 +201,10 @@ class SimulationRunner:
         self._state = "idle"
         self._speed = 1.0
         self._next_due = 0.0
+        # Live cursor per WebSocket; control actions mark every cursor dirty so
+        # its next pump announces the new state instead of leaving the panel
+        # showing "running".
+        self._connections: set[SimConnection] = set()
         # Stop is a state flag; wake is what idle pumps block on. A set
         # ``threading.Event`` returns from wait() immediately, so waiting on
         # ``_stop`` itself could never idle a stopped pump.
@@ -256,7 +264,19 @@ class SimulationRunner:
     def connect(self) -> SimConnection:
         """A cursor that receives messages emitted after the current sequence."""
         with self._lock:
-            return SimConnection(self._seq, self._session_id)
+            conn = SimConnection(self._seq, self._session_id)
+            self._connections.add(conn)
+            return conn
+
+    def disconnect(self, conn: SimConnection) -> None:
+        """Forget a cursor; a closed socket must never be marked dirty again."""
+        with self._lock:
+            self._connections.discard(conn)
+
+    def _announce_locked(self) -> None:
+        """Mark every live cursor for a status handshake on its next pump."""
+        for conn in self._connections:
+            conn.awaiting_status = True
 
     def resume(self, conn: SimConnection, seq: int) -> None:
         """Replay buffered messages with ``seq`` greater than ``seq``.
@@ -276,19 +296,23 @@ class SimulationRunner:
     def _sync(self, conn: SimConnection) -> dict[str, Any] | None:
         """Return a status frame when this cursor must re-handshake."""
         with self._lock:
+            if conn.session_id != self._session_id and (
+                conn.last_sent > 0 or conn.awaiting_status
+            ):
+                # A start/reset rewound the sequence under a live client, or a
+                # control action asked for a status across that rewind. The
+                # cursor goes back to 0, and the handshake advertises that same
+                # 0: a client using head_seq as its resume gate must not skip
+                # the visible start of the new session. The real head is not
+                # relevant, because this cursor will be sent every event.
+                conn.awaiting_status = False
+                conn.session_id = self._session_id
+                conn.last_sent = 0
+                return self._status_locked(head_seq=0)
             if conn.awaiting_status:
                 conn.awaiting_status = False
                 conn.last_sent = min(conn.last_sent, self._seq)
                 return self._status_locked()
-            if conn.session_id != self._session_id and conn.last_sent > 0:
-                # A start/reset rewound the sequence under a live client. The
-                # cursor goes back to 0 and the handshake advertises that same
-                # 0: a client using head_seq as its resume gate must not skip
-                # the visible start of the new session. The real head is not
-                # relevant, because this cursor will be sent every event.
-                conn.session_id = self._session_id
-                conn.last_sent = 0
-                return self._status_locked(head_seq=0)
             conn.session_id = self._session_id
             return None
 
@@ -299,7 +323,7 @@ class SimulationRunner:
             raise NoDataError(
                 f"no data for {self._symbol} ({TIMEFRAME}); download bars before starting"
             )
-        features = build_features(frame)
+        features = build_features(frame, self._settings.costs)
         if features.X.shape[0] < MIN_BARS:
             raise RunnerError(f"not enough bars: need {MIN_BARS}")
         return features
@@ -339,6 +363,7 @@ class SimulationRunner:
                 self._playing = False
                 self._stop.set()
                 self._state = "stopped" if self._sim is not None else "idle"
+                self._announce_locked()
                 self._wake.set()
                 return True
             if action == "pause":
@@ -346,6 +371,8 @@ class SimulationRunner:
                     return False
                 self._playing = False
                 self._state = "paused"
+                self._announce_locked()
+                self._wake.set()
                 return True
             if action == "resume":
                 if self._sim is None or self._state == "finished":
@@ -354,11 +381,13 @@ class SimulationRunner:
                 self._state = "running"
                 self._next_due = 0.0
                 self._stop.clear()
+                self._announce_locked()
                 self._wake.set()
                 return True
             if action == "reset":
                 self._reset_locked()
                 self._stop.set()
+                self._announce_locked()
                 self._wake.set()
                 return True
             raise ValueError(f"unknown control action {action!r}")

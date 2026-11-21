@@ -19,7 +19,7 @@ import json
 import socket
 import sys
 from collections.abc import Sequence
-from dataclasses import asdict, fields
+from dataclasses import asdict
 from datetime import UTC, date, datetime, time
 from enum import Enum
 from pathlib import Path
@@ -28,8 +28,8 @@ from typing import Any, Final, NoReturn
 import numpy as np
 import polars as pl
 
+from scalping.api.schemas import metrics_payload
 from scalping.backtest.engine import BacktestResult, run_backtest
-from scalping.backtest.metrics import Metrics
 from scalping.config import Settings
 from scalping.data.csv_provider import CsvProvider, DataError
 from scalping.data.store import ParquetStore
@@ -183,22 +183,11 @@ def _rule_baseline(obs: np.ndarray) -> int:
     return _BUY if float(obs[_RET5_INDEX]) > 0.0 else _HOLD
 
 
-def _metric_values(metrics: Metrics) -> dict[str, Any]:
-    """Metrics by dataclass field name; non-finite values become JSON ``null``."""
-    values: dict[str, Any] = {}
-    for field_ in fields(metrics):
-        value = getattr(metrics, field_.name)
-        if isinstance(value, float) and not np.isfinite(value):
-            value = None
-        values[field_.name] = value
-    return values
-
-
 def _report(result: BacktestResult) -> dict[str, Any]:
     return {
         "run_id": result.run_id,
         "config_hash": result.config_hash,
-        "metrics": _metric_values(result.metrics),
+        "metrics": metrics_payload(result.metrics),
         "trades": [asdict(trade) for trade in result.trades],
     }
 
@@ -216,8 +205,8 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
             f"not enough data for {args.symbol} ({TIMEFRAME}): "
             f"need {_MIN_BARS} bars, have {frame.height}"
         )
-    features = build_features(frame)
     settings = Settings()
+    features = build_features(frame, settings.costs)
     if args.policy == _POLICY_RULE:
         result = run_backtest(_rule_baseline, features, settings, policy_name=RULE_LABEL)
     else:
@@ -309,7 +298,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tz-offset",
         type=int,
         default=None,
-        help="broker UTC offset in hours (auto-detect when omitted)",
+        help="broker UTC offset in hours (assumed +3 when omitted)",
     )
     csv.add_argument("--root", default=str(DEFAULT_ROOT))
     csv.set_defaults(handler=_cmd_data_csv)

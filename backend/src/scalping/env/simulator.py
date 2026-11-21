@@ -96,7 +96,8 @@ class Simulator:
     and close steps earn no shaping bonus). The episode terminates once equity reaches 80% of the initial balance and
     truncates at ``MAX_STEPS`` or when the data ends; an open position is
     force-closed with reason ``"liquidation"`` when equity depletion terminates
-    the episode and billed through a ``"data_end"`` close before truncating.
+    the episode, and billed through a ``"data_end"`` or ``"max_steps"`` quote
+    close before truncating, so an episode never ends with an open position.
     ``info`` carries ``equity``, ``position``, ``opened`` (the position this
     step created, or ``None``), ``trade`` (closed this step), ``blocked``,
     ``strategy`` and ``reason``.
@@ -228,6 +229,13 @@ class Simulator:
             # so the episode never ends with an unaccounted trade. The close is
             # a quote exit, priced like the mark that triggered the termination.
             trade = self._close(self._bar(self._i), "liquidation")
+            equity = self._equity()
+
+        if self.broker.position is not None and self.steps >= MAX_STEPS:
+            # Truncation must leave a flat, fully booked account: close through
+            # the same quote path as ``data_end`` so balance == equity and every
+            # dollar of PnL belongs to a trade.
+            trade = self._close(self._bar(self._i), "max_steps")
             equity = self._equity()
 
         # Keep the broker's ATR current for the bar the next step will act on.

@@ -29,7 +29,9 @@ from scalping.data.resample import resample
 from scalping.features.context import htf_context, session_flags
 from scalping.features.indicators import atr, macd_hist, rsi
 from scalping.features.liquidity import fvg, liquidity_sweep
+from scalping.features.prepare import prepare_bars
 from scalping.features.structure import market_structure, order_block_distance
+from scalping.types import CostConfig
 
 __all__ = ["FEATURE_COLUMNS", "WARMUP", "FeatureFrame", "build_features"]
 
@@ -373,15 +375,25 @@ def _empty_frame() -> FeatureFrame:
     )
 
 
-def build_features(df: pl.DataFrame) -> FeatureFrame:
+def build_features(df: pl.DataFrame, costs: CostConfig | None = None) -> FeatureFrame:
     """Build the causal feature frame for M1 ``df``.
 
     ``df`` is normalised with :func:`~scalping.data.base.conform_bars` and sorted
-    by ``ts``. Rows are returned in that sorted order.
+    by ``ts``. Rows are returned in that sorted order. A source without a quoted
+    spread (the OHLC-only broker CSV) is filled first by
+    :func:`~scalping.features.prepare.prepare_bars` with ``costs`` (default
+    :class:`~scalping.types.CostConfig`), so the matrix stays finite.
+
+    ``X[valid_from:]`` is guaranteed finite. A non-finite value raises
+    :class:`ValueError` naming the offending columns, so a data problem fails at
+    ingestion instead of deep inside an episode reset.
     """
     frame = conform_bars(df).sort("ts")
     if frame.is_empty():
         return _empty_frame()
+    frame = prepare_bars(
+        frame, CostConfig() if costs is None else costs, atr(frame, 14).to_numpy()
+    )
 
     structure = market_structure(frame, 2).rename(
         {
@@ -412,12 +424,23 @@ def build_features(df: pl.DataFrame) -> FeatureFrame:
     if features.columns != list(FEATURE_COLUMNS):  # pragma: no cover - guard only
         raise RuntimeError("feature column order drifted from FEATURE_COLUMNS")
 
+    X = features.cast(pl.Float32).to_numpy().copy(order="C")
+    valid_from = min(WARMUP, frame.height)
+    tail = X[valid_from:]
+    if tail.size and not np.isfinite(tail).all():
+        names = [
+            name
+            for index, name in enumerate(FEATURE_COLUMNS)
+            if not np.isfinite(tail[:, index]).all()
+        ]
+        raise ValueError(f"non-finite feature columns: {names}")
+
     return FeatureFrame(
-        X=features.cast(pl.Float32).to_numpy().copy(order="C"),
+        X=X,
         ts=frame["ts"].to_numpy(),
         ohlc=frame.select("open", "high", "low", "close").to_numpy(),
         spread=frame["spread"].to_numpy(),
         atr=work["_atr14"].to_numpy().astype(np.float64, copy=True),
-        valid_from=min(WARMUP, frame.height),
+        valid_from=valid_from,
         columns=list(FEATURE_COLUMNS),
     )

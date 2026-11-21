@@ -61,7 +61,8 @@ def session_flags(ts: pl.Series) -> pl.DataFrame:
             "asia": asia.fill_null(False),
             "london": london.fill_null(False),
             "ny": ny.fill_null(False),
-            "ny_open_30": (ny & (hour == _NY_HOURS[0]) & (minute >= 30)).fill_null(False),
+            # The first half hour of the NY session: 13:00-13:29 UTC.
+            "ny_open_30": (ny & (hour == _NY_HOURS[0]) & (minute < 30)).fill_null(False),
         }
     )
 

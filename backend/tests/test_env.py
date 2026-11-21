@@ -12,7 +12,8 @@ import numpy as np
 import pytest
 
 from scalping.backtest.metrics import compute
-from scalping.config import RiskConfig, Settings
+from scalping.config import CostConfig, RiskConfig, Settings
+from scalping.data.csv_provider import CsvProvider
 from scalping.data.synthetic import SyntheticProvider
 from scalping.env.simulator import Simulator
 from scalping.env.trading_env import TradingEnv
@@ -543,3 +544,46 @@ def test_strategy_selector_labels_the_entry():
     assert info["strategy"] == "breakout"
     assert info["position"] is not None
     assert info["position"].strategy == "breakout"
+
+
+def test_ohlc_only_csv_round_trips_through_the_environment(nospread_csv):
+    """Spec 5.1: a CSV without quotes must still run by applying the spread model."""
+    raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None)
+    env = TradingEnv(build_features(raw, CostConfig()), Settings())
+
+    obs, _ = env.reset(seed=1)
+    assert np.isfinite(obs).all()
+    for action in (1, 0, 3):
+        obs, reward, terminated, truncated, _ = env.step(action)
+        assert np.isfinite(obs).all()
+        assert np.isfinite(reward)
+        if terminated or truncated:
+            break
+
+
+def test_max_steps_truncation_closes_the_open_position(monkeypatch):
+    from scalping.env import simulator as simulator_module
+
+    monkeypatch.setattr(simulator_module, "MAX_STEPS", 40)
+    df = SyntheticProvider(seed=5).fetch(
+        "XAUUSD", datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 7, tzinfo=UTC)
+    )
+    sim = Simulator(build_features(df), Settings())
+    sim.reset(0)
+
+    equity: list[float] = []
+    trades = []
+    while True:
+        result = sim.step(1)  # buy once, then every further buy is blocked
+        equity.append(float(result.info["equity"]))
+        if result.info["trade"] is not None:
+            trades.append(result.info["trade"])
+        if result.terminated or result.truncated:
+            break
+
+    assert result.info["reason"] == "max_steps"
+    assert trades and trades[-1].reason == "max_steps"
+    assert sim.broker.position is None
+    assert sim.balance == pytest.approx(equity[-1])
+    assert sum(trade.pnl for trade in trades) == pytest.approx(equity[-1] - 10_000.0)
+

@@ -165,6 +165,7 @@ async def sim_socket(websocket: WebSocket) -> None:
     try:
         await asyncio.wait({sender, reader}, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        runner.disconnect(conn)
         for task in (sender, reader):
             task.cancel()
         try:

@@ -14,13 +14,16 @@ import numpy as np
 import polars as pl
 import pytest
 
+from scalping.data.csv_provider import CsvProvider
 from scalping.data.resample import resample
 from scalping.data.synthetic import SyntheticProvider
 from scalping.features.build import FeatureFrame, build_features
 from scalping.features.context import htf_context, session_flags
 from scalping.features.indicators import atr, macd_hist, rsi
 from scalping.features.liquidity import fvg, liquidity_sweep
+from scalping.features.prepare import prepare_bars
 from scalping.features.structure import market_structure, swings
+from scalping.types import CostConfig
 
 
 def bars(closes: list[float]) -> pl.DataFrame:
@@ -276,6 +279,58 @@ def test_ohlc_and_spread_match_input(day: pl.DataFrame) -> None:
     assert (f.ohlc[:, 1] >= f.ohlc[:, 2]).all()
 
 
+# --- OHLC-only sources and the cost spread model ---------------------------
+
+
+def test_prepare_bars_fills_a_missing_spread_from_the_cost_model(nospread_csv) -> None:
+    raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None).sort("ts")
+    assert raw["spread"].null_count() == raw.height
+    costs = CostConfig()
+    out = prepare_bars(raw, costs, atr(raw, 14).to_numpy())
+
+    spread = out["spread"].to_numpy()
+    assert np.isfinite(spread).all() and (spread > 0.0).all()
+    assert (spread >= costs.spread_floor).all()
+    assert (spread <= 5.0 * costs.spread_floor).all()
+    np.testing.assert_allclose(
+        out["ask_close"].to_numpy(), out["close"].to_numpy() + spread, rtol=0, atol=1e-9
+    )
+    np.testing.assert_allclose(out["bid_close"].to_numpy(), out["close"].to_numpy(), rtol=0, atol=0)
+    assert not out["spread"].is_null().any()
+
+
+def test_prepare_bars_leaves_a_quoted_spread_untouched(day: pl.DataFrame) -> None:
+    flat = day.sort("ts")
+    out = prepare_bars(flat, CostConfig(spread_floor=9.0), atr(flat, 14).to_numpy())
+    np.testing.assert_allclose(out["spread"].to_numpy(), flat["spread"].to_numpy(), rtol=0, atol=0)
+    np.testing.assert_allclose(
+        out["ask_close"].to_numpy(), flat["ask_close"].to_numpy(), rtol=0, atol=0
+    )
+
+
+def test_build_features_accepts_an_ohlc_only_csv(nospread_csv) -> None:
+    raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None)
+    f = build_features(raw, CostConfig())
+
+    assert np.isfinite(f.X[f.valid_from :]).all()
+    assert np.isfinite(f.spread).all() and (f.spread > 0.0).all()
+    assert np.isfinite(feature(f, "spread_norm")[f.valid_from :]).all()
+    assert np.isfinite(feature(f, "spread_z20")[f.valid_from :]).all()
+
+
+def test_non_finite_feature_columns_are_named(day: pl.DataFrame) -> None:
+    frame = day.head(300)
+    broken = frame.with_columns(
+        pl.when(pl.int_range(0, frame.height) == 200)
+        .then(float("nan"))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    with pytest.raises(ValueError, match="non-finite feature columns") as info:
+        build_features(broken)
+    assert "ret_1" in str(info.value)
+
+
 # --- causality helpers -----------------------------------------------------
 
 
@@ -445,6 +500,7 @@ def test_session_flags_are_utc_and_mutually_exclusive() -> None:
         [
             datetime(2026, 1, 5, 2, 0, tzinfo=UTC),
             datetime(2026, 1, 5, 9, 0, tzinfo=UTC),
+            datetime(2026, 1, 5, 13, 15, tzinfo=UTC),
             datetime(2026, 1, 5, 13, 45, tzinfo=UTC),
             datetime(2026, 1, 5, 18, 0, tzinfo=UTC),
         ],
@@ -455,7 +511,9 @@ def test_session_flags_are_utc_and_mutually_exclusive() -> None:
     assert flags.to_dicts() == [
         {"asia": True, "london": False, "ny": False, "ny_open_30": False},
         {"asia": False, "london": True, "ny": False, "ny_open_30": False},
+        # ``ny_open_30`` is the first half hour of the NY session: 13:00-13:29.
         {"asia": False, "london": False, "ny": True, "ny_open_30": True},
+        {"asia": False, "london": False, "ny": True, "ny_open_30": False},
         {"asia": False, "london": False, "ny": True, "ny_open_30": False},
     ]
     assert (flags.select("asia", "london", "ny").sum_horizontal().to_numpy() <= 1).all()
