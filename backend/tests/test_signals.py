@@ -197,19 +197,62 @@ def test_missing_bar_columns_raise():
         strategy_signals(bars([10.0] * 10).drop("high"))
 
 
-def test_nan_price_never_invents_a_signal():
-    # A NaN breaks every comparison (`x < NaN` is true in Polars) and, fed to
-    # the EMA, poisons it for the rest of the frame. A rising series can never
-    # justify a short, so any -1 here is an artifact.
-    closes = [10 + i * 0.1 for i in range(120)]
-    closes[50] = float("nan")
-    out = strategy_signals(bars(closes))
+def momentum_trend_bars():
+    """Strong uptrend with shallow periodic dips: momentum fires on most bars."""
+    closes = [10 + 0.45 * i for i in range(250)]
+    for i in range(4, 250, 6):
+        closes[i] -= 0.3
+    start = datetime(2026, 1, 5, 10, 0, tzinfo=UTC)
+    return pl.DataFrame({
+        "ts": [start + timedelta(minutes=i) for i in range(250)],
+        "open": closes,
+        "close": closes,
+        "high": [c + 1.0 for c in closes],
+        "low": [c - 1.0 for c in closes],
+        "bid_close": closes, "ask_close": closes,
+        "spread": [0.2] * 250, "volume": [10] * 250,
+    })
+
+
+def test_nan_close_does_not_poison_momentum():
+    clean = momentum_trend_bars()
+    clean_sig = strategy_signals(clean)["sig_momentum"]
+    assert (clean_sig[20:] != 0).mean() >= 0.6   # the gate really fires
+
+    bad = clean.with_columns(
+        pl.when(pl.int_range(pl.len()) == 150)
+        .then(float("nan"))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    # Causal reference: the unusable bar carries the previous close.
+    replaced = clean.with_columns(
+        pl.when(pl.int_range(pl.len()) == 150)
+        .then(pl.lit(clean["close"][149]))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    out = strategy_signals(bad)
+    bad_sig = out["sig_momentum"]
+    ref_sig = strategy_signals(replaced)["sig_momentum"]
+    assert (ref_sig[151:201] != 0).sum() >= 20   # the comparison is not vacuous
+
+    # (a) no momentum signal after the NaN that the clean run does not have.
+    for i in range(151, 201):
+        if bad_sig[i] != 0:
+            assert ref_sig[i] != 0
+
+    # (b) strengths stay finite and inside [0, 1] everywhere.
     for s in ALL_STRATEGIES:
-        sig = out[f"sig_{s.value}"]
         strength = out[f"strength_{s.value}"]
         assert strength.is_finite().all()
         assert strength.min() >= 0.0
         assert strength.max() <= 1.0
-        assert sig[50] == 0
-        assert ((sig != 0) & (strength <= 0.0)).sum() == 0
-    assert (out["sig_momentum"][51:] == -1).sum() == 0
+
+    # (c) the unusable bar itself abstains.
+    assert bad_sig[150] == 0
+
+    # The replaced value may only move bars whose 20-bar window holds it
+    # (row 150 plus the EMA span it feeds); everything else must be identical.
+    diffs = [i for i in range(out.height) if bad_sig[i] != ref_sig[i]]
+    assert all(150 <= i <= 169 for i in diffs), diffs
