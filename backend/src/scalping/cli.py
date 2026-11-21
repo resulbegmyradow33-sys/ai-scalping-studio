@@ -14,7 +14,9 @@ and on every trade it opens.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import socket
 import sys
 from collections.abc import Sequence
 from dataclasses import asdict, fields
@@ -157,6 +159,9 @@ def _cmd_data_csv(args: argparse.Namespace) -> None:
     except OSError as exc:
         reason = exc.strerror or str(exc)
         raise CliError(f"cannot read {path}: {reason}") from exc
+    except UnicodeError as exc:
+        reason = getattr(exc, "reason", None) or str(exc)
+        raise CliError(f"cannot decode {path} as UTF-8: {reason}") from exc
     store = ParquetStore(args.root)
     _print_json(_ingest(frame, args.symbol, store))
 
@@ -225,19 +230,59 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
 
 
 # --- serve ---------------------------------------------------------------------
+def _bind(host: str, port: int) -> socket.socket:
+    """Bind and listen before uvicorn starts, so a failure stays ours to report."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((host, port))
+        listener.listen(2048)
+    except OSError as exc:
+        listener.close()
+        reason = exc.strerror or str(exc)
+        raise RuntimeError(f"cannot bind {host}:{port}: {reason}") from exc
+    return listener
+
+
+def _stderr_log_config(base: dict[str, Any]) -> dict[str, Any]:
+    """Copy a uvicorn logging config with every handler pointed at stderr.
+
+    uvicorn's default sends access logs to stdout, which would break the CLI's
+    one-JSON-line contract. ``access_log=False`` already disables them; routing
+    the handlers too keeps any future logger off stdout as well.
+    """
+    config = copy.deepcopy(base)
+    for handler in config["handlers"].values():
+        handler["stream"] = "ext://sys.stderr"
+    return config
+
+
 def _cmd_serve(args: argparse.Namespace) -> None:
-    """Start the API with one worker (all state is process-local)."""
+    """Bind the port, then serve the API with one worker.
+
+    Binding ourselves reports the real port for ``--port 0`` and turns
+    ``EADDRINUSE`` into a normal CLI error instead of uvicorn's ``SystemExit``.
+    All state is process-local, so one worker is the contract.
+    """
     import uvicorn
 
     from scalping.api.app import create_app
 
-    _print_json({"status": "serving", "host": args.host, "port": args.port})
-    uvicorn.run(
-        create_app(data_root=Path(args.root)),
-        host=args.host,
-        port=args.port,
-        workers=1,
-    )
+    listener = _bind(args.host, args.port)
+    port = int(listener.getsockname()[1])
+    try:
+        config = uvicorn.Config(
+            create_app(data_root=Path(args.root)),
+            host=args.host,
+            port=port,
+            log_config=_stderr_log_config(uvicorn.config.LOGGING_CONFIG),
+            access_log=False,
+            workers=1,
+        )
+        _print_json({"status": "serving", "host": args.host, "port": port})
+        uvicorn.Server(config).run(sockets=[listener])
+    finally:
+        listener.close()
 
 
 # --- parser --------------------------------------------------------------------
@@ -298,6 +343,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except DataError as exc:
         _print_error(str(exc))
         return 2
+    except SystemExit as exc:
+        # uvicorn can sys.exit() on a startup failure; SystemExit is a
+        # BaseException and would otherwise bypass the JSON error contract.
+        code = exc.code if isinstance(exc.code, int) else 0
+        message = "server exited during startup" if code <= 0 else f"server exited with code {code}"
+        _print_error(message, kind="SystemExit")
+        return 1
     except Exception as exc:  # noqa: BLE001 - the CLI owns the top-level boundary
         _print_error(str(exc) or type(exc).__name__, kind=type(exc).__name__)
         return 1
