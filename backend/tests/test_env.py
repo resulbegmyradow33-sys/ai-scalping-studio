@@ -97,6 +97,7 @@ def test_hold_does_not_trade():
     for _ in range(50):
         _, _, term, trunc, info = env.step(0)
         assert info["position"] is None
+        assert info["opened"] is None
         assert info["equity"] == pytest.approx(10_000.0)
         if term or trunc:
             break
@@ -107,6 +108,8 @@ def test_buy_opens_and_reward_is_finite():
     env.reset(seed=1)
     obs, r, term, trunc, info = env.step(1)
     assert info["position"] is not None
+    assert info["opened"] is not None
+    assert info["opened"] == info["position"]
     assert not term and not trunc
     assert np.isfinite(r) and -5 <= r <= 5
     assert obs.shape == (env.obs_dim,)

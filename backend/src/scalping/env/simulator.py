@@ -97,8 +97,9 @@ class Simulator:
     truncates at ``MAX_STEPS`` or when the data ends; an open position is
     force-closed with reason ``"liquidation"`` when equity depletion terminates
     the episode and billed through a ``"data_end"`` close before truncating.
-    ``info`` carries ``equity``, ``position``, ``trade`` (closed this step),
-    ``blocked``, ``strategy`` and ``reason``.
+    ``info`` carries ``equity``, ``position``, ``opened`` (the position this
+    step created, or ``None``), ``trade`` (closed this step), ``blocked``,
+    ``strategy`` and ``reason``.
     """
 
     def __init__(
@@ -234,13 +235,13 @@ class Simulator:
         # entry, so it marks the one step that earns the risk-gate credit. The
         # bonus never repeats on hold steps, which would farm +0.02 per bar.
         self.broker.atr = self._atr(self._i)
-        risk_ok = 1.0 if opened > 0.0 else 0.0
+        risk_ok = 1.0 if opened is not None else 0.0
 
         self._peak = max(self._peak, equity)
         drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0.0
         reward = (equity - self._equity_before) / self._initial * 100.0
         reward -= _DD_PENALTY * max(0.0, drawdown - _DD_LIMIT)
-        reward -= _OPEN_PENALTY * opened
+        reward -= _OPEN_PENALTY * (1.0 if opened is not None else 0.0)
         reward += _RISK_BONUS * risk_ok
         reward = float(np.clip(reward, -_REWARD_CLIP, _REWARD_CLIP))
 
@@ -263,7 +264,7 @@ class Simulator:
             reward,
             self._terminated,
             truncated,
-            self._info(equity, trade, blocked),
+            self._info(equity, trade, blocked, opened),
         )
 
     # --- test hooks --------------------------------------------------------
@@ -284,11 +285,16 @@ class Simulator:
 
     # --- actions -----------------------------------------------------------
 
-    def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, float, str | None]:
-        """Execute ``action`` at ``bar``; return ``(trade, opened, blocked)``."""
+    def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, Position | None, str | None]:
+        """Execute ``action`` at ``bar``; return ``(trade, opened, blocked)``.
+
+        ``opened`` is the :class:`Position` this call created, or ``None``. It
+        is independent of ``broker.position`` afterwards, so a position that is
+        stopped out on the very next mark is still reported as opened here.
+        """
         trade: Trade | None = None
         blocked: str | None = None
-        opened = 0.0
+        opened: Position | None = None
 
         if action in (_BUY, _SELL):
             account = self.broker.state(self.balance, self.day_start_equity)
@@ -322,7 +328,7 @@ class Simulator:
                             tp,
                             self.strategy,
                         )
-                        opened = 1.0
+                        opened = self.broker.position
         elif action == _CLOSE:
             if self.broker.position is None:
                 blocked = "no_position"
@@ -378,10 +384,17 @@ class Simulator:
     def _equity(self) -> float:
         return self.broker.state(self.balance, self.day_start_equity).equity
 
-    def _info(self, equity: float, trade: Trade | None, blocked: str | None) -> dict[str, Any]:
+    def _info(
+        self,
+        equity: float,
+        trade: Trade | None,
+        blocked: str | None,
+        opened: Position | None = None,
+    ) -> dict[str, Any]:
         return {
             "equity": equity,
             "position": self.broker.position,
+            "opened": opened,
             "trade": trade,
             "blocked": blocked,
             "strategy": self.strategy,

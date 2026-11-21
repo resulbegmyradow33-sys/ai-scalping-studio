@@ -4,6 +4,11 @@ Everything mutable lives on ``app.state`` and is created per factory call, so
 two apps in one process never share stored data, sequence numbers or a running
 simulator. Paths are only read when a route needs them: an absent ``runs_root``
 must not stop the app from starting.
+
+The store, the runner and the message ring are process-local. Run the API with
+a single uvicorn worker (``uvicorn scalping.api.app:app``); extra workers would
+each serve their own copy of the state and a WebSocket would only see the
+simulator living in the worker that accepted it.
 """
 
 from __future__ import annotations

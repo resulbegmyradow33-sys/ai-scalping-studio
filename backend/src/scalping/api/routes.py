@@ -9,13 +9,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 
 from anyio import ClosedResourceError
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 
 from scalping import __version__
-from scalping.api.runner import TIMEFRAME, NoDataError, SimConnection, SimulationRunner
+from scalping.api.runner import (
+    TIMEFRAME,
+    RunnerError,
+    SimConnection,
+    SimulationRunner,
+)
 from scalping.api.schemas import (
     ControlRequest,
     DataStatusResponse,
@@ -32,6 +38,8 @@ from scalping.data.dukascopy import DataUnavailable, DukascopyProvider
 from scalping.data.synthetic import SyntheticProvider
 
 __all__ = ["router"]
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_SEED = 7
 
@@ -97,29 +105,40 @@ def download(body: DownloadRequest, request: Request) -> DownloadResponse:
 
     Dukascopy can take a while; v1 keeps the request open rather than
     pretending a job queue exists. A feed that cannot serve the range maps to
-    503 with the provider's message.
+    503 with the provider's message. Construction reads no data but validates
+    the request (an unknown dukascopy symbol) and a CSV open happens inside
+    ``fetch``, so both live in the same guarded block.
     """
     store = request.app.state.store
-    provider = _provider(body, Path(request.app.state.data_root))
+    provider: DataProvider | None = None
     try:
+        provider = _provider(body, Path(request.app.state.data_root))
         frame = provider.fetch(body.symbol, body.start, body.end)
     except DataUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=400, detail=f"cannot read data source: {exc}") from exc
     finally:
-        close = getattr(provider, "close", None)
-        if callable(close):
-            close()
+        if provider is not None:
+            close = getattr(provider, "close", None)
+            if callable(close):
+                close()
     rows = store.write(body.symbol, TIMEFRAME, frame)
     return DownloadResponse(rows=rows)
 
 
 @router.post("/api/sim/start", response_model=StartResponse)
 async def sim_start(body: StartRequest, request: Request) -> StartResponse:
+    """Install a replay run; connected WebSocket pumps drive it.
+
+    Reading history and building features is CPU bound, so it runs in a worker
+    thread: the runner's state lock is a threading lock and safe off-loop.
+    """
     try:
-        session_id = _runner(request).start(body.speed, body.mode)
-    except NoDataError as exc:
+        session_id = await asyncio.to_thread(_runner(request).start, body.speed, body.mode)
+    except RunnerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return StartResponse(session_id=session_id)
 
@@ -128,7 +147,7 @@ async def sim_start(body: StartRequest, request: Request) -> StartResponse:
 async def sim_control(body: ControlRequest, request: Request) -> OkResponse:
     try:
         ok = _runner(request).control(body.action)
-    except NoDataError as exc:
+    except RunnerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return OkResponse(ok=ok)
 
@@ -163,6 +182,16 @@ async def _pump(runner: SimulationRunner, conn: SimConnection, websocket: WebSoc
     except (WebSocketDisconnect, ClosedResourceError, RuntimeError, OSError):
         # The peer left between two sends; the reader task notices too.
         return
+    except Exception:
+        # A bug outside the step path must not disappear into a cancelled
+        # task: log it, end the episode visibly, try to deliver that frame.
+        logger.exception("sim websocket pump failed")
+        runner.fail("error")
+        for message in runner.drain(conn):
+            try:
+                await websocket.send_json(message)
+            except (WebSocketDisconnect, ClosedResourceError, RuntimeError, OSError):
+                return
 
 
 async def _read(websocket: WebSocket, runner: SimulationRunner, conn: SimConnection) -> None:
