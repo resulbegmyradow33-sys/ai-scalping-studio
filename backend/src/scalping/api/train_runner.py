@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 import time
@@ -31,6 +32,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+
+import numpy as np
 
 from scalping.api.runner import MIN_BARS as SIM_MIN_BARS
 from scalping.api.runner import TIMEFRAME
@@ -40,7 +43,9 @@ from scalping.data.store import ParquetStore
 from scalping.features.build import FeatureFrame, build_features
 from scalping.rl.policy import load_policy
 from scalping.rl.registry import (
+    BANDIT_NAME,
     CONFIG_NAME,
+    METRICS_HISTORY_NAME,
     METRICS_NAME,
     load_run,
     save_manifest,
@@ -55,6 +60,8 @@ from scalping.rl.train import (
     train,
 )
 from scalping.serialize import metrics_payload
+from scalping.strategy.bandit import LinUCB
+from scalping.strategy.signals import ALL_STRATEGIES
 
 __all__ = [
     "LIVE_STATUSES",
@@ -124,6 +131,99 @@ def _steps(value: Any) -> int:
         return int(value or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _finite_float(value: Any) -> float | None:
+    """``value`` as a finite float, or ``None`` for missing/non-finite input."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def _finite_int(value: Any) -> int | None:
+    """``value`` as an int built from a finite number, or ``None``."""
+    number = _finite_float(value)
+    return None if number is None else int(number)
+
+
+def _series_from_history(run_dir: Path) -> dict[str, list[dict[str, Any]]] | None:
+    """Build the four training curves from ``metrics.jsonl`` in file order.
+
+    ``reward`` prefers the per-interval mean and falls back to the cumulative
+    one. A row whose value is missing or non-finite is skipped for that curve
+    only, so a null entropy does not drop its reward point. ``None`` means the
+    file is absent or empty and the caller should omit the whole block.
+    """
+    path = run_dir / METRICS_HISTORY_NAME
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+
+    series: dict[str, list[dict[str, Any]]] = {
+        "reward": [],
+        "episode_length": [],
+        "entropy": [],
+        "loss": [],
+    }
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        step = _finite_int(row.get("step"))
+        if step is None:
+            continue
+        reward_key = (
+            "reward_mean_interval" if "reward_mean_interval" in row else "reward_mean"
+        )
+        for name, key in (
+            ("reward", reward_key),
+            ("episode_length", "ep_len_mean"),
+            ("entropy", "entropy_loss"),
+            ("loss", "policy_loss"),
+        ):
+            value = _finite_float(row.get(key))
+            if value is not None:
+                series[name].append({"step": step, "value": value})
+    return series
+
+
+def _bandit_weights(run_dir: Path) -> list[dict[str, Any]] | None:
+    """Per-arm coefficient norms from ``bandit.npz``, in strategy order.
+
+    ``weight`` is ``||theta||`` of the arm's context coefficients, not a reward:
+    ``LinUCB.weights()`` drops the intercept, so ``theta @ x`` is neither the
+    predicted reward nor the UCB score. It is shown as a relative magnitude.
+    ``None`` means the file is absent (or unreadable) and the block is omitted.
+    """
+    path = run_dir / BANDIT_NAME
+    if not path.is_file():
+        return None
+    try:
+        weights = LinUCB.load(path).weights()
+    except (OSError, TypeError, ValueError, KeyError) as exc:
+        logger.warning("ignoring unreadable bandit file %s: %s", path, exc)
+        return None
+    rows: list[dict[str, Any]] = []
+    # Arm index is a frozen position in ALL_STRATEGIES; a shorter checkpoint is
+    # paired up to its own length instead of inventing arms.
+    for strategy, theta in zip(ALL_STRATEGIES, weights, strict=False):
+        rows.append(
+            {
+                "strategy": strategy.value,
+                "weight": _finite_float(float(np.linalg.norm(theta))),
+            }
+        )
+    return rows
 
 
 class TrainRunner:
@@ -338,7 +438,12 @@ class TrainRunner:
         return items
 
     def detail(self, run_id: str) -> dict[str, Any]:
-        """Config, latest metrics and status for one run."""
+        """Config, latest metrics, status and the chart data for one run.
+
+        ``step`` and ``total_steps`` drive the progress bar; ``series`` and
+        ``bandit`` are only present when the run has the corresponding file, and
+        the route omits unset fields rather than serialising nulls.
+        """
         run_dir = self._run_dir(run_id)
         manifest = load_run(run_dir)
         with self._lock:
@@ -346,11 +451,27 @@ class TrainRunner:
         if manifest is None and state is None:
             raise UnknownRunError(run_id)
         status = state.status if state is not None else str((manifest or {}).get("status") or "unknown")
-        return {
-            "config": _read_json(run_dir / CONFIG_NAME),
-            "metrics": _read_json(run_dir / METRICS_NAME),
+
+        config = _read_json(run_dir / CONFIG_NAME)
+        metrics = _read_json(run_dir / METRICS_NAME)
+        detail: dict[str, Any] = {
+            "config": config,
+            "metrics": metrics,
             "status": status,
+            "step": _finite_int(metrics.get("step")) or 0,
         }
+        params = config.get("params")
+        if isinstance(params, dict):
+            total_steps = _finite_int(params.get("total_steps"))
+            if total_steps is not None:
+                detail["total_steps"] = total_steps
+        series = _series_from_history(run_dir)
+        if series is not None:
+            detail["series"] = series
+        bandit = _bandit_weights(run_dir)
+        if bandit is not None:
+            detail["bandit"] = bandit
+        return detail
 
     def _run_dir(self, run_id: str) -> Path:
         """Resolve one run id, refusing anything that is not a single component."""

@@ -14,6 +14,7 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
@@ -23,6 +24,9 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.rl.policy import load_policy
 from scalping.rl.registry import save_manifest
+from scalping.strategy.bandit import LinUCB
+from scalping.strategy.labeling import CONTEXT_DIM
+from scalping.strategy.signals import ALL_STRATEGIES
 
 BODY = {"total_steps": 256, "n_envs": 1, "seed": 0, "symbol": "XAUUSD"}
 #: A run long enough that a second request arrives while it is still alive.
@@ -312,6 +316,123 @@ def test_listing_survives_a_non_numeric_step_count(client, tmp_path):
     response = client.get("/api/runs")
     assert response.status_code == 200
     assert response.json()[0]["steps"] == 0
+
+
+def _fake_run(
+    tmp_path: Path,
+    run_id: str,
+    *,
+    config: dict | None = None,
+    metrics: dict | None = None,
+    history: list[dict] | None = None,
+) -> Path:
+    """Create a registry directory the detail endpoint can serve."""
+    run_dir = tmp_path / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    save_manifest(
+        run_dir,
+        {
+            "run_id": run_id,
+            "created_at": "2026-01-01T00:00:00+00:00",
+            "status": "completed",
+            "steps": 0,
+            "reward_mean": None,
+        },
+    )
+    if config is not None:
+        (run_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    if metrics is not None:
+        (run_dir / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+    if history is not None:
+        lines = "\n".join(json.dumps(row) for row in history)
+        (run_dir / "metrics.jsonl").write_text(lines + "\n", encoding="utf-8")
+    return run_dir
+
+
+def test_detail_builds_ordered_series_from_the_metrics_history(client, seed_data, tmp_path):
+    r = client.post("/api/train", json=BODY)
+    run_id = r.json()["run_id"]
+    _wait_status(client, run_id, {"completed"})
+
+    history = [
+        {
+            "step": 100,
+            "reward_mean_interval": 0.10,
+            "ep_len_mean": 10.0,
+            "entropy_loss": 0.20,
+            "policy_loss": 0.30,
+        },
+        {
+            "step": 200,
+            "reward_mean": 0.05,
+            "ep_len_mean": 20.0,
+            "entropy_loss": None,
+            "policy_loss": 0.40,
+        },
+        {
+            "step": 300,
+            "reward_mean_interval": 0.30,
+            "ep_len_mean": 30.0,
+            "entropy_loss": 0.60,
+            "policy_loss": 0.70,
+        },
+    ]
+    run_dir = tmp_path / "runs" / run_id
+    (run_dir / "metrics.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in history) + "\n", encoding="utf-8"
+    )
+
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["total_steps"] == 256
+    latest = json.loads((run_dir / "metrics.json").read_text())
+    assert detail["step"] == latest["step"]
+
+    assert detail["series"]["reward"] == [
+        {"step": 100, "value": 0.10},
+        {"step": 200, "value": 0.05},  # falls back to reward_mean
+        {"step": 300, "value": 0.30},
+    ]
+    assert detail["series"]["episode_length"] == [
+        {"step": 100, "value": 10.0},
+        {"step": 200, "value": 20.0},
+        {"step": 300, "value": 30.0},
+    ]
+    # The null in row 2 is skipped, not turned into a zero.
+    assert detail["series"]["entropy"] == [
+        {"step": 100, "value": 0.20},
+        {"step": 300, "value": 0.60},
+    ]
+    assert [point["step"] for point in detail["series"]["loss"]] == [100, 200, 300]
+
+
+def test_detail_without_history_omits_series(client, tmp_path):
+    _fake_run(
+        tmp_path,
+        "nohist",
+        config={"params": {"total_steps": 1000}},
+        metrics={"step": 42, "reward_mean": 0.5},
+    )
+
+    detail = client.get("/api/runs/nohist").json()
+    assert "series" not in detail
+    assert detail["step"] == 42
+    assert detail["total_steps"] == 1000
+
+
+def test_detail_returns_bandit_weights_in_strategy_order(client, tmp_path):
+    bandit = LinUCB(n_arms=len(ALL_STRATEGIES), dim=CONTEXT_DIM)
+    bandit.fit_offline(
+        np.eye(CONTEXT_DIM)[: len(ALL_STRATEGIES)],
+        np.arange(len(ALL_STRATEGIES)),
+        np.arange(1, len(ALL_STRATEGIES) + 1, dtype=float),
+    )
+    expected = [float(np.linalg.norm(theta)) for theta in bandit.weights()]
+    run_dir = _fake_run(tmp_path, "bandit", metrics={"step": 10})
+    bandit.save(run_dir / "bandit.npz")
+
+    rows = client.get("/api/runs/bandit").json()["bandit"]
+    assert [row["strategy"] for row in rows] == [strategy.value for strategy in ALL_STRATEGIES]
+    assert [row["weight"] for row in rows] == pytest.approx(expected)
 
 
 def test_train_rejects_a_store_below_the_bar_floor(client, tmp_path):

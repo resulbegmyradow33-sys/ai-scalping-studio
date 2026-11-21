@@ -176,7 +176,13 @@ def list_runs(request: Request) -> list[RunSummary]:
     return [RunSummary(**item) for item in _trains(request).list_runs()]
 
 
-@router.get("/api/runs/{run_id}", response_model=RunDetail)
+@router.get(
+    "/api/runs/{run_id}",
+    response_model=RunDetail,
+    # Optional blocks (series, bandit, total_steps) are omitted, not null, when
+    # the run has no history or no bandit; the panel treats absence as empty.
+    response_model_exclude_unset=True,
+)
 def run_detail(run_id: str, request: Request) -> RunDetail:
     try:
         detail = _trains(request).detail(run_id)

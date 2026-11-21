@@ -17,6 +17,7 @@ from scalping.serialize import metrics_payload
 __all__ = [
     "BacktestRequest",
     "BacktestResponse",
+    "BanditWeight",
     "ControlRequest",
     "DataStatusResponse",
     "DownloadRequest",
@@ -31,6 +32,7 @@ __all__ = [
     "StartResponse",
     "TrainRequest",
     "TrainResponse",
+    "TrainingPoint",
     "metrics_payload",
 ]
 
@@ -112,10 +114,33 @@ class RunSummary(BaseModel):
     reward_mean: float | None
 
 
+class TrainingPoint(BaseModel):
+    """One checkpoint on a training curve; ``step`` is the x axis."""
+
+    step: int
+    value: float
+
+
+class BanditWeight(BaseModel):
+    """One arm of a stored LinUCB: the norm of its coefficient vector.
+
+    ``weight`` is not a reward. It is ``||theta_arm||`` over the context
+    coefficients and says how strongly that strategy's context moves the arm's
+    predicted return; the intercept is not included.
+    """
+
+    strategy: str
+    weight: float | None
+
+
 class RunDetail(BaseModel):
     config: dict[str, Any]
     metrics: dict[str, Any]
     status: str
+    step: int = 0
+    total_steps: int | None = None
+    series: dict[str, list[TrainingPoint]] | None = None
+    bandit: list[BanditWeight] | None = None
 
 
 class RunControlRequest(BaseModel):
