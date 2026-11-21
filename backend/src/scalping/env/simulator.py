@@ -56,10 +56,10 @@ _TERMINATE_FRACTION: Final[float] = 0.8
 #: Episode drawdown allowance before the reward is penalised.
 _DD_LIMIT: Final[float] = 0.03
 
-#: Reward shaping weights.
-_DD_PENALTY: Final[float] = 0.5
-_OPEN_PENALTY: Final[float] = 0.02
-_RISK_BONUS: Final[float] = 0.05
+#: Reward shaping weights (spec 2026-11-20, reward rebalance d48fc51).
+_DD_PENALTY: Final[float] = 50.0
+_OPEN_PENALTY: Final[float] = 0.05
+_RISK_BONUS: Final[float] = 0.02
 _REWARD_CLIP: Final[float] = 5.0
 
 _HOLD: Final[int] = 0
@@ -88,13 +88,15 @@ class Simulator:
     ``step`` truncates with ``info["reason"] == "no_bars"``.
 
     The reward is ``Δequity / initial * 100
-    - 0.5 * max(0, drawdown - 0.03) - 0.02 * opened + 0.05 * risk_ok`` clipped
+    - 50 * max(0, drawdown - 0.03) - 0.05 * opened + 0.02 * risk_ok`` clipped
     to ``[-5, 5]``, where ``drawdown`` is the fractional drop from the episode
-    peak, ``opened`` is 1 when the step opened a position and ``risk_ok`` is 1
-    when an entry intent passed the risk gate. The episode terminates once
-    equity reaches 80% of the initial balance and truncates at ``MAX_STEPS`` or
-    when the data ends. ``info`` carries ``equity``, ``position``, ``trade``
-    (closed this step), ``blocked``, ``strategy`` and ``reason``.
+    peak, ``opened`` is 1.0 only on the step that opens a position, and
+    ``risk_ok`` is 1.0 only while a risk-gate-approved position is open.
+    The episode terminates once equity reaches 80% of the initial balance and
+    truncates at ``MAX_STEPS`` or when the data ends; an open position is
+    billed through a ``"data_end"`` close before truncating. ``info`` carries
+    ``equity``, ``position``, ``trade`` (closed this step), ``blocked``,
+    ``strategy`` and ``reason``.
     """
 
     def __init__(
@@ -130,6 +132,7 @@ class Simulator:
         self._done = False
         self._terminated = False
         self._no_bars = False
+        self._risk_approved = False
         self._reason: str | None = None
         self.reset()
 
@@ -154,6 +157,7 @@ class Simulator:
         self._equity_value = self._initial
         self._done = False
         self._terminated = False
+        self._risk_approved = False
         self._reason = None
         self.session = None
         self._no_bars = not self._has_window()
@@ -187,6 +191,7 @@ class Simulator:
             raise ValueError(f"action must be 0, 1, 2 or 3, got {action!r}")
 
         bar = self._bar(self._i)
+        self.broker.atr = self._atr(self._i)
         equity_now = self._equity()
         session = self.risk.session_anchor(bar.ts)
         if session != self.session:
@@ -194,10 +199,12 @@ class Simulator:
             self.session = session
         self._equity_before = equity_now
 
-        trade, opened, risk_ok, blocked = self._apply(action, bar)
+        trade, opened, blocked = self._apply(action, bar)
 
         if self._i >= self._last_index:
-            # The fill was the last thing this data set can price.
+            # No next bar to price the exit: bill an open position at this one.
+            if self.broker.position is not None:
+                trade = self._close(bar, "data_end")
             equity = self._equity()
             reason = "data_end"
         else:
@@ -214,6 +221,12 @@ class Simulator:
                     trade = self._close(next_bar, "timeout")
             equity = self._equity()
             reason = None
+
+        # Keep the broker's ATR current for the bar the next step will act on.
+        self.broker.atr = self._atr(self._i)
+        if self.broker.position is None:
+            self._risk_approved = False
+        risk_ok = 1.0 if self._risk_approved else 0.0
 
         self._peak = max(self._peak, equity)
         drawdown = (self._peak - equity) / self._peak if self._peak > 0 else 0.0
@@ -248,27 +261,26 @@ class Simulator:
     # --- test hooks --------------------------------------------------------
 
     def _force_equity(self, value: float) -> None:
-        """Test-only hook: set the balance so ``equity == value`` while flat.
+        """Test-only hook: set the balance so ``equity == value``.
 
-        Any open position is closed at the current bar and its PnL discarded,
-        so the next step starts from exactly ``value``. Never call this from a
-        strategy, backtest or training run.
+        Requires a flat account: overwriting the balance with a position open
+        would drop a real ``Trade`` and desynchronise the broker ledger.
+        Never call this from a strategy, backtest or training run.
         """
         if not isfinite(value) or value <= 0:
             raise ValueError(f"value must be finite and > 0, got {value!r}")
         if self.broker.position is not None:
-            self.broker.close(self._bar(self._i), "force_equity")
+            raise RuntimeError("_force_equity requires a flat account")
         self.balance = float(value)
         self._equity_value = float(value)
 
     # --- actions -----------------------------------------------------------
 
-    def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, float, float, str | None]:
-        """Execute ``action`` at ``bar``; return ``(trade, opened, risk_ok, blocked)``."""
+    def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, float, str | None]:
+        """Execute ``action`` at ``bar``; return ``(trade, opened, blocked)``."""
         trade: Trade | None = None
         blocked: str | None = None
         opened = 0.0
-        risk_ok = 0.0
 
         if action in (_BUY, _SELL):
             account = self.broker.state(self.balance, self.day_start_equity)
@@ -283,7 +295,6 @@ class Simulator:
                     blocked = "no_atr"
                 else:
                     side = Side.LONG if action == _BUY else Side.SHORT
-                    self.broker.atr = atr
                     slippage = self.settings.costs.slippage_atr_frac * atr
                     entry = (
                         bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
@@ -304,14 +315,14 @@ class Simulator:
                             self.strategy,
                         )
                         opened = 1.0
-                        risk_ok = 1.0
+                        self._risk_approved = True
         elif action == _CLOSE:
             if self.broker.position is None:
                 blocked = "no_position"
             else:
                 trade = self._close(bar, "manual")
 
-        return trade, opened, risk_ok, blocked
+        return trade, opened, blocked
 
     def _close(self, bar: Bar, reason: str) -> Trade:
         trade = self.broker.close(bar, reason)
@@ -325,6 +336,10 @@ class Simulator:
         start = self._i - WINDOW + 1
         window = self.features.X[start : self._i + 1].reshape(-1)
         flat = window.astype(np.float32, copy=True)
+        if not np.isfinite(flat).all():
+            raise ValueError(
+                f"non-finite feature in the observation window ending at bar {self._i}"
+            )
         account = self.broker.state(self.balance, self.day_start_equity)
         position = account.position
         if position is None:

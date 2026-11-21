@@ -9,7 +9,7 @@ observation shape behind.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Self
+from typing import Any
 
 import gymnasium as gym
 import numpy as np
@@ -19,23 +19,7 @@ from scalping.config import Settings
 from scalping.env.simulator import Simulator, StepResult
 from scalping.features.build import FeatureFrame
 
-__all__ = ["ResetResult", "TradingEnv"]
-
-
-class ResetResult(tuple):
-    """``(obs, info)`` that also converts to the observation array.
-
-    Gymnasium's contract is ``reset() -> (obs, info)`` while the project's
-    determinism check compares two resets with ``np.allclose`` and the training
-    loops want the bare vector. Iterating/unpacking yields ``(obs, info)``;
-    ``np.asarray(result)`` yields ``obs``.
-    """
-
-    def __new__(cls, obs: np.ndarray, info: dict[str, Any]) -> Self:
-        return super().__new__(cls, (obs, info))
-
-    def __array__(self, dtype: np.dtype | None = None, copy: bool | None = None) -> np.ndarray:
-        return np.asarray(self[0], dtype=dtype)
+__all__ = ["TradingEnv"]
 
 
 class TradingEnv(gym.Env):
@@ -66,14 +50,16 @@ class TradingEnv(gym.Env):
 
     def reset(
         self, *, seed: int | None = None, options: dict[str, Any] | None = None
-    ) -> ResetResult:
+    ) -> tuple[np.ndarray, dict[str, Any]]:
         super().reset(seed=seed)
         self._obs = self.sim.reset(seed=seed)
-        return ResetResult(self._obs, {})
+        return self._obs, {}
 
     def step(self, action: int) -> StepResult:
         if self.strategy_selector is not None:
             self.sim.strategy = str(self.strategy_selector(self._obs))
         result = self.sim.step(int(action))
-        self._obs = result.obs
+        # Keep a private copy so a caller mutating the returned obs cannot
+        # corrupt the observation the strategy selector reads next step.
+        self._obs = result.obs.copy()
         return result
