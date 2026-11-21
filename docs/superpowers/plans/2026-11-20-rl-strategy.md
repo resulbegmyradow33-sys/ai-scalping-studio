@@ -278,7 +278,7 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement**
 
-Per arm: `A_i = ridge*I + Σ x xᵀ`, `b_i = Σ r x`, `theta_i = A_i⁻¹ b_i`, `p_i = theta_i·x + alpha*sqrt(xᵀ A_i⁻¹ x)`. `select` = argmax `p_i`. `fit_offline` accumulates in one pass then solves. Guard zero-pull arms with `theta=0` and a small exploration bonus so they still get picked once.
+Per arm, on the **bias-augmented** vector `z = [x, 1]` (the intercept is required: a zero-intercept model cannot represent a constant reward, and the brief's online dominance test is unsatisfiable without it): `A_i = ridge*I + Σ z zᵀ`, `b_i = Σ r z`, `theta_i = A_i⁻¹ b_i`, `p_i = theta_i·z + alpha*sqrt(zᵀ A_i⁻¹ z)`. `select` = argmax `p_i`. `fit_offline` accumulates in one pass then solves. Guard zero-pull arms with `theta=0` and a small exploration bonus so they still get picked once. `weights()` returns the non-intercept columns only; `predict(arm, x)` is the supported way to read a score.
 
 - [ ] **Step 4: Run test to verify it passes**
 
