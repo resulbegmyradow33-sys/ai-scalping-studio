@@ -331,6 +331,53 @@ def test_non_finite_feature_columns_are_named(day: pl.DataFrame) -> None:
     assert "ret_1" in str(info.value)
 
 
+def _rewrite_after(frame: pl.DataFrame, index: int, factor: float = 1.05) -> pl.DataFrame:
+    """Return ``frame`` with every OHLC value after ``index`` scaled by ``factor``."""
+    later = pl.int_range(0, frame.height) > index
+    return frame.with_columns(
+        [
+            pl.when(later).then(pl.col(name) * factor).otherwise(pl.col(name)).alias(name)
+            for name in ("open", "high", "low", "close")
+        ]
+    )
+
+
+def test_prepare_bars_spread_is_causal(nospread_csv) -> None:
+    """A bar's modelled spread may not read an ATR from a later bar."""
+    raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None).sort("ts")
+    t = 150
+    shifted = _rewrite_after(raw, t)
+    costs = CostConfig()
+
+    before = prepare_bars(raw, costs, atr(raw, 14).to_numpy())
+    after = prepare_bars(shifted, costs, atr(shifted, 14).to_numpy())
+
+    for column in ("spread", "ask_close", "bid_close"):
+        np.testing.assert_array_equal(
+            before[column].to_numpy()[: t + 1],
+            after[column].to_numpy()[: t + 1],
+            err_msg=f"{column} changed before bar {t}",
+        )
+    assert not np.array_equal(
+        before["spread"].to_numpy(), after["spread"].to_numpy()
+    ), "the rewritten tail must change the modelled spread after t"
+
+
+def test_build_features_is_causal_on_a_no_spread_source(nospread_csv) -> None:
+    """The guarantee holds at the level the Simulator consumes: ``spread`` and ``X``."""
+    raw = CsvProvider(nospread_csv, tz_offset_hours=0).fetch("XAUUSD", None, None).sort("ts")
+    t = 150
+    shifted = _rewrite_after(raw, t)
+
+    full = build_features(raw)
+    other = build_features(shifted)
+
+    np.testing.assert_array_equal(full.spread[: t + 1], other.spread[: t + 1])
+    np.testing.assert_array_equal(full.X[: t + 1], other.X[: t + 1])
+    assert not np.array_equal(full.spread, other.spread)
+
+
+
 # --- causality helpers -----------------------------------------------------
 
 

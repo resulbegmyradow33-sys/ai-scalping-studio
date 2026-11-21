@@ -8,11 +8,13 @@ produces a finite, strictly positive spread.
 
 The model is::
 
-    spread = spread_floor * (1 + spread_vol_mult * atr14 / mean(atr14))
+    spread = spread_floor * (1 + spread_vol_mult * atr14 / atr_ref)
 
-clamped to ``[spread_floor, 5 * spread_floor]``. The ATR mean is taken over the
-whole frame, so this is a calibration, not a causal feature; it only runs on the
-rows that have no spread of their own.
+where ``atr_ref`` is the causal rolling mean of ``atr14`` over the current and
+the previous :data:`ATR_REF_WINDOW - 1` bars. The result is clamped to
+``[spread_floor, 5 * spread_floor]``, and a zero or non-finite reference falls
+back to ``spread_floor``. Bar ``t`` therefore reads only bars at or before ``t``,
+matching the feature layer's causality rule.
 """
 
 from __future__ import annotations
@@ -22,10 +24,13 @@ import polars as pl
 
 from scalping.types import CostConfig
 
-__all__ = ["prepare_bars"]
+__all__ = ["ATR_REF_WINDOW", "prepare_bars"]
 
 #: Upper clamp of the model, as a multiple of ``CostConfig.spread_floor``.
 _MAX_FLOOR_MULTIPLE: float = 5.0
+
+#: Bars in the causal reference mean (the current bar plus the prior 239).
+ATR_REF_WINDOW: int = 240
 
 
 def prepare_bars(df: pl.DataFrame, costs: CostConfig, atr: np.ndarray) -> pl.DataFrame:
@@ -34,10 +39,14 @@ def prepare_bars(df: pl.DataFrame, costs: CostConfig, atr: np.ndarray) -> pl.Dat
     ``atr`` is the raw ATR(14) of ``df``, aligned row by row. Rows that already
     carry a positive spread are left untouched, including their quotes. A
     filled row gets ``ask_close = close + spread`` and ``bid_close = close``.
+
+    The volatility reference is a backward-looking rolling mean, so the spread
+    at bar ``t`` never depends on a bar after ``t``.
     """
     if df.is_empty():
         return df
     values = np.asarray(atr, dtype=np.float64).reshape(-1)
+    values = np.where(np.isfinite(values), values, np.nan)
     if values.size != df.height:
         raise ValueError(f"atr has {values.size} values for {df.height} bars")
     floor = float(costs.spread_floor)
@@ -48,13 +57,16 @@ def prepare_bars(df: pl.DataFrame, costs: CostConfig, atr: np.ndarray) -> pl.Dat
     if not df.filter(missing.fill_null(True)).height:
         return df
 
-    finite = values[np.isfinite(values)]
-    reference = float(finite.mean()) if finite.size else 0.0
-    if reference > 0.0:
-        ratio = np.where(np.isfinite(values), values, reference) / reference
-    else:
-        ratio = np.ones(values.size, dtype=np.float64)
-    model = floor * (1.0 + float(costs.spread_vol_mult) * ratio)
+    reference = (
+        pl.Series("_atr_ref", values, dtype=pl.Float64)
+        .rolling_mean(window_size=ATR_REF_WINDOW, min_samples=1)
+        .to_numpy()
+    )
+    model = np.full(values.size, floor, dtype=np.float64)
+    usable = np.isfinite(values) & np.isfinite(reference) & (reference > 0.0)
+    model[usable] = floor * (
+        1.0 + float(costs.spread_vol_mult) * values[usable] / reference[usable]
+    )
     model = np.clip(model, floor, _MAX_FLOOR_MULTIPLE * floor)
 
     work = df.with_columns(
