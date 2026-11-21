@@ -149,9 +149,10 @@ def _momentum() -> tuple[pl.Expr, pl.Expr]:
     """Trend continuation with volatility or displacement expansion.
 
     Reads ``_close_clean`` rather than the raw close: an EMA is recursive, so a
-    single NaN would otherwise stay NaN for every later bar and flip the whole
-    tail to the short side. The clean series forward fills the gap (causal) and
-    the row itself still abstains through the ``_finite`` gate.
+    single non-finite price (NaN or +/-inf) would otherwise poison every later
+    bar and flip the whole tail to the short side. The clean series forward
+    fills the gap (causal) and the row itself still abstains through the
+    ``_finite`` gate.
     """
     close = pl.col("_close_clean")
     ema = close.ewm_mean(span=_MOMENTUM_EMA, adjust=False)
@@ -296,11 +297,17 @@ def _work_frame(df: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col(name).is_finite()).then(pl.col(name)).otherwise(None).alias(name)
         for name in _PRICE_COLUMNS
     )
-    # Causal close for the recursive momentum indicators: forward fill the gap,
-    # then fall back to the raw value (never a frame-wide statistic).
-    close_clean = pl.coalesce(
-        pl.col("close").fill_nan(None).forward_fill(), pl.col("close")
-    ).alias("_close_clean")
+    # Causal close for the recursive momentum indicators: null anything
+    # non-finite (NaN and +/-inf), then forward fill from the last printed
+    # value. No raw fallback: re-inserting a leading NaN would poison the EWM
+    # seed, while a null start simply delays the EMA.
+    close_clean = (
+        pl.when(pl.col("close").is_finite())
+        .then(pl.col("close"))
+        .otherwise(None)
+        .forward_fill()
+        .alias("_close_clean")
+    )
     structure = market_structure(clean, 2).select(
         pl.col("trend").alias("_trend"),
         pl.col("bos").alias("_bos"),

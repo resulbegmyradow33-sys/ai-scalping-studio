@@ -249,10 +249,68 @@ def test_nan_close_does_not_poison_momentum():
         assert strength.min() >= 0.0
         assert strength.max() <= 1.0
 
-    # (c) the unusable bar itself abstains.
-    assert bad_sig[150] == 0
+    # (c) every family abstains on the unusable bar.
+    for s in ALL_STRATEGIES:
+        assert out[f"sig_{s.value}"][150] == 0
 
     # The replaced value may only move bars whose 20-bar window holds it
     # (row 150 plus the EMA span it feeds); everything else must be identical.
     diffs = [i for i in range(out.height) if bad_sig[i] != ref_sig[i]]
     assert all(150 <= i <= 169 for i in diffs), diffs
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("-inf")])
+def test_infinite_close_behaves_like_a_missing_bar(bad_value):
+    # An infinity is as unusable as a NaN: `ewm_mean` returns inf and then NaN
+    # forever, which used to leave the whole tail with a short bias.
+    clean = momentum_trend_bars()
+    bad = clean.with_columns(
+        pl.when(pl.int_range(pl.len()) == 150)
+        .then(pl.lit(bad_value))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    replaced = clean.with_columns(
+        pl.when(pl.int_range(pl.len()) == 150)
+        .then(pl.lit(clean["close"][149]))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    out = strategy_signals(bad)
+    bad_sig = out["sig_momentum"]
+    ref_sig = strategy_signals(replaced)["sig_momentum"]
+    assert (ref_sig[151:201] != 0).sum() >= 20
+
+    for i in range(151, 201):
+        if bad_sig[i] != 0:
+            assert ref_sig[i] != 0
+    for s in ALL_STRATEGIES:
+        assert out[f"sig_{s.value}"][150] == 0
+        strength = out[f"strength_{s.value}"]
+        assert strength.is_finite().all()
+        assert strength.min() >= 0.0
+        assert strength.max() <= 1.0
+    diffs = [i for i in range(out.height) if bad_sig[i] != ref_sig[i]]
+    assert all(150 <= i <= 169 for i in diffs), diffs
+
+
+def test_leading_nan_close_starts_the_ema_later():
+    # There is no previous close for row 0, so the clean series is null there
+    # and the EMA simply starts at row 1. Re-seeding it with the raw NaN would
+    # zero the whole momentum column.
+    clean = momentum_trend_bars()
+    bad = clean.with_columns(
+        pl.when(pl.int_range(pl.len()) == 0)
+        .then(float("nan"))
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    out = strategy_signals(bad)
+    for s in ALL_STRATEGIES:
+        assert out[f"sig_{s.value}"][0] == 0
+        strength = out[f"strength_{s.value}"]
+        assert strength.is_finite().all()
+        assert strength.min() >= 0.0
+        assert strength.max() <= 1.0
+    # A poisoned seed would suppress every later signal; the trend still fires.
+    assert (out["sig_momentum"][10:] != 0).sum() >= 100
