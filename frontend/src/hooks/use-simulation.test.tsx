@@ -201,6 +201,70 @@ describe("useSimulation — socket lifecycle", () => {
     expect(result.current.bars.map((item) => item.ts)).toEqual(["a", "b", "c", "d"]);
   });
 
+  it("does not let a buffered status revert the adopted epoch", async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(() => pending));
+
+    const { result } = renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => socket.serverMessage(status(null)));
+
+    let started!: Promise<void>;
+    act(() => {
+      started = result.current.start(1);
+    });
+
+    // A pre-start handshake queued while the HTTP call is pending.
+    act(() => {
+      socket.serverMessage(status(null));
+      socket.serverMessage(bar(1, "a"));
+    });
+
+    await act(async () => {
+      resolveFetch(new Response(JSON.stringify({ session_id: "sess-A" }), { status: 200 }));
+      await started;
+    });
+
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["a"]);
+
+    // The adopted epoch must still be sess-A, so its own status keeps the bar.
+    act(() => socket.serverMessage(status("sess-A", 1)));
+
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["a"]);
+  });
+
+  it("ignores a second start while one is in flight", async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const fetchMock = vi.fn(() => pending);
+    vi.stubGlobal("fetch", fetchMock);
+
+    const { result } = renderHook(() => useSimulation());
+
+    let first!: Promise<void>;
+    let second!: Promise<void>;
+    act(() => {
+      first = result.current.start(1);
+      second = result.current.start(100);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFetch(new Response(JSON.stringify({ session_id: "sess-A" }), { status: 200 }));
+      await Promise.all([first, second]);
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("drops the buffer when the start request fails", async () => {
     let rejectFetch!: (error: unknown) => void;
     const pending = new Promise<Response>((_resolve, reject) => {

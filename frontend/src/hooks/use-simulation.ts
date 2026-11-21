@@ -107,7 +107,9 @@ export function useSimulation() {
       // backoff: only a real frame proves the connection is healthy.
       attempt = 0;
       if (startingRef.current) {
-        bufferRef.current.push(raw);
+        // The live status path and the adoption own the epoch during a start;
+        // replaying a pre-start status would revert it. Never buffer status.
+        if (raw.type !== "status") bufferRef.current.push(raw);
         return;
       }
       handleMessage(target, raw);
@@ -181,6 +183,10 @@ export function useSimulation() {
 
   const start = useCallback(
     async (speed: number): Promise<void> => {
+      // Defensive: the UI disables start while one is in flight. A second
+      // call must not clear the buffer the first one is filling.
+      if (startingRef.current) return;
+
       dispatch({ type: "clearError" });
       const wasFinished = snapshotRef.current.status === "finished";
 
