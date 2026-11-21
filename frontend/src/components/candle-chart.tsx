@@ -17,17 +17,14 @@ import {
   createChart,
   createSeriesMarkers,
   LineStyle,
-  type CandlestickData,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
-  type SeriesMarker,
   type Time,
-  type UTCTimestamp,
 } from "lightweight-charts";
 
-import { toCandles, toMarkers, type Timeframe, type TradeMarker } from "@/lib/chart-data";
+import { toCandles, toMarkers, type Timeframe } from "@/lib/chart-data";
 import type { BarPayload, TradeOpenPayload, TradeSummary } from "@/lib/types";
 
 export interface CandleChartProps {
@@ -49,6 +46,36 @@ const COLORS = {
   tp: "#16a34a",
 } as const;
 
+/** Fit only once a dataset can fill the viewport without absurd bar spacing. */
+const MIN_BARS_TO_FIT = 30;
+
+/** Stable default so `useMemo`/marker effects do not rerun on every render. */
+const EMPTY_TRADES: readonly TradeSummary[] = [];
+
+const DEFAULT_BAR_SPACING = 6;
+const DEFAULT_RIGHT_OFFSET = 5;
+
+type MarkerList = ReturnType<typeof toMarkers>;
+type MarkerItem = MarkerList[number];
+
+interface RenderedData {
+  length: number;
+  lastTime: number | null;
+  timeframe: Timeframe;
+}
+
+function markerEquals(a: MarkerItem, b: MarkerItem): boolean {
+  return a.time === b.time && a.position === b.position && a.shape === b.shape && a.text === b.text;
+}
+
+/** Cheap bounds check: the stream only appends trades or drops the oldest. */
+function sameMarkerBounds(a: MarkerList, b: MarkerList): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  if (a.length === 0) return true;
+  return markerEquals(a[0], b[0]) && markerEquals(a[a.length - 1], b[b.length - 1]);
+}
+
 /**
  * A canvas surface is required by lightweight-charts; jsdom and SSR have none.
  * ResizeObserver is checked first because the chart relies on it for sizing and
@@ -66,15 +93,9 @@ export function canUseChartSurface(): boolean {
   }
 }
 
-function candleKey(candles: CandlestickData<UTCTimestamp>[], timeframe: Timeframe): string {
-  const last = candles[candles.length - 1];
-  if (!last) return `${timeframe}:0`;
-  return `${timeframe}:${candles.length}:${last.time}:${last.close}`;
-}
-
 export function CandleChart({
   bars,
-  trades = [],
+  trades = EMPTY_TRADES,
   position = null,
   timeframe = "M1",
   height = 420,
@@ -83,7 +104,8 @@ export function CandleChart({
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const fittedRef = useRef(false);
-  const dataKeyRef = useRef<string>("");
+  const renderedRef = useRef<RenderedData | null>(null);
+  const lastMarkersRef = useRef<MarkerList | null>(null);
   const heightRef = useRef(height);
   heightRef.current = height;
 
@@ -124,6 +146,9 @@ export function CandleChart({
           borderColor: COLORS.border,
           timeVisible: true,
           secondsVisible: false,
+          // Sensible spacing until the first full dataset is fitted.
+          barSpacing: DEFAULT_BAR_SPACING,
+          rightOffset: DEFAULT_RIGHT_OFFSET,
         },
         crosshair: {
           vertLine: { color: COLORS.text, labelBackgroundColor: COLORS.grid },
@@ -159,7 +184,8 @@ export function CandleChart({
     if (resizeObserver && container) resizeObserver.observe(container);
 
     fittedRef.current = false;
-    dataKeyRef.current = "";
+    renderedRef.current = null;
+    lastMarkersRef.current = null;
 
     setChart(created);
     setSeries(createdSeries);
@@ -169,6 +195,8 @@ export function CandleChart({
       priceLinesRef.current = [];
       markersRef.current?.detach();
       markersRef.current = null;
+      renderedRef.current = null;
+      lastMarkersRef.current = null;
       setChart(null);
       setSeries(null);
       created.remove();
@@ -184,13 +212,40 @@ export function CandleChart({
   useEffect(() => {
     if (!series) return;
 
-    const key = candleKey(candles, timeframe);
-    if (key === dataKeyRef.current) return;
-    dataKeyRef.current = key;
+    const previous = renderedRef.current;
+    const last = candles[candles.length - 1];
 
-    series.setData(candles);
+    if (!last) {
+      if (previous === null || previous.length !== 0) series.setData([]);
+      renderedRef.current = { length: 0, lastTime: null, timeframe };
+      fittedRef.current = false;
+      return;
+    }
 
-    if (!fittedRef.current && candles.length > 0) {
+    // Same array length (last-candle revision) or a clean append: O(1) update
+    // keeps the viewport instead of resetting it with a full setData.
+    const sameLength =
+      previous !== null && previous.timeframe === timeframe && previous.length === candles.length;
+    const appended =
+      previous !== null &&
+      previous.timeframe === timeframe &&
+      previous.lastTime !== null &&
+      candles.length === previous.length + 1 &&
+      last.time > previous.lastTime;
+
+    if (sameLength || appended) {
+      series.update(last);
+    } else {
+      series.setData(candles);
+    }
+
+    renderedRef.current = { length: candles.length, lastTime: last.time, timeframe };
+
+    // A new session restarting at 0–1 bars must be able to fit again once it
+    // grows; fitting a single bar would lock spacing for the whole session.
+    if (candles.length <= 1) fittedRef.current = false;
+
+    if (!fittedRef.current && candles.length >= MIN_BARS_TO_FIT) {
       chart?.timeScale().fitContent();
       fittedRef.current = true;
     }
@@ -198,7 +253,9 @@ export function CandleChart({
 
   useEffect(() => {
     if (!series) return;
-    markersRef.current?.setMarkers(markers as SeriesMarker<Time>[]);
+    if (lastMarkersRef.current && sameMarkerBounds(lastMarkersRef.current, markers)) return;
+    markersRef.current?.setMarkers(markers);
+    lastMarkersRef.current = markers;
   }, [series, markers]);
 
   // SL/TP lines belong to the open position only; closed positions remove them.
@@ -210,7 +267,7 @@ export function CandleChart({
 
     if (!position) return;
 
-    if (Number.isFinite(position.sl)) {
+    if (Number.isFinite(position.sl) && position.sl > 0) {
       priceLinesRef.current.push(
         series.createPriceLine({
           price: position.sl,
@@ -223,7 +280,7 @@ export function CandleChart({
       );
     }
 
-    if (Number.isFinite(position.tp)) {
+    if (Number.isFinite(position.tp) && position.tp > 0) {
       priceLinesRef.current.push(
         series.createPriceLine({
           price: position.tp,

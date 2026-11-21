@@ -24,3 +24,44 @@ describe("chart data", () => {
     expect(m[1].text).toContain("12");
   });
 });
+
+describe("chart data edges", () => {
+  it("sorts unsorted input", () => {
+    const out = toCandles([bar(120, 2, 3, 1, 2.5), bar(60, 1, 2, 0.5, 1.5)], "M1");
+    expect(out.map((candle) => candle.time)).toEqual([60, 120]);
+  });
+
+  it("merges duplicate timestamps keeping the last close", () => {
+    const out = toCandles([bar(60, 10, 12, 9, 11), bar(60, 11, 15, 8, 14)], "M1");
+    expect(out).toEqual([{ time: 60, open: 10, high: 15, low: 8, close: 14 }]);
+  });
+
+  it("drops bars with unparseable timestamps", () => {
+    const out = toCandles(
+      [bar(NaN, 1, 2, 1, 1.5), { ts: "not-a-date", o: 1, h: 2, l: 1, c: 1.5 }],
+      "M1",
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it("buckets M15 by epoch seconds", () => {
+    const out = toCandles([bar(0, 1, 2, 0.5, 1.5), bar(899, 2, 3, 1, 2.5), bar(900, 3, 4, 2, 3.5)], "M15");
+    expect(out.map((candle) => candle.time)).toEqual([0, 900]);
+    expect(out[0]).toMatchObject({ open: 1, high: 3, low: 0.5, close: 2.5 });
+  });
+
+  it("accepts ISO-string timestamps", () => {
+    const out = toCandles(
+      [{ ts: "2026-01-05T10:00:00Z", o: 1, h: 2, l: 0.5, c: 1.5 }],
+      "M1",
+    );
+    expect(out[0].time).toBe(Date.parse("2026-01-05T10:00:00Z") / 1000);
+  });
+
+  it("labels a non-finite pnl with a dash", () => {
+    const m = toMarkers([
+      { entry_ts: "2026-01-05T10:00:00Z", exit_ts: "2026-01-05T10:04:00Z", pnl: NaN } as never,
+    ]);
+    expect(m[1].text).toBe("—");
+  });
+});
