@@ -39,6 +39,10 @@ class TradingEnv(gym.Env):
     frame the context matrix's success columns are computed from. Training
     should pass ``label_events(df, settings)`` so the context is priced with the
     episode's account instead of the module default.
+
+    ``start`` is the first decision bar of every episode, forwarded to the
+    simulator. Training uses it to give each vectorised env a different slice of
+    the same frame; the default keeps the historical behaviour.
     """
 
     def __init__(
@@ -47,9 +51,16 @@ class TradingEnv(gym.Env):
         settings: Settings,
         strategy_selector: Callable[[np.ndarray], int] | ArmSelector | None = None,
         labels: pl.DataFrame | None = None,
+        start: int | None = None,
     ) -> None:
         super().__init__()
-        self.sim = Simulator(features, settings, strategy_selector=strategy_selector, labels=labels)
+        self.sim = Simulator(
+            features,
+            settings,
+            start=0 if start is None else start,
+            strategy_selector=strategy_selector,
+            labels=labels,
+        )
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)
         self._obs = np.zeros(self.sim.obs_dim, dtype=np.float32)

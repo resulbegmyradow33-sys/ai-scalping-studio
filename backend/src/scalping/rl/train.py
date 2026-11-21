@@ -1,11 +1,16 @@
 """PPO training over the trading environment, written as a reproducible run.
 
-A call to :func:`train` is a pure function of ``(config, features, settings,
-selector)``: the run id is derived from the hyperparameters, the data and the
-seed, so re-running the same inputs lands in the same ``runs/<run_id>/`` and
-overwrites it. Learning happens in chunks of ``checkpoint_every`` environment
-steps; after each chunk the model and the metrics snapshot are replaced
-atomically, so a Ctrl-C leaves the last complete checkpoint loadable.
+A call to :func:`train` is a function of ``(config, features, settings,
+selector)``: the run id is derived from the hyperparameters, the settings, the
+selector flag, the data and the seed, so re-running the same inputs lands in the
+same ``runs/<run_id>/`` and overwrites it. Learning happens in chunks of
+``checkpoint_every`` environment steps; after each chunk the model, the
+normaliser and the metrics are replaced atomically, so a Ctrl-C or a stop
+request leaves the last complete checkpoint loadable.
+
+The vectorised envs do not replay one bar range: env ``k`` starts at its own
+offset into the usable part of the frame, so the batch contains distinct
+episodes of the same price path.
 
 The RNG is seeded once (Python, NumPy, torch) and passed to stable-baselines3 and
 the vectorised environments; the seed and the effective data hash are recorded in
@@ -13,17 +18,19 @@ the vectorised environments; the seed and the effective data hash are recorded i
 count and same dependency versions give the same metrics within reported
 tolerance.
 
-On this 8 GB machine torch and its BLAS pools are pinned to one thread at import
-time. Training a 3 545-wide observation vector with an MLP is memory-light, but
-OpenMP's default pool would still reserve a worker per core.
+On this 8 GB machine torch and its BLAS pools are pinned to one thread by
+:func:`~scalping.rl.runtime.pin_threads` at the start of training, not at import
+time.
 """
 
 from __future__ import annotations
 
 import hashlib
-import os
+import json
 import platform
 import random
+import threading
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -36,22 +43,42 @@ import stable_baselines3
 import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import CallbackList
-from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.logger import configure
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.vec_env.base_vec_env import VecEnv
 
 from scalping.config import Settings
+from scalping.env.simulator import WINDOW
 from scalping.env.trading_env import TradingEnv
 from scalping.features.build import FeatureFrame
-from scalping.rl.callbacks import METRICS_NAME, AtomicCheckpointCallback, MetricsCallback
-from scalping.rl.policy import CONFIG_NAME
-from scalping.rl.registry import MODEL_NAME, run_id_for, save_manifest, save_model, write_json
+from scalping.rl.callbacks import (
+    CheckpointCallback,
+    ControlCallback,
+    MetricsCallback,
+    TrainingHalted,
+)
+from scalping.rl.registry import (
+    BANDIT_NAME,
+    CONFIG_NAME,
+    METRICS_HISTORY_NAME,
+    METRICS_NAME,
+    MODEL_NAME,
+    VECNORMALIZE_NAME,
+    ManifestWriter,
+    run_id_for,
+    write_json,
+)
+from scalping.rl.runtime import pin_threads
 from scalping.strategy.bandit import LinUCB
 
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-torch.set_num_threads(1)
-
-__all__ = ["MIN_BARS", "TrainConfig", "TrainResult", "data_hash_for", "train"]
+__all__ = [
+    "MIN_BARS",
+    "TrainConfig",
+    "TrainResult",
+    "data_hash_for",
+    "env_starts_for",
+    "train",
+]
 
 #: Floor under the feature matrix height. Three days of synthetic M1 is ~4 320
 #: bars; anything smaller cannot fill an episode with a warm observation window.
@@ -60,8 +87,8 @@ MIN_BARS: Final[int] = 4_000
 #: Minibatch architecture of the policy and value networks.
 _NET_ARCH: Final[list[int]] = [64, 64]
 
-#: File name of the optional frozen bandit beside the model.
-BANDIT_NAME: Final[str] = "bandit.npz"
+#: Observation clipping of the reward/observation normaliser.
+_CLIP_OBS: Final[float] = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +156,25 @@ def data_hash_for(features: FeatureFrame) -> str:
     return digest.hexdigest()
 
 
+def env_starts_for(features: FeatureFrame, n_envs: int) -> list[int]:
+    """Return one disjoint start bar per env over the usable part of the frame.
+
+    The first start is the earliest decision bar the simulator accepts; each
+    later env is offset by ``usable // n_envs`` bars. Sharing the frame keeps
+    memory flat while the envs see different price action.
+    """
+    if n_envs < 1:
+        raise ValueError(f"n_envs must be >= 1, got {n_envs}")
+    first = int(features.valid_from) + WINDOW - 1
+    usable = len(features.X) - first
+    if usable <= 0:
+        raise ValueError("no usable bars after the warm-up window")
+    step = usable // n_envs
+    if step < 1:
+        raise ValueError(f"n_envs {n_envs} exceeds the {usable} usable bars")
+    return [first + index * step for index in range(n_envs)]
+
+
 def _versions() -> dict[str, str]:
     return {
         "python": platform.python_version(),
@@ -157,15 +203,25 @@ def _make_vec_env(
     selector: LinUCB | None,
     n_envs: int,
     seed: int,
-) -> DummyVecEnv:
-    """One process, ``n_envs`` independent environment instances, fixed seeds."""
+    gamma: float,
+) -> tuple[VecNormalize, list[int]]:
+    """Build ``n_envs`` envs on distinct start bars, normalised and seeded."""
 
-    def factory() -> TradingEnv:
-        return TradingEnv(features, settings, strategy_selector=selector)
+    def factory(start: int) -> Callable[[], TradingEnv]:
+        return lambda: TradingEnv(features, settings, strategy_selector=selector, start=start)
 
-    env = DummyVecEnv([factory for _ in range(n_envs)])
-    env.seed(seed)
-    return env
+    starts = env_starts_for(features, n_envs)
+    inner = DummyVecEnv([factory(start) for start in starts])
+    inner.seed(seed)
+    normalized = VecNormalize(
+        inner,
+        norm_obs=True,
+        norm_reward=True,
+        clip_obs=_CLIP_OBS,
+        gamma=gamma,
+    )
+    normalized.seed(seed)
+    return normalized, starts
 
 
 def _obs_dim(env: VecEnv) -> int:
@@ -182,38 +238,111 @@ def _n_actions(env: VecEnv) -> int:
     return int(space.n)
 
 
+def _existing_identity(run_dir: Path, identity: dict[str, Any]) -> dict[str, Any]:
+    """Refuse a directory whose config describes a different run.
+
+    The directory is named by a hash; a mismatch means either a hash collision or
+    a manually edited/copied config. Overwriting would replace a run that cannot
+    be reproduced from the new inputs, so fail instead.
+    """
+    path = run_dir / CONFIG_NAME
+    if not path.is_file():
+        return identity
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+        # Rebuild from the authoritative fields instead of trusting a nested
+        # ``identity`` blob: a config whose top-level seed/settings disagree with
+        # its identity was edited and must not be overwritten.
+        stored_identity = {
+            "params": stored["params"],
+            "settings": stored["settings"],
+            "selector": stored["selector"],
+            "data_hash": stored["data_hash"],
+            "seed": stored["seed"],
+        }
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        raise ValueError("run directory already holds a different configuration") from exc
+    if stored_identity != identity:
+        raise ValueError("run directory already holds a different configuration")
+    return identity
+
+
 def train(
     config: TrainConfig,
     features: FeatureFrame,
     settings: Settings,
     selector: LinUCB | None = None,
     out_dir: str | Path = Path("runs"),
+    *,
+    stop_event: threading.Event | None = None,
+    pause_event: threading.Event | None = None,
 ) -> TrainResult:
     """Train PPO on ``features`` and write a self-contained run directory.
 
     Refuses a matrix below :data:`MIN_BARS` bars before touching the disk.
     ``selector``, when given, is frozen: the environment calls it to pick the
     strategy context but training never updates it. Its state is saved as
-    ``bandit.npz`` next to the model.
+    ``bandit.npz`` next to the model; without a selector a stale ``bandit.npz``
+    is removed.
+
+    ``stop_event`` ends the run after the current rollout, writes
+    ``status="interrupted"`` and returns a loadable model. ``pause_event`` blocks
+    the training thread between steps/rollouts, publishes ``status="paused"`` and
+    continues when the event is cleared; stopping while paused ends as
+    ``interrupted``.
     """
     bars = int(features.X.shape[0])
     if bars < MIN_BARS:
         raise ValueError(f"not enough bars: need {MIN_BARS}")
 
+    pin_threads()
     out = Path(out_dir)
     data_hash = config.data_hash or data_hash_for(features)
+    settings_dict = asdict(settings)
+    selector_info: dict[str, Any] = {
+        "enabled": selector is not None,
+        "type": type(selector).__name__ if selector is not None else None,
+    }
     params: dict[str, Any] = asdict(config)
     params["data_hash"] = data_hash
-    run_id = run_id_for(params, data_hash, config.seed)
+    identity: dict[str, Any] = {
+        "params": params,
+        "settings": settings_dict,
+        "selector": selector_info,
+        "data_hash": data_hash,
+        "seed": config.seed,
+    }
+    run_id = run_id_for(identity, data_hash, config.seed)
     run_dir = out / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
+    _existing_identity(run_dir, identity)
 
     created_at = _utc_now()
     _seed_everything(config.seed)
-    env = _make_vec_env(features, settings, selector, config.n_envs, config.seed)
+    env, env_starts = _make_vec_env(
+        features, settings, selector, config.n_envs, config.seed, config.gamma
+    )
     model: PPO | None = None
-    interrupted = False
+    final_status: str | None = None
     metrics: dict[str, Any] = {}
+    metrics_callback: MetricsCallback | None = None
+    checkpoint_callback: CheckpointCallback | None = None
+    manifest_writer = ManifestWriter(
+        run_dir,
+        {
+            "run_id": run_id,
+            "run_name": config.run_name,
+            "created_at": created_at,
+            "seed": config.seed,
+            "data_hash": data_hash,
+            "model": MODEL_NAME,
+            "metrics": METRICS_NAME,
+            "metrics_history": METRICS_HISTORY_NAME,
+            "vec_normalize": VECNORMALIZE_NAME,
+            "bandit": selector is not None,
+            "env_starts": env_starts,
+        },
+    )
     try:
         model = PPO(
             "MlpPolicy",
@@ -228,6 +357,10 @@ def train(
             verbose=0,
             policy_kwargs={"net_arch": list(_NET_ARCH)},
         )
+        # One logger for the whole run: ``learn`` otherwise recreates it per
+        # chunk, so a checkpoint early in the next chunk cannot see the losses of
+        # the update that just ran.
+        model.set_logger(configure(None, format_strings=[]))
 
         write_json(
             run_dir / CONFIG_NAME,
@@ -237,24 +370,60 @@ def train(
                 "created_at": created_at,
                 "seed": config.seed,
                 "data_hash": data_hash,
+                "identity": identity,
                 "params": params,
+                "settings": settings_dict,
+                "selector": selector_info,
+                "contract": settings_dict["contract"],
+                "risk": settings_dict["risk"],
+                "costs": settings_dict["costs"],
+                "initial_balance": float(settings.contract.initial_balance),
                 "algo": "PPO",
                 "policy": "MlpPolicy",
                 "device": "cpu",
                 "net_arch": list(_NET_ARCH),
                 "bars": bars,
+                "valid_from": int(features.valid_from),
                 "n_features": int(features.X.shape[1]),
+                "feature_columns": list(features.columns),
                 "obs_dim": _obs_dim(env),
                 "n_actions": _n_actions(env),
+                "env_starts": env_starts,
+                "normalisation": {
+                    "norm_obs": True,
+                    "norm_reward": True,
+                    "clip_obs": _CLIP_OBS,
+                },
                 "versions": _versions(),
             },
         )
+        manifest_writer.write(status="running", steps=0, reward_mean=None)
 
         metrics_callback = MetricsCallback(run_dir, config.checkpoint_every)
-        checkpoint_callback = AtomicCheckpointCallback(run_dir, config.checkpoint_every)
-        callbacks = CallbackList([metrics_callback, checkpoint_callback])
+        metrics_callback.reset_history()
+        checkpoint_callback = CheckpointCallback(
+            run_dir,
+            config.checkpoint_every,
+            env,
+            metrics_callback,
+            manifest_writer,
+        )
+
+        def checkpoint(status: str) -> None:
+            metrics_callback.status = status
+            metrics_callback.write()
+            assert checkpoint_callback is not None
+            checkpoint_callback.save()
+
+        control = ControlCallback(stop_event, pause_event, checkpoint)
+        callbacks = CallbackList([metrics_callback, checkpoint_callback, control])
+        # Bind the callbacks to the model now: a pause requested before the first
+        # rollout must be able to write a loadable checkpoint.
+        metrics_callback.init_callback(model)
+        checkpoint_callback.init_callback(model)
 
         while int(model.num_timesteps) < config.total_steps:
+            control.react()
             chunk = min(config.checkpoint_every, config.total_steps - int(model.num_timesteps))
             before = int(model.num_timesteps)
             try:
@@ -265,41 +434,35 @@ def train(
                     progress_bar=False,
                 )
             except KeyboardInterrupt:
-                # The previous chunk's checkpoint is already on disk; fall through
-                # and write the current model once so the interrupted step count
-                # is captured too.
-                interrupted = True
+                final_status = "interrupted"
                 break
             if int(model.num_timesteps) <= before:
                 raise RuntimeError(f"PPO made no progress: num_timesteps stayed at {before}")
-
-        save_model(model, run_dir / MODEL_NAME)
-        metrics = metrics_callback.write()
-        if selector is not None:
-            selector.save(run_dir / BANDIT_NAME)
+        else:
+            final_status = "completed"
+    except TrainingHalted as halted:
+        final_status = halted.status
+    except KeyboardInterrupt:
+        final_status = "interrupted"
     finally:
+        if (
+            model is not None
+            and final_status is not None
+            and metrics_callback is not None
+            and checkpoint_callback is not None
+        ):
+            metrics_callback.status = final_status
+            metrics = metrics_callback.write()
+            checkpoint_callback.save()
+            if selector is not None:
+                selector.save(run_dir / BANDIT_NAME)
+            else:
+                (run_dir / BANDIT_NAME).unlink(missing_ok=True)
         env.close()
 
     assert model is not None  # construction above is unconditional on success
     steps = int(model.num_timesteps)
-    reward_mean = float(metrics.get("reward_mean", 0.0))
-    save_manifest(
-        run_dir,
-        {
-            "run_id": run_id,
-            "run_name": config.run_name,
-            "status": "interrupted" if interrupted else "completed",
-            "created_at": created_at,
-            "updated_at": _utc_now(),
-            "seed": config.seed,
-            "data_hash": data_hash,
-            "steps": steps,
-            "reward_mean": reward_mean,
-            "model": MODEL_NAME,
-            "metrics": METRICS_NAME,
-            "bandit": selector is not None,
-        },
-    )
+    reward_mean = float(metrics.get("reward_mean") or 0.0)
     return TrainResult(
         run_id=run_id,
         model_path=run_dir / MODEL_NAME,

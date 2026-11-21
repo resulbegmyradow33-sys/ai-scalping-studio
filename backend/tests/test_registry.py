@@ -6,7 +6,13 @@ import json
 
 import pytest
 
-from scalping.rl.registry import load_run, run_id_for, save_manifest
+from scalping.rl.registry import (
+    ManifestWriter,
+    append_jsonl,
+    load_run,
+    run_id_for,
+    save_manifest,
+)
 
 
 def test_run_id_stable_and_seeded():
@@ -43,3 +49,27 @@ def test_corrupt_manifest_names_the_file(tmp_path):
     (tmp_path / "manifest.json").write_text("{not json")
     with pytest.raises(ValueError, match="manifest.json"):
         load_run(tmp_path)
+
+
+def test_manifest_writer_tracks_status(tmp_path):
+    writer = ManifestWriter(tmp_path, {"run_id": "x", "created_at": "t"})
+    writer.write(status="running", steps=0, reward_mean=None)
+    assert load_run(tmp_path)["status"] == "running"
+
+    writer.write(status="paused", steps=10, reward_mean=0.5)
+    paused = load_run(tmp_path)
+    assert paused["status"] == "paused"
+    assert paused["steps"] == 10
+    assert paused["reward_mean"] == 0.5
+    assert "updated_at" in paused
+    assert paused["run_id"] == "x"
+
+
+def test_append_jsonl_appends_one_line_per_call(tmp_path):
+    path = tmp_path / "metrics.jsonl"
+    append_jsonl(path, {"step": 1})
+    append_jsonl(path, {"step": 2, "reward_mean": 0.25})
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [line["step"] for line in lines] == [1, 2]
+    assert lines[1]["reward_mean"] == 0.25
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["metrics.jsonl"]

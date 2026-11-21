@@ -1,8 +1,9 @@
 """Run registry: stable run ids and crash-safe artefacts under ``runs/<run_id>/``.
 
 Every training run owns one directory named after :func:`run_id_for`. The
-directory holds the model, the resolved config, the last metrics snapshot, the
-optional bandit and a small ``manifest.json`` that lists the run for the API.
+directory holds the model, the observation/reward normaliser, the resolved
+config, the latest metrics snapshot, a JSONL metrics history, the optional bandit
+and a small ``manifest.json`` that lists the run for the API.
 
 Writes never happen in place. A file is written to a sibling temp file, flushed
 to disk and moved onto the target with :func:`os.replace`, so a crash or a
@@ -17,31 +18,43 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 __all__ = [
+    "BANDIT_NAME",
+    "CONFIG_NAME",
     "MANIFEST_NAME",
+    "METRICS_HISTORY_NAME",
+    "METRICS_NAME",
     "MODEL_NAME",
+    "VECNORMALIZE_NAME",
+    "ManifestWriter",
+    "append_jsonl",
     "load_run",
     "run_id_for",
     "save_manifest",
     "save_model",
+    "save_vecnormalize",
     "write_json",
 ]
 
-#: File name of the run manifest inside a run directory.
+#: File names inside a run directory.
 MANIFEST_NAME: str = "manifest.json"
-
-#: File name of the stable-baselines3 checkpoint inside a run directory.
+CONFIG_NAME: str = "config.json"
+METRICS_NAME: str = "metrics.json"
+METRICS_HISTORY_NAME: str = "metrics.jsonl"
 MODEL_NAME: str = "model.zip"
+VECNORMALIZE_NAME: str = "vecnormalize.pkl"
+BANDIT_NAME: str = "bandit.npz"
 
 #: Length of a run id in hex characters.
 _ID_LENGTH: int = 12
 
 
 class _Savable(Protocol):
-    """The slice of a stable-baselines3 model that :func:`save_model` needs."""
+    """The slice of a stable-baselines3 object that :func:`save_model` needs."""
 
     def save(self, path: str) -> None: ...
 
@@ -77,13 +90,31 @@ def run_id_for(config: Mapping[str, Any], data_hash: str, seed: int) -> str:
     return hashlib.sha256(material).hexdigest()[:_ID_LENGTH]
 
 
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _fsync(path: Path) -> None:
+    """Flush an already written file to disk before it is renamed."""
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _temp_sibling(target: Path, suffix: str) -> Path:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.stem}.", suffix=suffix)
+    os.close(fd)
+    return Path(temp_name)
+
+
 def _atomic_write_text(target: Path, text: str) -> Path:
     """Write ``text`` to ``target`` through a flushed sibling temp file."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
-    temp = Path(temp_name)
+    temp = _temp_sibling(target, ".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with open(temp, "w", encoding="utf-8") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
@@ -104,6 +135,36 @@ def write_json(path: str | Path, payload: Mapping[str, Any]) -> Path:
     return _atomic_write_text(target, text)
 
 
+def append_jsonl(path: str | Path, payload: Mapping[str, Any]) -> Path:
+    """Append one JSON line, flushed and fsynced.
+
+    Appending keeps the history cheap as it grows. A single short ``O_APPEND``
+    write is not torn by a concurrent reader; a crash before the fsync can at
+    worst drop the newest line, which a training UI can tolerate.
+    """
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, sort_keys=True, allow_nan=False) + "\n"
+    with open(target, "a", encoding="utf-8") as handle:
+        handle.write(line)
+        handle.flush()
+        os.fsync(handle.fileno())
+    return target
+
+
+def _save_atomic(obj: _Savable, path: str | Path, suffix: str) -> Path:
+    """``obj.save`` into a temp file, fsync it, then move it onto ``path``."""
+    target = Path(path)
+    temp = _temp_sibling(target, suffix)
+    try:
+        obj.save(str(temp))
+        _fsync(temp)
+        os.replace(temp, target)
+    finally:
+        temp.unlink(missing_ok=True)
+    return target
+
+
 def save_model(model: _Savable, path: str | Path) -> Path:
     """Save a stable-baselines3 model without ever truncating the old file.
 
@@ -111,17 +172,12 @@ def save_model(model: _Savable, path: str | Path) -> Path:
     temp file already ends in ``.zip`` and lands exactly where
     :func:`os.replace` expects it.
     """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.stem}.", suffix=".zip")
-    os.close(fd)
-    temp = Path(temp_name)
-    try:
-        model.save(str(temp))
-        os.replace(temp, target)
-    finally:
-        temp.unlink(missing_ok=True)
-    return target
+    return _save_atomic(model, path, ".zip")
+
+
+def save_vecnormalize(vec_normalize: _Savable, path: str | Path) -> Path:
+    """Save a ``VecNormalize`` pickle atomically; its ``save`` writes the path."""
+    return _save_atomic(vec_normalize, path, ".pkl")
 
 
 def save_manifest(run_dir: str | Path, manifest: Mapping[str, Any]) -> Path:
@@ -147,3 +203,37 @@ def load_run(run_dir: str | Path) -> dict[str, Any] | None:
     if not isinstance(data, dict):
         raise TypeError(f"{path} must contain a JSON object")
     return data
+
+
+class ManifestWriter:
+    """Rewrite a run's manifest with a new status, step count and reward.
+
+    The API polls this file, so it is replaced atomically on every call. The
+    writer owns the immutable part of the manifest (id, seed, paths) and the
+    caller supplies the part that changes while training.
+    """
+
+    def __init__(self, run_dir: str | Path, base: Mapping[str, Any]) -> None:
+        self.run_dir = Path(run_dir)
+        self.base = dict(base)
+        self.status = "running"
+
+    def write(
+        self,
+        *,
+        status: str | None = None,
+        steps: int = 0,
+        reward_mean: float | None = None,
+    ) -> Path:
+        if status is not None:
+            self.status = status
+        payload = dict(self.base)
+        payload.update(
+            {
+                "status": self.status,
+                "steps": int(steps),
+                "reward_mean": reward_mean,
+                "updated_at": _now(),
+            }
+        )
+        return save_manifest(self.run_dir, payload)
