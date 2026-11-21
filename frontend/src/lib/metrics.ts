@@ -13,11 +13,17 @@ export type PFClass = "good" | "ok" | "bad";
 
 /**
  * Profit-factor banding. `> 1.3` is good, `1.0–1.3` is acceptable and anything
- * below 1.0 — including the `null` the backend sends for a non-finite factor —
- * is bad. The boundaries are inclusive on the "ok" side: 1.3 is not yet good.
+ * below 1.0 is bad. The boundaries are inclusive on the "ok" side: 1.3 is not
+ * yet good.
+ *
+ * A positive infinity means wins and no losing trades — the best possible
+ * factor — so it is good. `null` (what the backend sends when the factor is
+ * not representable) and `NaN` are unknown, not good: they stay bad.
  */
 export function classifyPF(value: number | null): PFClass {
-  if (value === null || !Number.isFinite(value) || value < 1.0) return "bad";
+  if (value === null || Number.isNaN(value)) return "bad";
+  if (value === Number.POSITIVE_INFINITY) return "good";
+  if (!Number.isFinite(value) || value < 1.0) return "bad";
   return value > 1.3 ? "good" : "ok";
 }
 
