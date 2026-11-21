@@ -802,7 +802,7 @@ git commit -m "feat: causal market intelligence features"
   - `.obs_dim: int`; window `WINDOW = 60`; obs = flattened `X[t-59:t+1]` (60×F) + `[side, bars_in_trade/120, unrealized_pct, day_pnl_pct, risk_used]`.
   - `TradingEnv(features: FeatureFrame, settings: Settings, strategy_selector=None)` — `gym.Env` sarmalayıcı; içinde `self.sim = Simulator(...)` tutar (kalıtım değil, kompozisyon), böylece `env.sim.broker` test kancası erişilebilir.
   - `action_space = Discrete(4)`, `observation_space = Box(-inf, inf, (obs_dim,), float32)`.
-  - Reward: `Δequity/initial*100 - 0.5*max(0, dd-limit) - 0.02*(opened) + 0.05*(risk_ok)`, clipped to `[-5, 5]`.
+  - Reward: `Δequity/initial*100 - 50*max(0, dd-limit) - 0.05*(opened) + 0.02*(risk_ok)`, clipped to `[-5, 5]`.
   - Termination: equity ≤ 80% of initial; truncation at `max_bars` (20_000) or data end.
 
 - [ ] **Step 1: Write the failing test**
