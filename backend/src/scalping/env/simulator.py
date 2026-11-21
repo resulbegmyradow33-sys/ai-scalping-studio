@@ -161,6 +161,7 @@ class Simulator:
         max_steps: int | None = None,
         random_start: bool = False,
         seed: int = 0,
+        entry_penalty: float | None = None,
     ) -> None:
         self.features = features
         self.settings = settings
@@ -169,6 +170,12 @@ class Simulator:
             raise ValueError(f"max_steps must be >= 1, got {max_steps!r}")
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise TypeError(f"seed must be an int, got {type(seed).__name__}")
+        if entry_penalty is None:
+            self.entry_penalty = _OPEN_PENALTY
+        else:
+            if not isfinite(entry_penalty) or entry_penalty < 0.0:
+                raise ValueError(f"entry_penalty must be finite and >= 0, got {entry_penalty!r}")
+            self.entry_penalty = float(entry_penalty)
         self.random_start = bool(random_start)
         self.rng_seed = int(seed)
         self._rng = np.random.default_rng(self.rng_seed)
@@ -364,7 +371,7 @@ class Simulator:
         self._prev_excess = max(self._prev_excess, excess)
         reward = (equity - self._equity_before) / self._initial * 100.0
         reward -= penalty
-        reward -= _OPEN_PENALTY * (1.0 if opened is not None else 0.0)
+        reward -= self.entry_penalty * (1.0 if opened is not None else 0.0)
         reward += _RISK_BONUS * risk_ok
         reward = float(np.clip(reward, -_REWARD_CLIP, _REWARD_CLIP))
 

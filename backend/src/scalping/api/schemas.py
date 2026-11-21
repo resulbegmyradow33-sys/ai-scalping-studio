@@ -107,6 +107,7 @@ class TrainRequest(BaseModel):
     seed: int = Field(default=0, ge=0)
     symbol: str = Field(min_length=1)
     use_strategy: bool = True
+    entry_penalty: float = Field(default=0.05, ge=0.0, le=1.0)
     train_end: datetime | None = None
 
 

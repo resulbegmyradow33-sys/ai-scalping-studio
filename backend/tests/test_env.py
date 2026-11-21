@@ -351,6 +351,18 @@ def test_reward_arithmetic_for_an_opened_step():
     assert info["position"] is not None
     assert held == 0.0, "the risk bonus is paid once, on the opening step"
 
+def test_entry_penalty_is_configurable():
+    sim = Simulator(flat_frame(), Settings(), entry_penalty=0.30)
+    sim.reset(seed=1)
+    _, reward, _, _, _ = sim.step(1)
+    # Same step as above, but the opening penalty is the configured 0.30.
+    assert reward == pytest.approx(-0.225 - 0.30 + 0.02)
+
+
+def test_entry_penalty_rejects_negative_values():
+    with pytest.raises(ValueError, match="entry_penalty"):
+        Simulator(flat_frame(), Settings(), entry_penalty=-0.1)
+
 
 def test_risk_bonus_is_one_time_on_the_opening_step():
     sim = Simulator(trend_frame(slope=-1.0), Settings())
