@@ -64,4 +64,35 @@ describe("chart data edges", () => {
     ]);
     expect(m[1].text).toBe("—");
   });
+
+  it("draws a short entry above the bar with a SAT arrow", () => {
+    const m = toMarkers([
+      {
+        entry_ts: "2026-01-05T10:00:00Z",
+        exit_ts: "2026-01-05T10:04:00Z",
+        side: -1,
+        pnl: -3.5,
+      } as never,
+    ]);
+
+    expect(m[0]).toMatchObject({
+      position: "aboveBar",
+      shape: "arrowDown",
+      text: "SAT",
+      color: "#dc2626",
+    });
+  });
+
+  it("draws a long entry below the bar with an AL arrow", () => {
+    const m = toMarkers([
+      { entry_ts: "2026-01-05T10:00:00Z", exit_ts: "2026-01-05T10:04:00Z", side: 1, pnl: 3.5 } as never,
+    ]);
+
+    expect(m[0]).toMatchObject({
+      position: "belowBar",
+      shape: "arrowUp",
+      text: "AL",
+      color: "#16a34a",
+    });
+  });
 });

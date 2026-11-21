@@ -84,7 +84,22 @@ describe("DataPage", () => {
     expect(screen.queryByText(/Henüz veri yok/)).not.toBeInTheDocument();
   });
 
-  it("renders only the status error on a backend failure", () => {
+  it("keeps the last known coverage when a poll fails and shows the error as a note", () => {
+    statusHook.useDataStatus.mockReturnValue(
+      statusState({ data: SEEDED, error: new ApiError(503, "backend down") }),
+    );
+
+    render(<DataPage />);
+
+    expect(screen.getByText("Veri durumu alınamadı (backend down).")).toBeInTheDocument();
+    expect(screen.getByText(/14\.400 bar/)).toBeInTheDocument();
+    expect(screen.getByTestId("provider-card-synthetic")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-card-csv")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-dot-synthetic")).toHaveAttribute("data-state", "ready");
+    expect(screen.queryByTestId("data-empty")).not.toBeInTheDocument();
+  });
+
+  it("shows the poll error without claiming the store is empty", () => {
     statusHook.useDataStatus.mockReturnValue(
       statusState({ error: new ApiError(503, "backend down") }),
     );
@@ -92,9 +107,9 @@ describe("DataPage", () => {
     render(<DataPage />);
 
     expect(screen.getByText("Veri durumu alınamadı (backend down).")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-card-csv")).toBeInTheDocument();
     expect(screen.queryByTestId("data-empty")).not.toBeInTheDocument();
     expect(screen.queryByText(/Henüz veri yok/)).not.toBeInTheDocument();
-    expect(screen.queryByTestId("provider-card-csv")).not.toBeInTheDocument();
   });
 
   it("will not submit an empty symbol", () => {

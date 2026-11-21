@@ -11,6 +11,12 @@ function linePath(container: HTMLElement): string {
   return line.getAttribute("d") ?? "";
 }
 
+function areaPath(container: HTMLElement): string {
+  const area = container.querySelector("[data-testid=drawdown-area]");
+  if (!area) throw new Error("no drawdown area rendered");
+  return area.getAttribute("d") ?? "";
+}
+
 describe("DrawdownChart", () => {
   it("renders an empty state instead of an empty svg", () => {
     const { container } = render(<DrawdownChart values={[]} />);
@@ -27,6 +33,9 @@ describe("DrawdownChart", () => {
       "M 0.00,0.75 L 50.00,0.75 L 100.00,0.75",
     );
     expect(linePath(container)).not.toMatch(/NaN/);
+    expect(areaPath(container)).toBe(
+      "M 0.00,0.75 L 0.00,0.75 L 50.00,0.75 L 100.00,0.75 L 100.00,0.75 Z",
+    );
     expect(container.querySelector("svg")).toHaveAttribute("viewBox", "0 0 100 40");
     expect(container.querySelector("svg")).toHaveAttribute("preserveAspectRatio", "none");
     expect(container.querySelector("[data-testid=drawdown-zero]")).toHaveAttribute(

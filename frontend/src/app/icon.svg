@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="AI Scalping Studio">
+  <rect width="64" height="64" rx="14" fill="#0b0f17"/>
+  <g stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round">
+    <line x1="20" y1="12" x2="20" y2="24"/>
+    <line x1="20" y1="44" x2="20" y2="54"/>
+    <line x1="44" y1="20" x2="44" y2="30"/>
+    <line x1="44" y1="50" x2="44" y2="58"/>
+  </g>
+  <rect x="13" y="24" width="14" height="20" rx="2" fill="#16a34a"/>
+  <rect x="37" y="30" width="14" height="20" rx="2" fill="#dc2626"/>
+</svg>

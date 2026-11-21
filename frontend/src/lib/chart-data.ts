@@ -36,7 +36,6 @@ export const TIMEFRAME_SECONDS: Record<Timeframe, number> = {
 export type Candle = CandlestickData<UTCTimestamp>;
 export type TradeMarker = SeriesMarker<UTCTimestamp>;
 
-const ENTRY_COLOR = "#16a34a";
 const PROFIT_COLOR = "#16a34a";
 const LOSS_COLOR = "#dc2626";
 
@@ -131,12 +130,15 @@ export function toMarkers(trades: readonly TradeSummary[]): TradeMarker[] {
     const exitTime = toSeconds(trade.exit_ts);
 
     if (entryTime !== null) {
+      // A short is drawn above the bar with a down arrow so the marker cannot
+      // be mistaken for a long entry; the colour follows the direction too.
+      const short = trade.side === -1;
       markers.push({
         time: entryTime as UTCTimestamp,
-        position: "belowBar",
-        shape: "arrowUp",
-        color: ENTRY_COLOR,
-        text: "AL",
+        position: short ? "aboveBar" : "belowBar",
+        shape: short ? "arrowDown" : "arrowUp",
+        color: short ? LOSS_COLOR : PROFIT_COLOR,
+        text: short ? "SAT" : "AL",
       });
     }
 

@@ -24,6 +24,7 @@ import {
   type Time,
 } from "lightweight-charts";
 
+import { formatChartPrice, formatChartTime } from "@/lib/chart-format";
 import { toCandles, toMarkers, type Timeframe } from "@/lib/chart-data";
 import type { BarPayload, TradeOpenPayload, TradeSummary } from "@/lib/types";
 
@@ -137,6 +138,12 @@ export function CandleChart({
           textColor: COLORS.text,
           attributionLogo: false,
         },
+        localization: {
+          locale: "tr-TR",
+          // The axis must agree with the cards: Istanbul clock, comma prices.
+          timeFormatter: formatChartTime,
+          priceFormatter: formatChartPrice,
+        },
         grid: {
           vertLines: { color: COLORS.grid },
           horzLines: { color: COLORS.grid },
@@ -146,6 +153,9 @@ export function CandleChart({
           borderColor: COLORS.border,
           timeVisible: true,
           secondsVisible: false,
+          // `timeVisible` alone still labels ticks from the library's locale;
+          // this pins every tick mark to the Istanbul clock.
+          tickMarkFormatter: (time: Time) => formatChartTime(time),
           // Sensible spacing until the first full dataset is fitted.
           barSpacing: DEFAULT_BAR_SPACING,
           rightOffset: DEFAULT_RIGHT_OFFSET,

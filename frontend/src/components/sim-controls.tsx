@@ -11,6 +11,7 @@
 
 import { useState } from "react";
 
+import { useDataStatus } from "@/hooks/use-data-status";
 import type { ControlAction, SimState } from "@/lib/types";
 
 const SPEEDS = [
@@ -22,6 +23,8 @@ const SPEEDS = [
 
 export interface SimControlsProps {
   status: SimState;
+  /** Symbol the simulator replays; the source label follows its stored data. */
+  symbol: string;
   onStart: (speed: number) => void;
   onControl: (action: ControlAction) => void;
 }
@@ -46,8 +49,13 @@ function speedClass(selected: boolean): string {
   return `${BUTTON_BASE} border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-100`;
 }
 
-export function SimControls({ status, onStart, onControl }: SimControlsProps) {
+export function SimControls({ status, symbol, onStart, onControl }: SimControlsProps) {
   const [speed, setSpeed] = useState(1);
+
+  // The data page owns the same SWR key, so this is not a second poll loop;
+  // SWR dedupes and shares the 30 s refresh.
+  const providers = useDataStatus(symbol).data?.providers ?? [];
+  const source = providers.length > 0 ? providers.join(", ") : "bilinmiyor";
 
   const running = status === "running";
   const paused = status === "paused";
@@ -95,7 +103,9 @@ export function SimControls({ status, onStart, onControl }: SimControlsProps) {
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <p className="text-xs text-slate-400">Veri kaynağı: sentetik</p>
+        <p className="text-xs text-slate-400">
+          Veri kaynağı: {source} — Gerçek para değil.
+        </p>
         <div role="group" aria-label="Oynatma hızı" className="flex items-center gap-1">
           {SPEEDS.map((option) => (
             <button

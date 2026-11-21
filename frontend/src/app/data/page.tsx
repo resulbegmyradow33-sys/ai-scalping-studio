@@ -151,18 +151,24 @@ export default function DataPage() {
           <span className="text-xs tabular-nums text-slate-400">{cleanSymbol}</span>
         </div>
 
-        {statusDetail !== null ? (
-          <p role="status" className="text-sm text-amber-200">
+        {statusDetail !== null && (
+          <p data-testid="status-error" role="status" className="text-sm text-amber-200">
             Veri durumu alınamadı ({statusDetail}).
           </p>
-        ) : cleanSymbol === "" ? (
+        )}
+
+        {cleanSymbol === "" ? (
           <p className="text-sm text-slate-400">Sembol girerek kapsamı görüntüle.</p>
         ) : statusState.isLoading && status === undefined ? (
           <p className="text-sm text-slate-400">Yükleniyor…</p>
         ) : rows === 0 ? (
-          <p data-testid="data-empty" className="text-sm text-slate-400">
-            Henüz veri yok — aşağıdaki formdan sentetik veri üret veya CSV içe aktar.
-          </p>
+          // With a poll error the store state is unknown; the note above
+          // already explains it, and "no data" would be a false claim.
+          statusDetail === null ? (
+            <p data-testid="data-empty" className="text-sm text-slate-400">
+              Henüz veri yok — aşağıdaki formdan sentetik veri üret veya CSV içe aktar.
+            </p>
+          ) : null
         ) : (
           <div className="flex flex-col gap-1.5">
             <CoverageBar firstTs={status?.first_ts ?? null} lastTs={status?.last_ts ?? null} rows={rows} />
@@ -173,32 +179,28 @@ export default function DataPage() {
           </div>
         )}
 
-        {statusDetail === null && (
-          <>
-            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
-              {PROVIDERS.map((item) => {
-                const active = providers.includes(item.id);
-                return (
-                  <ProviderCard
-                    key={item.id}
-                    provider={item.id}
-                    label={item.label}
-                    active={active}
-                    // The API has no per-provider row split, so an active
-                    // card cannot claim the symbol total as its own.
-                    rows={active ? null : 0}
-                    firstTs={active ? (status?.first_ts ?? null) : null}
-                    lastTs={active ? (status?.last_ts ?? null) : null}
-                  />
-                );
-              })}
-            </div>
-            <p className="text-xs text-slate-500">
-              Sağlayıcı kartlarındaki satır sayısı API sağlayıcı bazlı kırılım
-              vermediği için —; sembol toplamı üstteki kapsam satırındadır.
-            </p>
-          </>
-        )}
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+          {PROVIDERS.map((item) => {
+            const active = providers.includes(item.id);
+            return (
+              <ProviderCard
+                key={item.id}
+                provider={item.id}
+                label={item.label}
+                active={active}
+                // The API has no per-provider row split, so an active
+                // card cannot claim the symbol total as its own.
+                rows={active ? null : 0}
+                firstTs={active ? (status?.first_ts ?? null) : null}
+                lastTs={active ? (status?.last_ts ?? null) : null}
+              />
+            );
+          })}
+        </div>
+        <p className="text-xs text-slate-500">
+          Sağlayıcı kartlarındaki satır sayısı API sağlayıcı bazlı kırılım
+          vermediği için —; sembol toplamı üstteki kapsam satırındadır.
+        </p>
       </section>
 
       <form

@@ -118,7 +118,7 @@ export function DrawdownChart({ values }: DrawdownChartProps) {
       />
       {chart.point === null ? (
         <>
-          <path d={chart.area} fill="currentColor" opacity={0.18} />
+          <path data-testid="drawdown-area" d={chart.area} fill="currentColor" opacity={0.18} />
           <path
             data-testid="drawdown-line"
             d={chart.line}

@@ -93,7 +93,11 @@ export default function TrainingPage() {
   const status = detail?.status ?? selected?.status ?? "";
 
   const step = finiteNumber(detail?.step ?? selected?.steps);
-  const totalSteps = finiteNumber(detail?.total_steps) ?? configTotal(detail?.config);
+  // A zero from the detail API is a placeholder, not a real denominator; fall
+  // back to the run config instead of hiding the whole progress bar.
+  const detailTotal = finiteNumber(detail?.total_steps);
+  const totalSteps =
+    detailTotal !== null && detailTotal > 0 ? detailTotal : configTotal(detail?.config);
   const totalValue = totalSteps ?? 0;
   const hasTotal = totalValue > 0;
   // Without a known total the bar is indeterminate: reporting `step / 1`

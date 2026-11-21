@@ -153,6 +153,21 @@ describe("TrainingPage", () => {
     expect(bar).not.toHaveAttribute("aria-valuemax");
   });
 
+  it("falls back to the config total when detail.total_steps is zero", async () => {
+    state.getRuns.mockResolvedValue([run("a", "2026-01-01T00:00:00Z")]);
+    state.getRun.mockResolvedValue(detail({ total_steps: 0, step: 50 }));
+
+    render(<TrainingPage />, { wrapper });
+
+    await waitFor(() =>
+      expect(screen.getByTestId("training-progress")).toHaveTextContent("50 / 100"),
+    );
+
+    const bar = screen.getByRole("progressbar", { name: "Eğitim ilerlemesi" });
+    expect(bar).toHaveAttribute("aria-valuenow", "50");
+    expect(bar).toHaveAttribute("aria-valuemax", "100");
+  });
+
   it("clamps the progress bar when step exceeds total", async () => {
     state.getRuns.mockResolvedValue([run("a", "2026-01-01T00:00:00Z")]);
     state.getRun.mockResolvedValue(detail({ step: 150, total_steps: 100 }));

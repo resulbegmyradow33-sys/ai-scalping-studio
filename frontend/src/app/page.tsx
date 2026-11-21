@@ -7,7 +7,7 @@
  * renders the waiting states instead of an error.
  */
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { CandleChart } from "@/components/candle-chart";
 import { EquitySparkline } from "@/components/equity-sparkline";
@@ -17,8 +17,13 @@ import { StatCard } from "@/components/stat-card";
 import { useHealth } from "@/hooks/use-health";
 import { useSimulation } from "@/hooks/use-simulation";
 import { API_BASE } from "@/lib/api";
+import type { Timeframe } from "@/lib/chart-data";
 import { formatMoney, formatNumber, formatPct } from "@/lib/format";
 import type { ControlAction, SimState } from "@/lib/types";
+
+const TIMEFRAMES: readonly Timeframe[] = ["M1", "M5", "M15"];
+/** Matches the backend's `DEFAULT_SYMBOL`; the runner replays this symbol. */
+const SIM_SYMBOL = "XAUUSD";
 
 const STATUS_LABEL: Record<SimState, string> = {
   idle: "Hazır",
@@ -55,6 +60,7 @@ function describeStartError(error: string | null, status: number | null): string
 export default function SimulatorPage() {
   const sim = useSimulation();
   const health = useHealth();
+  const [timeframe, setTimeframe] = useState<Timeframe>("M1");
 
   const lastEquity = sim.equity.at(-1) ?? null;
   const anchor = sim.equityAnchor;
@@ -70,7 +76,11 @@ export default function SimulatorPage() {
   const equityValues = useMemo(() => sim.equity.map((point) => point.equity), [sim.equity]);
 
   const startError = describeStartError(sim.error, sim.errorStatus);
-  const healthDown = Boolean(health.error) || health.data?.status !== "ok";
+  // `data === undefined` is the first pending response: that is not an outage
+  // yet, so the banner must not flash before health answers.
+  const healthDown =
+    Boolean(health.error) ||
+    (health.data !== undefined && health.data.status !== "ok");
   // A down backend already gets its own banner; repeating "network request
   // failed" underneath it is noise. A real 409 still matters and stays visible.
   const showStartError = startError !== null && !(healthDown && startError !== MISSING_DATA_HINT);
@@ -117,12 +127,36 @@ export default function SimulatorPage() {
         </div>
       )}
 
-      <SimControls status={sim.status} onStart={handleStart} onControl={handleControl} />
+      <SimControls
+        status={sim.status}
+        symbol={SIM_SYMBOL}
+        onStart={handleStart}
+        onControl={handleControl}
+      />
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-12">
         <div className="flex min-w-0 flex-col gap-2 lg:col-span-9">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <h2 className="text-sm font-semibold text-slate-100">Fiyat (M1)</h2>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-slate-100">Fiyat ({timeframe})</h2>
+              <div role="group" aria-label="Mum periyodu" className="flex items-center gap-1">
+                {TIMEFRAMES.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    aria-pressed={timeframe === option}
+                    onClick={() => setTimeframe(option)}
+                    className={
+                      timeframe === option
+                        ? "rounded-sm border border-accent bg-accent/20 px-2 py-0.5 text-xs font-medium text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                        : "rounded-sm border border-slate-800 px-2 py-0.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                    }
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            </div>
             <dl className="flex items-baseline gap-4 text-xs">
               <div className="flex items-baseline gap-1.5">
                 <dt className="text-slate-400">Bar</dt>
@@ -142,6 +176,7 @@ export default function SimulatorPage() {
             bars={sim.bars}
             trades={sim.trades}
             position={sim.position}
+            timeframe={timeframe}
             height={380}
           />
         </div>
