@@ -145,12 +145,24 @@ export function simReducer(state: SimSnapshot, action: SimAction): SimSnapshot {
   switch (action.type) {
     case "message":
       return applySimMessage(state, action.message);
-    case "sessionAdopted":
+    case "sessionAdopted": {
       if (state.sessionId === action.sessionId) return state;
       // Start returned the session id instead of announcing it over the
-      // socket: adopt the epoch but keep whatever the chart already holds.
-      // The new stream restarts at seq 0.
-      return { ...state, sessionId: action.sessionId, status: "running", seq: 0 };
+      // socket: adopt the epoch. The new stream restarts at seq 0. When a
+      // previous session was known, a new episode must not append to the old
+      // chart; when it was null the buffers hold nothing meaningful.
+      const adopted = { ...state, sessionId: action.sessionId, status: "running" as const, seq: 0 };
+      if (state.sessionId === null) return adopted;
+      return {
+        ...adopted,
+        bars: [],
+        position: null,
+        equity: [],
+        trades: [],
+        lastDecision: null,
+        riskBlocked: null,
+      };
+    }
     case "error":
       return { ...state, error: action.error };
     case "clearError":

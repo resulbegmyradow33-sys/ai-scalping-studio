@@ -161,6 +161,75 @@ describe("useSimulation — socket lifecycle", () => {
     expect(reconnected.frames()).toEqual([{ type: "resume", seq: 3 }]);
   });
 
+  it("buffers frames that race the start response instead of duplicating them", async () => {
+    let resolveFetch!: (response: Response) => void;
+    const pending = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(() => pending));
+
+    const { result } = renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => socket.serverMessage(status(null)));
+
+    let started!: Promise<void>;
+    act(() => {
+      started = result.current.start(1);
+    });
+
+    // The pump can beat the HTTP response: these arrive while start is pending.
+    act(() => {
+      socket.serverMessage(bar(1, "a"));
+      socket.serverMessage(bar(2, "b"));
+      socket.serverMessage(bar(3, "c"));
+    });
+    expect(result.current.bars).toEqual([]);
+
+    await act(async () => {
+      resolveFetch(new Response(JSON.stringify({ session_id: "sess-A" }), { status: 200 }));
+      await started;
+    });
+
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["a", "b", "c"]);
+    // Replayed contiguously after adoption: no gap, no resume, no duplicates.
+    expect(socket.frames()).toEqual([]);
+
+    act(() => socket.serverMessage(bar(4, "d")));
+    expect(socket.frames()).toEqual([]);
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["a", "b", "c", "d"]);
+  });
+
+  it("drops the buffer when the start request fails", async () => {
+    let rejectFetch!: (error: unknown) => void;
+    const pending = new Promise<Response>((_resolve, reject) => {
+      rejectFetch = reject;
+    });
+    vi.stubGlobal("fetch", vi.fn(() => pending));
+
+    const { result } = renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => socket.serverMessage(status(null)));
+
+    let started!: Promise<void>;
+    act(() => {
+      started = result.current.start(1);
+    });
+    act(() => socket.serverMessage(bar(1, "a")));
+    expect(result.current.bars).toEqual([]);
+
+    await act(async () => {
+      rejectFetch(new TypeError("fetch failed"));
+      await started;
+    });
+
+    expect(result.current.bars).toEqual([]);
+    expect(result.current.error).toBe("fetch failed");
+  });
+
   it("treats a null status after a known session as a server restart", () => {
     const { result } = renderHook(() => useSimulation());
     const socket = latest();

@@ -252,7 +252,18 @@ describe("isNewSession", () => {
 });
 
 describe("simReducer — sessionAdopted", () => {
-  it("adopts a session returned by start without clearing the buffers", () => {
+  it("keeps the buffers when no previous session was known", () => {
+    const state = run(initialSimSnapshot, [bar(1)]);
+
+    const next = simReducer(state, { type: "sessionAdopted", sessionId: "sess-A" });
+
+    expect(next.sessionId).toBe("sess-A");
+    expect(next.status).toBe("running");
+    expect(next.seq).toBe(0);
+    expect(next.bars).toEqual(state.bars);
+  });
+
+  it("clears the previous episode when a different session was known", () => {
     const populated = run(initialSimSnapshot, [
       status({ session_id: "old" }),
       bar(1),
@@ -264,10 +275,11 @@ describe("simReducer — sessionAdopted", () => {
 
     expect(next.sessionId).toBe("sess-A");
     expect(next.status).toBe("running");
-    expect(next.bars).toEqual(populated.bars);
-    expect(next.equity).toEqual(populated.equity);
-    expect(next.position).toEqual(POSITION);
+    expect(next.seq).toBe(0);
+    expect(next.bars).toEqual([]);
+    expect(next.equity).toEqual([]);
     expect(next.trades).toEqual([]);
+    expect(next.position).toBeNull();
   });
 
   it("is idempotent for the same session", () => {

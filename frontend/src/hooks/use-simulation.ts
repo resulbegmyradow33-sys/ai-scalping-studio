@@ -50,6 +50,13 @@ export function useSimulation() {
   const socketRef = useRef<WebSocket | null>(null);
   const connectRef = useRef<() => void>(() => {});
 
+  // The backend pump can emit the new session's first frames before the HTTP
+  // start response resolves. Hold those raw frames until the session is
+  // adopted, then replay them contiguously instead of gapping and duplicating.
+  const startingRef = useRef(false);
+  const bufferRef = useRef<unknown[]>([]);
+  const flushBufferRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (typeof WebSocket === "undefined") return;
 
@@ -94,6 +101,29 @@ export function useSimulation() {
       }
     };
 
+    const applyRaw = (target: WebSocket, raw: unknown): void => {
+      if (!isSimMessage(raw)) return;
+      // A server that opens and closes immediately never resets the
+      // backoff: only a real frame proves the connection is healthy.
+      attempt = 0;
+      if (startingRef.current) {
+        bufferRef.current.push(raw);
+        return;
+      }
+      handleMessage(target, raw);
+    };
+
+    const flushBuffer = (): void => {
+      const frames = bufferRef.current;
+      bufferRef.current = [];
+      const target = socket;
+      if (!target) return;
+      for (const frame of frames) {
+        if (isSimMessage(frame)) handleMessage(target, frame);
+      }
+    };
+    flushBufferRef.current = flushBuffer;
+
     const connect = (): void => {
       if (disposed) return;
 
@@ -113,11 +143,7 @@ export function useSimulation() {
         } catch {
           return;
         }
-        if (!isSimMessage(raw)) return;
-        // A server that opens and closes immediately never resets the
-        // backoff: only a real frame proves the connection is healthy.
-        attempt = 0;
-        handleMessage(ws, raw);
+        applyRaw(ws, raw);
       };
 
       ws.onclose = () => {
@@ -137,6 +163,7 @@ export function useSimulation() {
     return () => {
       disposed = true;
       connectRef.current = () => {};
+      flushBufferRef.current = () => {};
       if (timer !== null) clearTimeout(timer);
       const ws = socket;
       socket = null;
@@ -156,13 +183,21 @@ export function useSimulation() {
     async (speed: number): Promise<void> => {
       dispatch({ type: "clearError" });
       const wasFinished = snapshotRef.current.status === "finished";
+
+      // Frames for a session that does not exist yet must not reach the view:
+      // the pump may start before this promise resolves.
+      startingRef.current = true;
+      bufferRef.current = [];
+
       try {
         const { session_id } = await api.startSim({ speed, mode: "replay" });
         // The backend does not announce a start over the socket; adopt the
         // session it returned and rewind the gate to the new stream's head.
+        dispatch({ type: "sessionAdopted", sessionId: session_id });
         gate.reset(0);
         lastResumeRef.current = Number.NaN;
-        dispatch({ type: "sessionAdopted", sessionId: session_id });
+        startingRef.current = false;
+        flushBufferRef.current();
         if (
           wasFinished &&
           typeof WebSocket !== "undefined" &&
@@ -171,6 +206,8 @@ export function useSimulation() {
           connectRef.current();
         }
       } catch (error) {
+        bufferRef.current = [];
+        startingRef.current = false;
         dispatch({ type: "error", error: failureMessage(error) });
       }
     },
