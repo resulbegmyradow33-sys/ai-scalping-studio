@@ -23,14 +23,27 @@ from scalping.api.runner import (
     SimulationRunner,
 )
 from scalping.api.schemas import (
+    BacktestRequest,
+    BacktestResponse,
     ControlRequest,
     DataStatusResponse,
     DownloadRequest,
     DownloadResponse,
     HealthResponse,
     OkResponse,
+    RunControlRequest,
+    RunDetail,
+    RunSummary,
     StartRequest,
     StartResponse,
+    TrainRequest,
+    TrainResponse,
+)
+from scalping.api.train_runner import (
+    RunControlError,
+    TrainError,
+    TrainRunner,
+    UnknownRunError,
 )
 from scalping.data.base import DataProvider
 from scalping.data.csv_provider import CsvProvider
@@ -62,6 +75,11 @@ def _device() -> str:
 
 def _runner(request: Request) -> SimulationRunner:
     runner: SimulationRunner = request.app.state.sim
+    return runner
+
+
+def _trains(request: Request) -> TrainRunner:
+    runner: TrainRunner = request.app.state.trains
     return runner
 
 
@@ -127,6 +145,74 @@ def download(body: DownloadRequest, request: Request) -> DownloadResponse:
                 close()
     rows = store.write(body.symbol, TIMEFRAME, frame)
     return DownloadResponse(rows=rows)
+
+
+@router.post("/api/train", response_model=TrainResponse, status_code=202)
+async def train_start(body: TrainRequest, request: Request) -> TrainResponse:
+    """Prepare the run off-loop and return its id; learning runs on a thread.
+
+    Feature building is done before the 202 so a store below the bar floor gets
+    the trainer's 409 instead of a background failure. A data problem raised by
+    the feature layer is a 422, matching ``/api/sim/start``.
+    """
+    try:
+        run_id = await asyncio.to_thread(
+            _trains(request).start,
+            total_steps=body.total_steps,
+            n_envs=body.n_envs,
+            seed=body.seed,
+            symbol=body.symbol,
+        )
+    except TrainError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return TrainResponse(run_id=run_id)
+
+
+@router.get("/api/runs", response_model=list[RunSummary])
+def list_runs(request: Request) -> list[RunSummary]:
+    """The registry directory, newest first; absent ``runs_root`` means empty."""
+    return [RunSummary(**item) for item in _trains(request).list_runs()]
+
+
+@router.get("/api/runs/{run_id}", response_model=RunDetail)
+def run_detail(run_id: str, request: Request) -> RunDetail:
+    try:
+        detail = _trains(request).detail(run_id)
+    except UnknownRunError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown run: {run_id}") from exc
+    return RunDetail(**detail)
+
+
+@router.post("/api/runs/{run_id}/control", response_model=OkResponse)
+def run_control(run_id: str, body: RunControlRequest, request: Request) -> OkResponse:
+    """Map pause/resume/stop onto the run's events.
+
+    404 means this process never started the run; 409 means it is known but the
+    action does not fit its status (for example a completed run).
+    """
+    try:
+        ok = _trains(request).control(run_id, body.action)
+    except UnknownRunError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown run: {run_id}") from exc
+    except RunControlError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return OkResponse(ok=ok)
+
+
+@router.post("/api/backtest", response_model=BacktestResponse)
+async def backtest(body: BacktestRequest, request: Request) -> BacktestResponse:
+    """Replay a stored policy over the stored bars; metrics are JSON-safe."""
+    try:
+        result = await asyncio.to_thread(_trains(request).backtest, body.run_id, body.symbol)
+    except UnknownRunError as exc:
+        raise HTTPException(status_code=404, detail=f"unknown run: {body.run_id}") from exc
+    except TrainError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return BacktestResponse(**result)
 
 
 @router.post("/api/sim/start", response_model=StartResponse)

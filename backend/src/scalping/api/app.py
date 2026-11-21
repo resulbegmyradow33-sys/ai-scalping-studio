@@ -13,6 +13,8 @@ simulator living in the worker that accepted it.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -21,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from scalping import __version__
 from scalping.api.routes import router
 from scalping.api.runner import SimulationRunner
+from scalping.api.train_runner import TrainRunner
 from scalping.config import Settings
 from scalping.data.store import ParquetStore
 
@@ -42,6 +45,13 @@ ALLOWED_ORIGINS = (
 )
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Let the app finish serving, then stop and join training threads."""
+    yield
+    app.state.trains.shutdown()
+
+
 def create_app(
     data_root: Path | None = None,
     settings_path: Path | None = None,
@@ -52,7 +62,7 @@ def create_app(
     runs = Path(runs_root) if runs_root is not None else DEFAULT_RUNS_ROOT
     settings = Settings.load(settings_path) if settings_path is not None else Settings()
 
-    app = FastAPI(title="AI Scalping Studio", version=__version__)
+    app = FastAPI(title="AI Scalping Studio", version=__version__, lifespan=_lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(ALLOWED_ORIGINS),
@@ -64,6 +74,9 @@ def create_app(
     app.state.settings = settings
     app.state.store = ParquetStore(root)
     app.state.sim = SimulationRunner(app.state.store, settings)
+    # Training threads belong to this app: the runner map is per factory call
+    # and the lifespan stops and joins them before the process exits.
+    app.state.trains = TrainRunner(app.state.store, settings, runs)
     app.include_router(router)
     return app
 

@@ -8,13 +8,15 @@ plain datetimes: providers treat a naive value as already-UTC.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from scalping.serialize import metrics_payload
 
 __all__ = [
+    "BacktestRequest",
+    "BacktestResponse",
     "ControlRequest",
     "DataStatusResponse",
     "DownloadRequest",
@@ -22,8 +24,13 @@ __all__ = [
     "HealthResponse",
     "OkResponse",
     "ProviderName",
+    "RunControlRequest",
+    "RunDetail",
+    "RunSummary",
     "StartRequest",
     "StartResponse",
+    "TrainRequest",
+    "TrainResponse",
     "metrics_payload",
 ]
 
@@ -80,3 +87,46 @@ class ControlRequest(BaseModel):
 
 class OkResponse(BaseModel):
     ok: bool
+
+
+class TrainRequest(BaseModel):
+    """Defaults match :class:`~scalping.rl.train.TrainConfig`."""
+
+    total_steps: int = Field(default=200_000, ge=1)
+    n_envs: int = Field(default=2, ge=1)
+    seed: int = Field(default=0, ge=0)
+    symbol: str = Field(min_length=1)
+
+
+class TrainResponse(BaseModel):
+    run_id: str
+
+
+class RunSummary(BaseModel):
+    """One row of the run registry, as the panel lists it."""
+
+    run_id: str
+    status: str
+    created_at: str | None
+    steps: int
+    reward_mean: float | None
+
+
+class RunDetail(BaseModel):
+    config: dict[str, Any]
+    metrics: dict[str, Any]
+    status: str
+
+
+class RunControlRequest(BaseModel):
+    action: Literal["pause", "resume", "stop"]
+
+
+class BacktestRequest(BaseModel):
+    run_id: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+
+
+class BacktestResponse(BaseModel):
+    report_path: str
+    metrics: dict[str, Any]

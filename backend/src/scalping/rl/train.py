@@ -77,6 +77,7 @@ __all__ = [
     "TrainResult",
     "data_hash_for",
     "env_starts_for",
+    "run_identity",
     "train",
 ]
 
@@ -173,6 +174,34 @@ def env_starts_for(features: FeatureFrame, n_envs: int) -> list[int]:
     if step < 1:
         raise ValueError(f"n_envs {n_envs} exceeds the {usable} usable bars")
     return [first + index * step for index in range(n_envs)]
+
+
+def run_identity(
+    config: TrainConfig,
+    features: FeatureFrame,
+    settings: Settings,
+    selector: LinUCB | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Return the run id and the identity dict the id is hashed from.
+
+    :func:`train` and the API runner share this so a request can name the run
+    directory before the worker thread has built anything. ``config.data_hash``
+    wins when set; otherwise the feature matrix is hashed.
+    """
+    data_hash = config.data_hash or data_hash_for(features)
+    params: dict[str, Any] = asdict(config)
+    params["data_hash"] = data_hash
+    identity: dict[str, Any] = {
+        "params": params,
+        "settings": asdict(settings),
+        "selector": {
+            "enabled": selector is not None,
+            "type": type(selector).__name__ if selector is not None else None,
+        },
+        "data_hash": data_hash,
+        "seed": config.seed,
+    }
+    return run_id_for(identity, data_hash, config.seed), identity
 
 
 def _versions() -> dict[str, str]:
@@ -297,22 +326,11 @@ def train(
 
     pin_threads()
     out = Path(out_dir)
-    data_hash = config.data_hash or data_hash_for(features)
-    settings_dict = asdict(settings)
-    selector_info: dict[str, Any] = {
-        "enabled": selector is not None,
-        "type": type(selector).__name__ if selector is not None else None,
-    }
-    params: dict[str, Any] = asdict(config)
-    params["data_hash"] = data_hash
-    identity: dict[str, Any] = {
-        "params": params,
-        "settings": settings_dict,
-        "selector": selector_info,
-        "data_hash": data_hash,
-        "seed": config.seed,
-    }
-    run_id = run_id_for(identity, data_hash, config.seed)
+    run_id, identity = run_identity(config, features, settings, selector)
+    data_hash = identity["data_hash"]
+    params = identity["params"]
+    settings_dict = identity["settings"]
+    selector_info = identity["selector"]
     run_dir = out / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     _existing_identity(run_dir, identity)
