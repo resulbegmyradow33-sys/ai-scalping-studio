@@ -16,6 +16,8 @@ __pycache__/
 node_modules/
 .next/
 /out/
+frontend/next-env.d.ts
+*.tsbuildinfo
 frontend/coverage/
 frontend/test-results/
 frontend/playwright-report/
