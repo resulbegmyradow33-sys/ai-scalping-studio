@@ -33,7 +33,13 @@ DEFAULT_RUNS_ROOT = Path("runs")
 #: Local panel origins. Never ``*``: ``/api/data/download`` reads a path from
 #: the request body, so a wildcard would let any page ask this process to read a
 #: local file.
-ALLOWED_ORIGINS = ("http://localhost:3000", "http://127.0.0.1:3000")
+ALLOWED_ORIGINS = (
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    # 3001 is used when another local app already holds 3000.
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
+)
 
 
 def create_app(
