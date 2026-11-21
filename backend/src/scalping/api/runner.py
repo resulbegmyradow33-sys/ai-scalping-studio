@@ -149,7 +149,7 @@ def _position_payload(position: Position) -> dict[str, Any]:
     return {
         "side": int(position.side),
         "lot": float(position.lot),
-        "entry_price": float(position.entry_price),
+        "entry": float(position.entry_price),
         "entry_ts": _iso(position.entry_ts),
         "sl": float(position.sl),
         "tp": float(position.tp),
