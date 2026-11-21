@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useReducer, useRef } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { API_BASE, ApiError, api, isSimMessage } from "@/lib/api";
 import {
@@ -43,30 +43,42 @@ export function useSimulation() {
     reactDispatch(action);
   }, []);
 
+  // Shared with `start`: a session adopted from the API must rewind the gate
+  // the socket handler is using. `useState` gives one stable gate per hook.
+  const [gate] = useState(createSequenceGate);
+  const lastResumeRef = useRef(Number.NaN);
+  const socketRef = useRef<WebSocket | null>(null);
+  const connectRef = useRef<() => void>(() => {});
+
   useEffect(() => {
     if (typeof WebSocket === "undefined") return;
 
-    const gate = createSequenceGate();
     let socket: WebSocket | null = null;
     let timer: ReturnType<typeof setTimeout> | null = null;
     let attempt = 0;
     let disposed = false;
-    let lastResumeSent = Number.NaN;
 
     const sendResume = (target: WebSocket, seq: number): void => {
+      // The backend's reader rejects negative cursors outright.
+      if (seq < 0) return;
       if (target.readyState !== WebSocket.OPEN) return;
       target.send(JSON.stringify({ type: "resume", seq }));
-      lastResumeSent = seq;
+      lastResumeRef.current = seq;
     };
 
     const handleMessage = (target: WebSocket, message: SimMessage): void => {
       if (message.type === "status") {
         // `status` is seq 0 on every connection and must bypass the gate, or a
-        // reconnect would be rejected as stale. A new session resets it to
-        // `head_seq` so the new episode's low numbers are accepted.
+        // reconnect would be rejected as stale. A new session (including a
+        // null session after a known one: the server restarted) resets the
+        // cursor to the advertised head. A still-unseeded gate is seeded here
+        // too, so the first data frame is contiguous instead of a gap.
+        const incoming = message.payload.session_id;
         if (isNewSession(snapshotRef.current, message)) {
-          gate.reset(message.payload.head_seq);
-          lastResumeSent = Number.NaN;
+          gate.reset(incoming === null ? 0 : message.payload.head_seq);
+          lastResumeRef.current = Number.NaN;
+        } else if (gate.lastSeen < 0) {
+          gate.reset(incoming === null ? 0 : message.payload.head_seq);
         }
         dispatch({ type: "message", message });
         return;
@@ -78,7 +90,7 @@ export function useSimulation() {
       // Out-of-order frame: ask for exactly the hole, once per cursor.
       if (gate.gap) {
         const resumeSeq = gate.resumeFrom - 1;
-        if (resumeSeq !== lastResumeSent) sendResume(target, resumeSeq);
+        if (resumeSeq !== lastResumeRef.current) sendResume(target, resumeSeq);
       }
     };
 
@@ -87,10 +99,11 @@ export function useSimulation() {
 
       const ws = new WebSocket(socketUrl(API_BASE));
       socket = ws;
+      socketRef.current = ws;
 
       ws.onopen = () => {
-        attempt = 0;
-        sendResume(ws, gate.resumeFrom - 1);
+        // Only a valid cursor is worth sending; an unseeded gate sends none.
+        if (gate.resumeFrom > 0) sendResume(ws, gate.resumeFrom - 1);
       };
 
       ws.onmessage = (event: MessageEvent) => {
@@ -101,24 +114,33 @@ export function useSimulation() {
           return;
         }
         if (!isSimMessage(raw)) return;
+        // A server that opens and closes immediately never resets the
+        // backoff: only a real frame proves the connection is healthy.
+        attempt = 0;
         handleMessage(ws, raw);
       };
 
       ws.onclose = () => {
         if (disposed || socket !== ws) return;
+        // A finished episode is a terminal state for this socket; retrying
+        // every 8 s forever would be noise. `start` reconnects explicitly.
+        if (snapshotRef.current.status === "finished") return;
         const delay = backoffDelay(attempt);
         attempt += 1;
         timer = setTimeout(connect, delay);
       };
     };
 
+    connectRef.current = connect;
     connect();
 
     return () => {
       disposed = true;
+      connectRef.current = () => {};
       if (timer !== null) clearTimeout(timer);
       const ws = socket;
       socket = null;
+      socketRef.current = null;
       if (ws) {
         // Drop handlers first: closing must not schedule another reconnect.
         ws.onopen = null;
@@ -128,18 +150,31 @@ export function useSimulation() {
         ws.close();
       }
     };
-  }, [dispatch]);
+  }, [dispatch, gate]);
 
   const start = useCallback(
     async (speed: number): Promise<void> => {
       dispatch({ type: "clearError" });
+      const wasFinished = snapshotRef.current.status === "finished";
       try {
-        await api.startSim({ speed, mode: "replay" });
+        const { session_id } = await api.startSim({ speed, mode: "replay" });
+        // The backend does not announce a start over the socket; adopt the
+        // session it returned and rewind the gate to the new stream's head.
+        gate.reset(0);
+        lastResumeRef.current = Number.NaN;
+        dispatch({ type: "sessionAdopted", sessionId: session_id });
+        if (
+          wasFinished &&
+          typeof WebSocket !== "undefined" &&
+          socketRef.current?.readyState !== WebSocket.OPEN
+        ) {
+          connectRef.current();
+        }
       } catch (error) {
         dispatch({ type: "error", error: failureMessage(error) });
       }
     },
-    [dispatch],
+    [dispatch, gate],
   );
 
   const control = useCallback(

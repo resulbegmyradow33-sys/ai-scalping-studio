@@ -55,20 +55,17 @@ export const initialSimSnapshot: SimSnapshot = {
 
 export type SimAction =
   | { type: "message"; message: SimMessage }
+  | { type: "sessionAdopted"; sessionId: string }
   | { type: "error"; error: string }
   | { type: "clearError" };
 
 /**
- * A non-null session that differs from the one we are showing is a new epoch.
- * A null session is the backend before its first start: it must not wipe data
- * the client already holds.
+ * A session that differs from the one we are showing is a new epoch. A null
+ * session while a session was known means the backend restarted and lost it;
+ * a null session before any start is not an epoch change.
  */
 export function isNewSession(state: SimSnapshot, message: SimMessage): boolean {
-  return (
-    message.type === "status" &&
-    message.payload.session_id !== null &&
-    message.payload.session_id !== state.sessionId
-  );
+  return message.type === "status" && message.payload.session_id !== state.sessionId;
 }
 
 function appendCapped<T>(items: readonly T[], item: T, limit: number): T[] {
@@ -136,6 +133,11 @@ export function applySimMessage(state: SimSnapshot, message: SimMessage): SimSna
     case "episode_end":
       // The backend keeps the episode on screen; only the status changes.
       return { ...state, seq, status: "finished" };
+    default: {
+      // Compile-time exhaustiveness guard: a new SimMessage member fails here.
+      const unreachable: never = message;
+      return unreachable;
+    }
   }
 }
 
@@ -143,6 +145,12 @@ export function simReducer(state: SimSnapshot, action: SimAction): SimSnapshot {
   switch (action.type) {
     case "message":
       return applySimMessage(state, action.message);
+    case "sessionAdopted":
+      if (state.sessionId === action.sessionId) return state;
+      // Start returned the session id instead of announcing it over the
+      // socket: adopt the epoch but keep whatever the chart already holds.
+      // The new stream restarts at seq 0.
+      return { ...state, sessionId: action.sessionId, status: "running", seq: 0 };
     case "error":
       return { ...state, error: action.error };
     case "clearError":

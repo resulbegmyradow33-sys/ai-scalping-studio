@@ -7,6 +7,7 @@ import {
   applySimMessage,
   initialSimSnapshot,
   isNewSession,
+  simReducer,
   type SimSnapshot,
 } from "./sim-state";
 import type {
@@ -79,14 +80,24 @@ describe("applySimMessage — status", () => {
     expect(next.seq).toBe(7);
   });
 
-  it("ignores a null session_id from an unstarted backend", () => {
-    const started = run(initialSimSnapshot, [status(), bar(1)]);
+  it("clears data when a null session_id means the server restarted", () => {
+    const started = run(initialSimSnapshot, [status(), bar(1), equity(2)]);
 
     const next = applySimMessage(started, status({ session_id: null, state: "idle", head_seq: 0 }));
 
-    expect(next.sessionId).toBe("aaaaaaaa");
-    expect(next.bars).toHaveLength(1);
+    expect(next.sessionId).toBeNull();
+    expect(next.bars).toEqual([]);
+    expect(next.equity).toEqual([]);
     expect(next.status).toBe("idle");
+    expect(next.seq).toBe(0);
+  });
+
+  it("keeps an unstarted null session a no-op", () => {
+    const next = applySimMessage(initialSimSnapshot, status({ session_id: null, state: "idle" }));
+
+    expect(next.sessionId).toBeNull();
+    expect(next.bars).toEqual([]);
+    expect(next.seq).toBe(0);
   });
 
   it("keeps the buffers when the same session re-announces itself", () => {
@@ -224,12 +235,44 @@ describe("applySimMessage — data frames", () => {
 });
 
 describe("isNewSession", () => {
-  it("is true only for a non-null session that differs", () => {
+  it("is true for any session that differs from the known one", () => {
     const state = applySimMessage(initialSimSnapshot, status());
 
     expect(isNewSession(state, status({ session_id: "bbbbbbbb" }))).toBe(true);
     expect(isNewSession(state, status({ session_id: "aaaaaaaa" }))).toBe(false);
-    expect(isNewSession(state, status({ session_id: null }))).toBe(false);
     expect(isNewSession(state, bar(1))).toBe(false);
+  });
+
+  it("treats a null session as new only when a session was known", () => {
+    const state = applySimMessage(initialSimSnapshot, status());
+
+    expect(isNewSession(state, status({ session_id: null }))).toBe(true);
+    expect(isNewSession(initialSimSnapshot, status({ session_id: null }))).toBe(false);
+  });
+});
+
+describe("simReducer — sessionAdopted", () => {
+  it("adopts a session returned by start without clearing the buffers", () => {
+    const populated = run(initialSimSnapshot, [
+      status({ session_id: "old" }),
+      bar(1),
+      equity(2),
+      { seq: 3, type: "trade_open", payload: POSITION },
+    ]);
+
+    const next = simReducer(populated, { type: "sessionAdopted", sessionId: "sess-A" });
+
+    expect(next.sessionId).toBe("sess-A");
+    expect(next.status).toBe("running");
+    expect(next.bars).toEqual(populated.bars);
+    expect(next.equity).toEqual(populated.equity);
+    expect(next.position).toEqual(POSITION);
+    expect(next.trades).toEqual([]);
+  });
+
+  it("is idempotent for the same session", () => {
+    const state = applySimMessage(initialSimSnapshot, status({ session_id: "sess-A" }));
+
+    expect(simReducer(state, { type: "sessionAdopted", sessionId: "sess-A" })).toBe(state);
   });
 });

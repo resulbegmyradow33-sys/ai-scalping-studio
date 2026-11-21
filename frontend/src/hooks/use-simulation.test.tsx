@@ -88,7 +88,7 @@ afterEach(() => {
 });
 
 describe("useSimulation — socket lifecycle", () => {
-  it("connects to the ws url derived from the api base and resumes on open", () => {
+  it("connects to the ws url derived from the api base and never resumes below zero", () => {
     const { result } = renderHook(() => useSimulation());
     const socket = latest();
 
@@ -97,7 +97,9 @@ describe("useSimulation — socket lifecycle", () => {
 
     act(() => socket.serverOpen());
 
-    expect(socket.frames()).toEqual([{ type: "resume", seq: -1 }]);
+    // No cursor is seeded yet, so there is nothing to resume from and the
+    // route would reject a negative seq anyway.
+    expect(socket.frames()).toEqual([]);
   });
 
   it("starts a new sequence epoch without freezing on low seq numbers", () => {
@@ -120,6 +122,66 @@ describe("useSimulation — socket lifecycle", () => {
     expect(result.current.bars[0].ts).toBe("new");
   });
 
+  it("adopts the session returned by start and keeps bars across a reconnect", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ session_id: "sess-A" }), { status: 200 })),
+    );
+    const { result } = renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => socket.serverMessage(status(null)));
+
+    await act(async () => {
+      await result.current.start(1);
+    });
+
+    act(() => socket.serverMessage(bar(1, "a")));
+    // Adoption seeded the gate at 0: seq 1 is contiguous, so no gap resume.
+    expect(socket.frames()).toEqual([]);
+
+    act(() => {
+      socket.serverMessage(bar(2, "b"));
+      socket.serverMessage(bar(3, "c"));
+    });
+    expect(result.current.bars).toHaveLength(3);
+
+    vi.useFakeTimers();
+    act(() => socket.serverClose());
+    act(() => vi.advanceTimersByTime(500));
+
+    const reconnected = latest();
+    expect(reconnected).not.toBe(socket);
+    act(() => reconnected.serverOpen());
+    act(() => reconnected.serverMessage(status("sess-A", 3)));
+
+    // sess-A is the adopted epoch, so the status must not clear the chart.
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["a", "b", "c"]);
+    expect(reconnected.frames()).toEqual([{ type: "resume", seq: 3 }]);
+  });
+
+  it("treats a null status after a known session as a server restart", () => {
+    const { result } = renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => {
+      socket.serverMessage(status("sess-A"));
+      socket.serverMessage(bar(1, "old"));
+      socket.serverMessage(bar(2, "older"));
+    });
+    expect(result.current.bars).toHaveLength(2);
+
+    act(() => socket.serverMessage(status(null, 0)));
+    expect(result.current.bars).toEqual([]);
+
+    // The gate was reset to 0, so the restarted session's seq 1 is contiguous.
+    act(() => socket.serverMessage(bar(1, "new")));
+    expect(result.current.bars.map((item) => item.ts)).toEqual(["new"]);
+    expect(socket.frames()).toEqual([]);
+  });
+
   it("requests a resume from the last contiguous sequence when a gap appears", () => {
     const { result } = renderHook(() => useSimulation());
     const socket = latest();
@@ -131,13 +193,28 @@ describe("useSimulation — socket lifecycle", () => {
       socket.serverMessage(bar(3));
     });
 
-    // The initial resume on open asked for -1; the gap adds resume(1).
-    expect(socket.frames()).toEqual([
-      { type: "resume", seq: -1 },
-      { type: "resume", seq: 1 },
-    ]);
+    // The unseeded gate sends nothing on open; the gap adds resume(1).
+    expect(socket.frames()).toEqual([{ type: "resume", seq: 1 }]);
     // The out-of-order bar is still applied; the replay will fill seq 2.
     expect(result.current.bars.map((item) => item.ts)).toEqual(["t1", "t3"]);
+  });
+
+  it("requests a gap resume once and does not repeat the same cursor", () => {
+    renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => {
+      socket.serverMessage(status(null));
+      socket.serverMessage(bar(1));
+      socket.serverMessage(bar(3));
+    });
+    expect(socket.frames()).toEqual([{ type: "resume", seq: 1 }]);
+
+    // Another frame above the same hole must not re-send resume(1).
+    act(() => socket.serverMessage(bar(4)));
+
+    expect(socket.frames()).toEqual([{ type: "resume", seq: 1 }]);
   });
 
   it("ignores duplicate and stale frames", () => {
@@ -237,7 +314,7 @@ describe("useSimulation — reconnect", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 
-  it("resets the backoff after a successful open", () => {
+  it("resets the backoff only after a valid message", () => {
     vi.useFakeTimers();
     renderHook(() => useSimulation());
 
@@ -246,9 +323,44 @@ describe("useSimulation — reconnect", () => {
     expect(FakeWebSocket.instances).toHaveLength(2);
 
     act(() => latest().serverOpen());
+    act(() => latest().serverMessage(status(null)));
     act(() => latest().serverClose());
     act(() => vi.advanceTimersByTime(500));
     expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it("keeps backing off when the server closes a bare open", () => {
+    vi.useFakeTimers();
+    renderHook(() => useSimulation());
+
+    act(() => latest().serverClose());
+    act(() => vi.advanceTimersByTime(500));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+
+    // Open, no frame, close: the previous failure still counts.
+    act(() => latest().serverOpen());
+    act(() => latest().serverClose());
+    act(() => vi.advanceTimersByTime(999));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    act(() => vi.advanceTimersByTime(1));
+    expect(FakeWebSocket.instances).toHaveLength(3);
+  });
+
+  it("does not reconnect after a finished episode", () => {
+    vi.useFakeTimers();
+    renderHook(() => useSimulation());
+    const socket = latest();
+
+    act(() => socket.serverOpen());
+    act(() => {
+      socket.serverMessage(status("sess-A"));
+      socket.serverMessage({ seq: 1, type: "episode_end", payload: { reason: "finished" } });
+    });
+
+    act(() => socket.serverClose());
+    act(() => vi.advanceTimersByTime(60_000));
+
+    expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
 
