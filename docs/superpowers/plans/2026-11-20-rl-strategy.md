@@ -198,7 +198,7 @@ Expected: FAIL — module not found
 
 - [ ] **Step 3: Implement**
 
-For each strategy row where `sig != 0`, take the next bar's `ask` (long) / `bid` (short) as entry, size with `RiskEngine.size`, then run `PaperBroker.update` until SL/TP/timeout. `r_multiple = pnl / (initial_risk)` where `initial_risk = lot*size*|entry-sl|`. Drop labels whose entry is after data end. `context_matrix` reuses the same feature arrays; the "last 20 bars strategy success" column is a causal rolling mean of realized labels (0 before any).
+For each strategy row where `sig != 0`, fill the spread first (`prepare_bars`), then take **that bar's** `ask` (long) / `bid` (short) as entry — the same timing as `Simulator._apply` — size with `RiskEngine.size`, then run `PaperBroker.update` from the next bar until SL/TP/timeout. `r_multiple = pnl / (initial_risk)` where `initial_risk = lot*size*|entry-sl|`. Drop labels whose entry is after data end. `context_matrix` reuses the same feature arrays (or accepts a precomputed label frame); the strategy-success column is the causal mean over exits in the trailing 240 bars, `0.5` when no exit resolved.
 
 - [ ] **Step 4: Run test to verify it passes**
 
