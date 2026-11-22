@@ -138,17 +138,30 @@ Tags are `v0.x.y` on `main`. A release notes file is generated from
 
 ## GitHub settings
 
-`scripts/setup_github.sh` applies the settings the repository owner can change
-with the `gh` CLI:
+`scripts/setup_github.sh` applies what the repository owner can change with the
+`gh` CLI:
 
 - description, topics, issues/projects/discussions;
 - squash-only merges, auto-merge, delete branch on merge;
 - labels and phase milestones;
-- `main` branch protection: PR required, one approval, CODEOWNERS review,
-  `backend` + `frontend` checks, up-to-date branch, linear history,
-  conversation resolution, no force push/delete;
-- vulnerability alerts and Dependabot security fixes.
+- vulnerability alerts and Dependabot security fixes;
+- `main` branch protection **when the plan allows it**.
+
+### Private repository on GitHub Free
+
+Branch protection and rulesets are a paid feature for private repositories:
+the API returns `403 Upgrade to GitHub Pro or make this repository public`.
+Zero-cost options:
+
+1. **Keep it private and enforce locally.** `make hooks` installs
+   `.githooks/pre-push`, which blocks direct pushes to `main`; CI still runs on
+   every PR, and the team follows the PR rule by discipline. Bypass only for
+   repository maintenance with `ALLOW_MAIN_PUSH=1 git push`.
+2. **Make the repository public.** Public repositories get branch protection,
+   rulesets, secret scanning and CodeQL at no cost. This exposes the code and
+   research results; it is a product decision, not an automatic one.
+
+The owner must choose. The script never changes visibility on its own.
 
 Secret scanning and CodeQL code scanning require GitHub Advanced Security on a
-private repository and are not enabled by default under the zero-cost policy.
-Enable them only if the repository becomes public or the plan includes them.
+private repository. On a public repository they are free.

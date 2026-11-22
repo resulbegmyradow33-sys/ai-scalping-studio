@@ -16,6 +16,10 @@ check:
 # setup-github: labels, milestones, merge settings and main protection.
 setup-github:
 	./scripts/setup_github.sh
+
+# hooks: install the local pre-push guard (needed on the private Free plan).
+hooks:
+	./scripts/install_hooks.sh
 dev:
 	cd backend && uv run uvicorn scalping.api.app:app --reload --port 8000
 

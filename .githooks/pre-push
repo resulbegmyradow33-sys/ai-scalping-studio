@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Local guard for the zero-cost (private, GitHub Free) setup.
+# GitHub-side branch protection needs Pro or a public repository, so this hook
+# enforces the same intent on the developer machine.
+#
+# Bypass once for repository maintenance:
+#   ALLOW_MAIN_PUSH=1 git push
+set -euo pipefail
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ] && [ "${ALLOW_MAIN_PUSH:-0}" != "1" ]; then
+    cat >&2 <<'MSG'
+Direct push to main is blocked locally.
+
+Use a branch and a pull request:
+
+  git switch -c feat/your-change
+  git push -u origin feat/your-change
+  gh pr create --base main
+
+Repository maintenance may bypass once:
+
+  ALLOW_MAIN_PUSH=1 git push
+MSG
+    exit 1
+  fi
+done

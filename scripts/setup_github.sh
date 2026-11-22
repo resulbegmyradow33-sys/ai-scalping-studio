@@ -109,7 +109,9 @@ JSON
 then
   echo "branch protection applied to main"
 else
-  echo "warning: branch protection was rejected (plan or permissions); configure it in Settings → Branches" >&2
+  echo "warning: branch protection was rejected (plan or permissions)." >&2
+  echo "         Private GitHub Free: run 'make hooks' for the local pre-push guard," >&2
+  echo "         or make the repository public / upgrade to Pro for server-side rules." >&2
 fi
 
 # --- security ----------------------------------------------------------------

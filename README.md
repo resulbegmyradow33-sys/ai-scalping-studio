@@ -26,9 +26,12 @@ therefore replays that rule; PPO stays in the research lab.
 - [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE) — bug, feature, data, experiment forms.
 - [`CHANGELOG.md`](CHANGELOG.md) — what changed.
 
-`main` is protected: pull request + one review + `backend` and `frontend` CI
-checks. `scripts/setup_github.sh` applies labels, milestones and the protection
-rule to the repository.
+`main` is the protected integration branch. CI runs `backend` and `frontend`
+on every PR. On the private GitHub Free plan, server-side branch protection is
+unavailable, so `make hooks` installs a local pre-push guard and the team
+follows the PR rule; `scripts/setup_github.sh` applies labels, milestones and
+all settings the plan allows. Making the repository public (or upgrading to
+Pro) enables server-side protection at no cost only in the public case.
 
 ## What is validated
 
