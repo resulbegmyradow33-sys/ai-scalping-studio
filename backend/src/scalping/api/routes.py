@@ -232,7 +232,7 @@ async def backtest(body: BacktestRequest, request: Request) -> BacktestResponse:
 async def evaluate(body: EvaluateRequest, request: Request) -> EvaluateResponse:
     """Walk-forward and cost-stress a finished run on out-of-sample bars."""
     try:
-        result = await asyncio.to_thread(_trains(request).evaluate, body.run_id, body.symbol)
+        result = await asyncio.to_thread(_trains(request).evaluate, body.run_id, body.symbol, body.folds)
     except UnknownRunError as exc:
         raise HTTPException(status_code=404, detail=f"unknown run: {body.run_id}") from exc
     except TrainError as exc:

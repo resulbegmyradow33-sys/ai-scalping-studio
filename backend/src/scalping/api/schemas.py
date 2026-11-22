@@ -176,6 +176,7 @@ class BacktestResponse(BaseModel):
 class EvaluateRequest(BaseModel):
     run_id: str = Field(min_length=1)
     symbol: str = Field(min_length=1)
+    folds: int = Field(default=3, ge=1, le=12)
 
 
 class FoldSummary(BaseModel):
@@ -206,3 +207,4 @@ class EvaluateResponse(BaseModel):
     overall: dict[str, Any]
     overfit_warning: bool
     stress: list[StressSummary]
+    method: str = "walk_forward"

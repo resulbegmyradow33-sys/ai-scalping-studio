@@ -709,7 +709,7 @@ class TrainRunner:
 
     # -- evaluation ------------------------------------------------------
 
-    def evaluate(self, run_id: str, symbol: str) -> dict[str, Any]:
+    def evaluate(self, run_id: str, symbol: str, folds: int = 3) -> dict[str, Any]:
         """Walk-forward and cost-stress a finished run on out-of-sample bars.
 
         The evaluation window starts at the run's ``eval_start`` when the run was
@@ -769,14 +769,33 @@ class TrainRunner:
                 f"run data_hash {run_data_hash}, evaluation data_hash {eval_data_hash}"
             )
 
+        method = "walk_forward"
+        report = None
+        holdout = None
         try:
-            report = evaluate_walkforward(
-                policy,
-                frame,
-                self.settings,
-                folds=3,
-                strategy_selector=selector,
-            )
+            try:
+                report = evaluate_walkforward(
+                    policy,
+                    frame,
+                    self.settings,
+                    folds=folds,
+                    strategy_selector=selector,
+                )
+            except ValueError as exc:
+                if "not enough data" not in str(exc):
+                    raise
+                method = "holdout"
+                labels_holdout = (
+                    label_events(frame, self.settings) if selector is not None else None
+                )
+                holdout = run_backtest(
+                    policy,
+                    features,
+                    self.settings,
+                    max_steps=len(features.ts) + 1,
+                    strategy_selector=selector,
+                    labels=labels_holdout,
+                )
             labels = label_events(frame, self.settings) if selector is not None else None
             stress = cost_stress(
                 policy,
@@ -788,6 +807,29 @@ class TrainRunner:
         except (TypeError, ValueError, RuntimeError) as exc:
             raise TrainError(f"run {run_id} cannot be evaluated: {exc}") from exc
 
+        if report is None:
+            if holdout is None:  # pragma: no cover - impossible: set with method
+                raise TrainError(f"run {run_id} produced no evaluation")
+            eval_first = str(features.ts[0])
+            eval_last = str(features.ts[-1])
+            fold_payloads = [
+                {
+                    "train_range": [],
+                    "test_range": [eval_first, eval_last],
+                    "evaluated_range": [eval_first, eval_last],
+                    "metrics": metrics_payload(holdout.metrics),
+                    "train_expectancy": None,
+                }
+            ]
+            overall_payload = metrics_payload(holdout.metrics)
+            overfit = False
+            folds_requested, folds_produced = folds, 1
+        else:
+            fold_payloads = [_fold_payload(fold) for fold in report.folds]
+            overall_payload = metrics_payload(report.overall)
+            overfit = bool(report.overfit_warning)
+            folds_requested, folds_produced = report.folds_requested, report.folds_produced
+
         payload: dict[str, Any] = {
             "run_id": run_id,
             "symbol": symbol,
@@ -797,11 +839,12 @@ class TrainRunner:
             "eval_data_hash": eval_data_hash,
             "in_sample": False,
             "created_at": _now(),
-            "folds": [_fold_payload(fold) for fold in report.folds],
-            "overall": metrics_payload(report.overall),
-            "overfit_warning": bool(report.overfit_warning),
-            "folds_requested": report.folds_requested,
-            "folds_produced": report.folds_produced,
+            "method": method,
+            "folds": fold_payloads,
+            "overall": overall_payload,
+            "overfit_warning": overfit,
+            "folds_requested": folds_requested,
+            "folds_produced": folds_produced,
             "stress": [
                 {
                     "multiplier": float(result.multiplier),
@@ -823,6 +866,7 @@ class TrainRunner:
             "overall": payload["overall"],
             "overfit_warning": payload["overfit_warning"],
             "stress": payload["stress"],
+            "method": method,
         }
 
     # -- lifecycle -------------------------------------------------------
