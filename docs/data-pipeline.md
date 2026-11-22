@@ -119,6 +119,10 @@ API status includes it:
 curl 'http://127.0.0.1:8000/api/data/status?symbol=XAUUSD&timeframe=M1'
 ```
 
+The Data page shows the sidecar verbatim (source, synthetic/real badge, dataset
+id, checksum, created_at). A store written before provenance existed shows an
+explicit "no provenance" note instead of a guessed value.
+
 ## Importing bars
 
 Synthetic (deterministic):
