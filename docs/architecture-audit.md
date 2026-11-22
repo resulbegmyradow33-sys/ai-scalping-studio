@@ -123,7 +123,7 @@ paper-trading ledger, system monitoring.
 
 Last executed runs:
 
-- backend: `uv run pytest` → **539 passed** (116.7 s);
+- backend: `uv run pytest` → **556 passed**;
 - frontend: `npm test` → **184 passed**;
 - `ruff check src tests scripts` → clean;
 - `mypy src` → clean (49 modules);
@@ -166,7 +166,7 @@ Legend: DONE / PARTIAL / MISSING / EXPERIMENTAL.
 | 23 | Model registry/knowledge DB | MISSING | JSON/Parquet only; no SQLite, champion/rollback |
 | 24 | Dashboard sections | PARTIAL | 4 pages; missing 6 laboratory/monitoring sections |
 | 25 | Scheduler | PARTIAL | two background loops/scripts; no configurable scheduler |
-| 26 | Tests | DONE for current scope | 539 backend, 184 frontend; no ML/DL/regime tests because absent |
+| 26 | Tests | DONE for current scope | 556 backend, 188 frontend; classical ML and regime rule tests exist; no deep-learning tests yet |
 | 27 | Required docs | PARTIAL | 2 of 15 complete (this audit + roadmap); 13 missing |
 | 28 | Acceptance criteria | MISSING | most ML/DL/ensemble/paper criteria unmet |
 
@@ -217,6 +217,14 @@ tracked in the roadmap.
 Phase 3 first slice (same date): `features/registry.py` (seven groups covering
 59 columns) and `datasets/builder.py` (chronological split, purge/embargo,
 checksum, manifest) plus `cli dataset build` and leakage/split tests.
+
+Phase 4 first slice: `regime/rules.py` (causal trend/volatility/expansion/
+breakout/unusual labels) and its tests/docs.
+
+Phase 5 first slice: `ml/` with logistic, random forest, extra trees and
+HistGradientBoosting; `cli ml train`; validation metrics and baseline; model
+artifact + metadata. LightGBM/XGBoost, simulator evaluation and promotion are
+still open.
 
 ## Next step
 

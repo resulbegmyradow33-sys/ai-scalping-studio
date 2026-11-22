@@ -41,6 +41,8 @@ from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
+from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.train import TrainSpec, save_result, train_classifier
 from scalping.serialize import metrics_payload
 
 __all__ = ["main"]
@@ -298,6 +300,51 @@ def _cmd_dataset_build(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_ml_train(args: argparse.Namespace) -> None:
+    """Fit a classical direction classifier on a chronological dataset."""
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = build_features(frame, Settings().costs)
+    groups = DEFAULT_GROUPS if args.groups == "all" else tuple(
+        part.strip() for part in args.groups.split(",") if part.strip()
+    )
+    spec = TrainSpec(
+        model=args.model,
+        horizon=args.horizon,
+        groups=groups,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        seed=args.seed,
+        evaluate_test=args.evaluate_test,
+    )
+    result = train_classifier(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        spec=spec,
+    )
+    directory = Path(args.out) / f"ml-{args.model}-{result.dataset_id.rsplit(':', 1)[-1]}"
+    model_path, metrics_path = save_result(result, directory)
+    _print_json(
+        {
+            "model": args.model,
+            "dataset_id": result.dataset_id,
+            "train": result.split_counts["train"],
+            "validation": result.split_counts["validation"],
+            "test": result.split_counts["test"],
+            "validation_metrics": result.validation,
+            "baseline": result.baseline,
+            "test_metrics": result.test,
+            "model_path": str(model_path),
+            "metrics_path": str(metrics_path),
+        }
+    )
+
+
 # --- backtest ------------------------------------------------------------------
 def _hold(obs: np.ndarray) -> int:
     """Control policy: never trade."""
@@ -456,6 +503,24 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--timeframe", default="M1")
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
     validate.set_defaults(handler=_cmd_data_validate)
+
+    ml = commands.add_parser("ml", help="classical machine-learning experiments")
+    ml_commands = ml.add_subparsers(dest="ml_command", required=True)
+    ml_train = ml_commands.add_parser("train", help="fit a direction classifier")
+    ml_train.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    ml_train.add_argument("--timeframe", default="H1")
+    ml_train.add_argument("--model", default="logistic")
+    ml_train.add_argument("--groups", default="all")
+    ml_train.add_argument("--horizon", type=int, default=5)
+    ml_train.add_argument("--train-fraction", type=float, default=0.70)
+    ml_train.add_argument("--validation-fraction", type=float, default=0.15)
+    ml_train.add_argument("--purge", type=int, default=5)
+    ml_train.add_argument("--embargo", type=int, default=5)
+    ml_train.add_argument("--seed", type=int, default=0)
+    ml_train.add_argument("--evaluate-test", action="store_true")
+    ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_train.add_argument("--out", default="runs/ml")
+    ml_train.set_defaults(handler=_cmd_ml_train)
 
     dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)

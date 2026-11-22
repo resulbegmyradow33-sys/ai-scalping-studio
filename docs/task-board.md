@@ -71,19 +71,22 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 5 — Classical ML
 
-- [ ] Add scikit-learn, LightGBM, XGBoost with licence/ARM64/RAM review.
-- [ ] Logistic regression, random forest, extra trees, HistGradientBoosting.
+- [x] Add scikit-learn (LightGBM/XGBoost still open).
+- [x] Logistic regression, random forest, extra trees, HistGradientBoosting.
 - [ ] LightGBM and XGBoost.
 - [ ] SGDClassifier incremental path.
 - [ ] Isolation forest anomaly detector.
 - [ ] SVM only if timing is practical.
-- [ ] Direction/return/volatility/regime/trade-outcome tasks.
+- [x] Direction task (3-class, configurable horizon).
+- [x] Train/validation split, purge/embargo and dataset id.
+- [x] Brier, log loss, balanced accuracy, per-class metrics, confusion, baseline.
+- [ ] Return/volatility/regime/trade-outcome tasks.
 - [ ] Purged time-series CV with embargo.
-- [ ] Calibration: Brier, log loss, reliability curve.
+- [ ] Reliability curve and calibration thresholds.
 - [ ] Feature importance and ablation.
 - [ ] Simulator evaluation + cost stress + regime breakdown.
-- [ ] Model registry metadata and tests.
-- [ ] `docs/classical-ml.md` (new required doc).
+- [ ] Model registry metadata in SQLite (Phase 10).
+- [x] `docs/classical-ml.md`.
 
 ## Phase 6 — Neural network framework
 

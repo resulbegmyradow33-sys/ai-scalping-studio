@@ -16,7 +16,7 @@ Son güncelleme: 2026-11-22 · Branch `main`
   24 işlem, **+0.502 R**, PF 2.15, +$481, DD %2,4.
 - Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
 - **PPO + taklit** yerelde eğitiliyor; iki bölünmede pozitif ama kuraldan zayıf.
-- Testler: **539 backend**, **184 frontend**; ruff/mypy temiz; build geçiyor.
+- Testler: **556 backend**, **188 frontend**; ruff/mypy temiz; build geçiyor.
 
 ## Durum matrisi
 
@@ -31,7 +31,7 @@ Son güncelleme: 2026-11-22 · Branch `main`
 | Özellik mühendisliği | 🟡 | 59 nedensel özellik; seçilebilir set yok |
 | Gerçek bid/ask/order-flow | 🟡 | İmzalı flow var; L2/deep book yok |
 | Çoklu zaman dilimi analizi | 🟡 | M5/M15 bağlamı; bağımsız encoder/fusion yok |
-| Klasik ML (RF, LGBM, XGB) | ❌ | Bağımlılık ve modül yok |
+| Klasik ML (RF, LGBM, XGB) | 🟡 | Logistic/RF/ExtraTrees/HistGB + metrikler var; LGBM/XGB, simülatör değerlendirmesi ve promosyon yok |
 | Derin öğrenme (CNN/RNN/GRU/TCN) | ❌ | Sadece PPO'nun 64×64 MLP'si |
 | Transformer araştırması | ❌ | Modül yok |
 | RL (PPO + taklit) | 🟡 | PPO/BC var; SAC/TD3/DQN/A2C yok |
@@ -86,7 +86,7 @@ aynı anda çalışmaz.
 ## Ekip altyapısı
 
 - `main` varsayılan branch; eski `feat/v1` uzak branch silindi.
-- CI: her PR'da `backend` (ruff + mypy + 539 test) ve `frontend` (tsc + 184 test + build).
+- CI: her PR'da `backend` (ruff + mypy + 556 test) ve `frontend` (tsc + 188 test + build).
 - PR/issue şablonları, CODEOWNERS, SECURITY, CODE_OF_CONDUCT, CHANGELOG.
 - 27 etiket, 14 faz milestone'u, 5 açılış issue'su.
 - `make hooks`: doğrudan `main` push'unu yerelde engeller.
