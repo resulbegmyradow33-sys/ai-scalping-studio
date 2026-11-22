@@ -42,5 +42,8 @@ data-2026-ticks/
 data-forward-cache/
 data-forward-flow/
 data-forward-store/
+/data-flow-store/
+/data-rich-store/
+/data-ticks5-store/
 demo-data/
 demo-data-full/
