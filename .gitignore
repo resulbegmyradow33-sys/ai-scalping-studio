@@ -29,3 +29,10 @@ frontend/playwright-report/
 .worktrees/
 
 .DS_Store
+
+# real market data
+data-real/
+data-real-store/
+data-real-csv/
+demo-data/
+demo-data-full/
