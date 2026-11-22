@@ -74,6 +74,17 @@ to exactly one phase. A phase closes only when its exit criteria in
 Use Discussions for design questions and result interpretation; use Issues for
 actionable work; use PRs for code.
 
+### Project board
+
+The Projects tab is enabled. Create one board manually (the CLI token does not
+carry the `project` scope):
+
+1. Repository → Projects → New project → Board.
+2. Columns: **Backlog**, **Ready**, **In progress**, **Review**, **Done**.
+3. Add open issues; keep at most three in **In progress** per person.
+4. Link the phase milestone in each issue; a phase is done only when its exit
+   criteria and all issues are closed.
+
 ## Data rules
 
 - Never commit `data-*` stores, `runs/`, `*.parquet`, model weights or `.env`.
