@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { CoverageBar } from "@/components/coverage-bar";
+import { ProvenancePanel } from "@/components/provenance-panel";
 import { ProviderCard } from "@/components/provider-card";
 import { useDataStatus } from "@/hooks/use-data-status";
 import { ApiError, api } from "@/lib/api";
@@ -202,6 +203,10 @@ export default function DataPage() {
           vermediği için —; sembol toplamı üstteki kapsam satırındadır.
         </p>
       </section>
+
+      {/* An empty store has nothing to describe; an old store with rows and no
+          sidecar gets the explicit missing state instead of a guess. */}
+      {rows > 0 && <ProvenancePanel provenance={status?.provenance} />}
 
       <form
         data-testid="download-form"

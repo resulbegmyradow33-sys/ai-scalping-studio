@@ -25,6 +25,23 @@ export interface DataStatus {
   first_ts: string | null;
   last_ts: string | null;
   providers: string[];
+  /** Absent on servers older than the provenance endpoint. */
+  provenance?: Provenance | null;
+}
+
+/** Sidecar metadata written next to a store partition. */
+export interface Provenance {
+  dataset_id: string;
+  symbol: string;
+  timeframe: string;
+  source: string;
+  synthetic: boolean;
+  rows: number;
+  first_ts: string | null;
+  last_ts: string | null;
+  checksum: string;
+  created_at: string;
+  notes: string;
 }
 
 export interface DownloadRequest {

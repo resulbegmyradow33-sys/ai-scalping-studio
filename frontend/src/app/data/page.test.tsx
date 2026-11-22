@@ -227,4 +227,89 @@ describe("DataPage", () => {
       expect.objectContaining({ provider: "csv", path: "/tmp/xauusd.csv", seed: null }),
     );
   });
+
+  it("shows provenance fields verbatim for a synthetic dataset", () => {
+    statusHook.useDataStatus.mockReturnValue(
+      statusState({
+        data: {
+          ...SEEDED,
+          provenance: {
+            dataset_id: "XAUUSD:M1:0123456789ab",
+            symbol: "XAUUSD",
+            timeframe: "M1",
+            source: "provider:synthetic",
+            synthetic: true,
+            rows: 14400,
+            first_ts: "2024-10-01T00:00:00Z",
+            last_ts: "2024-10-10T23:59:00Z",
+            checksum: "0123456789abcdef0123456789abcdef",
+            created_at: "2026-01-07T12:30:00Z",
+            notes: "",
+          },
+        },
+      }),
+    );
+
+    render(<DataPage />);
+
+    expect(screen.getByTestId("provenance-kind")).toHaveTextContent("Sentetik");
+    expect(screen.getByTestId("provenance-kind")).toHaveAttribute("data-kind", "synthetic");
+    expect(screen.getByTestId("provenance-source")).toHaveTextContent("provider:synthetic");
+    expect(screen.getByTestId("provenance-dataset-id")).toHaveTextContent(
+      "XAUUSD:M1:0123456789ab",
+    );
+    expect(screen.getByTestId("provenance-checksum")).toHaveTextContent(
+      "0123456789abcdef0123456789abcdef",
+    );
+    expect(screen.getByTestId("provenance-created-at")).toHaveTextContent(/07\.01\.2026/);
+    expect(screen.queryByTestId("provenance-missing")).not.toBeInTheDocument();
+  });
+
+  it("marks a real dataset and shows its source", () => {
+    statusHook.useDataStatus.mockReturnValue(
+      statusState({
+        data: {
+          ...SEEDED,
+          providers: ["dukascopy"],
+          provenance: {
+            dataset_id: "XAUUSD:M1:fedcba987654",
+            symbol: "XAUUSD",
+            timeframe: "M1",
+            source: "provider:dukascopy",
+            synthetic: false,
+            rows: 14400,
+            first_ts: "2024-10-01T00:00:00Z",
+            last_ts: "2024-10-10T23:59:00Z",
+            checksum: "fedcba9876543210fedcba9876543210",
+            created_at: "2026-01-07T12:30:00Z",
+            notes: "tick archive",
+          },
+        },
+      }),
+    );
+
+    render(<DataPage />);
+
+    expect(screen.getByTestId("provenance-kind")).toHaveTextContent("Gerçek");
+    expect(screen.getByTestId("provenance-kind")).toHaveAttribute("data-kind", "real");
+    expect(screen.getByTestId("provenance-source")).toHaveTextContent("provider:dukascopy");
+    expect(screen.getByTestId("provenance-notes")).toHaveTextContent("tick archive");
+  });
+
+  it("says a store has no provenance instead of inventing one", () => {
+    statusHook.useDataStatus.mockReturnValue(statusState({ data: SEEDED }));
+
+    render(<DataPage />);
+
+    expect(screen.getByTestId("provenance-missing")).toHaveTextContent(/köken kaydı yok/i);
+    expect(screen.queryByTestId("provenance-dataset-id")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("provenance-checksum")).not.toBeInTheDocument();
+  });
+
+  it("shows no provenance panel for an empty store", () => {
+    render(<DataPage />);
+
+    expect(screen.queryByTestId("provenance-missing")).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Veri kökeni" })).not.toBeInTheDocument();
+  });
 });
