@@ -44,9 +44,16 @@ Sıralı simülatör, gerçek spread, maliyetler dahil:
 | Önceki 6 ay (2025-12→2026-05) | 12 | +0.377 | 1.76 | %1,6 | +$202 | %50 |
 | **İleri (2026-06→2026-11)** | **24** | **+0.502** | **2.15** | **%2,4** | **+$481** | **%58,3** |
 | İleri, maliyet ×2 | 24 | +0.496 | 2.14 | %2,4 | +$474 | %58,3 |
+| **Temmuz–Kasım (tam ısınma)** | **20** | **+0.653** | **3.03** | **%2,4** | **+$549** | **%65** |
 
 Aylara göre işlem: Haziran 3, Temmuz 2, Ağustos 4, Eylül 3, Ekim 7, Kasım 5.
 Tek bir ayda toplanmıyor.
+
+Haziran başındaki iki hafta akış ölçeği geçişinde: 480 barlık pencere hâlâ
+Tickmill akışını taşıyor, Dukascopy akışı ise ~10 kat küçük. Bu yüzden ayrıca
+**1 Temmuz** başlangıcıyla (pencere tamamen Dukascopy) koştum: +0.653 R,
+PF 3.03, 20 işlem. İki sonucu da raporluyorum; Temmuz'u seçip Haziran'ı
+gizlemek olmaz. Asıl ileri test Haziran başlangıcıdır.
 
 ## İstatistiksel dürüstlük
 

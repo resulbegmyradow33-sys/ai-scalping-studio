@@ -131,8 +131,9 @@ Dukascopy'nin bid/ask hacimli tick'leriyle yapılıyor.
 
 Kart, Dukascopy'nin 2026 tick verisinde hiç yeniden kalibre edilmeden
 oynatıldı: **24 işlem, +0.502 R, PF 2.15, +$481, DD %2,4**. Maliyet ×2'de
-+0.496 R. Örnek küçük ve %95 güven aralığı sıfırı içeriyor; ayrıntı ve
-istatistik `docs/forward-test.md` içinde.
++0.496 R. Temmuz–Kasım (tam akış ısınması) +0.653 R, PF 3.03. Örnek küçük ve
+%95 güven aralığı sıfırı içeriyor; ayrıntı ve istatistik
+`docs/forward-test.md` içinde.
 
 ## Sınırlar
 
