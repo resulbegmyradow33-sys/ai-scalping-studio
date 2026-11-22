@@ -8,7 +8,7 @@ oynatıldı.
 
 - Kaynak: `Touhid-HZ/xauusd-tick-data-2026` (GitHub) — Dukascopy `bi5`
   feed'inin haftalık CSV.gz paketlemesi.
-- Kapsam: **2026-05-28 → 2026-11-11**, 24 hafta, 301 MB sıkıştırılmış,
+- Kapsam: **2026-05-28 → 2026-11-15**, 25 hafta, ~310 MB sıkıştırılmış,
   ~45 milyon tick.
 - Alanlar: `timestamp` (UTC ms), `ask`, `bid`, `ask_volume`, `bid_volume`.
 - Spread ortalaması **0.646** (Tickmill geçmişinde 0.446).
@@ -42,23 +42,23 @@ Sıralı simülatör, gerçek spread, maliyetler dahil:
 | Dilim | İşlem | R/işlem | PF | Max DD | Net | Win |
 |---|---|---|---|---|---|---|
 | Önceki 6 ay (2025-12→2026-05) | 12 | +0.377 | 1.76 | %1,6 | +$202 | %50 |
-| **İleri (2026-06→2026-11)** | **23** | **+0.451** | **2.03** | **%2,4** | **+$422** | **%60,9** |
-| İleri, maliyet ×2 | 23 | +0.445 | 2.01 | %2,4 | +$416 | %60,9 |
+| **İleri (2026-06→2026-11)** | **24** | **+0.502** | **2.15** | **%2,4** | **+$481** | **%58,3** |
+| İleri, maliyet ×2 | 24 | +0.496 | 2.14 | %2,4 | +$474 | %58,3 |
 
-Aylara göre işlem: Haziran 3, Temmuz 2, Ağustos 4, Eylül 3, Ekim 7, Kasım 4.
+Aylara göre işlem: Haziran 3, Temmuz 2, Ağustos 4, Eylül 3, Ekim 7, Kasım 5.
 Tek bir ayda toplanmıyor.
 
 ## İstatistiksel dürüstlük
 
-23 işlem az. R serisinin ortalaması +0.452, standart sapması 1.33:
+24 işlem az. R serisinin ortalaması +0.502, standart sapması 1.34:
 
-- t-istatistiği **1.63**
-- %95 güven aralığı **−0.09 … +1.00** (sıfırı içeriyor)
-- bootstrap ile P(gerçek ortalama ≤ 0) ≈ **%4,8**
+- t-istatistiği **1.83**
+- %95 güven aralığı **−0.04 … +1.04** (sıfırı içeriyor)
+- bootstrap ile P(gerçek ortalama ≤ 0) ≈ **%3,0**
 
 Yani "kenar var" demek için hâlâ erken; "ilk gerçek ileri testte pozitif ve
-maliyet stresine dayandı" demek doğru olan. 23 işlemin 14'ü kârlı, 9'u zararlı;
-7 hedef, 8 stop, 8 kısmi/timeout.
+maliyet stresine dayandı" demek doğru olan. 24 işlemin 14'ü kârlı, 10'u zararlı;
+9 hedef, 8 stop, 7 kısmi/timeout.
 
 ## Tekrarlama
 
@@ -71,6 +71,15 @@ uv run python -m scripts.forward_test \
 `forward_test` geçmiş ve ileri store'u birleştirir (ısınma için), kartı
 dosyadan okur, Haziran başında simülatörü başlatır. Hiçbir parametre ileri
 veride seçilmez.
+
+Haftalık güncelleme (GitHub aynası Pazartesi yenilenir):
+
+```bash
+make forward-update
+```
+
+Yeni haftaları indirir, cache'i atlar, store'u yeniden kurar, testi koşar ve
+sonucu `backend/runs/forward_history.jsonl`'e ekler.
 
 ## Sonraki adım
 

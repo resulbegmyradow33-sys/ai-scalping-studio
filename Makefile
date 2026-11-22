@@ -18,6 +18,10 @@ train-bc:
 forward-crawl:
 	cd backend && uv run python -m scripts.fetch_dukascopy_forward --start 2026-06-01 --end 2026-11-21 --root ../data-forward-store --flow-root ../data-forward-flow --cache ../data-forward-cache --hour-sleep 0.8
 
+# forward-update: fetch new weekly ticks, rebuild, test, append to history.
+forward-update:
+	cd backend && uv run python -m scripts.update_forward
+
 # forward-test: run the promoted card unchanged on the forward store.
 forward-test:
 	cd backend && uv run python -m scripts.forward_test

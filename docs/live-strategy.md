@@ -130,8 +130,8 @@ Dukascopy'nin bid/ask hacimli tick'leriyle yapılıyor.
 ## İleri test (Haziran–Kasım 2026)
 
 Kart, Dukascopy'nin 2026 tick verisinde hiç yeniden kalibre edilmeden
-oynatıldı: **23 işlem, +0.451 R, PF 2.03, +$422, DD %2,4**. Maliyet ×2'de
-+0.445 R. Örnek küçük ve %95 güven aralığı sıfırı içeriyor; ayrıntı ve
+oynatıldı: **24 işlem, +0.502 R, PF 2.15, +$481, DD %2,4**. Maliyet ×2'de
++0.496 R. Örnek küçük ve %95 güven aralığı sıfırı içeriyor; ayrıntı ve
 istatistik `docs/forward-test.md` içinde.
 
 ## Sınırlar
