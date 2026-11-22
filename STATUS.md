@@ -16,7 +16,7 @@ Son güncelleme: 2026-11-22 · Branch `feat/v1`
   24 işlem, **+0.502 R**, PF 2.15, +$481, DD %2,4.
 - Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
 - **PPO + taklit** yerelde eğitiliyor; iki bölünmede pozitif ama kuraldan zayıf.
-- Testler: **529 backend**, **184 frontend**; ruff/mypy temiz; build geçiyor.
+- Testler: **539 backend**, **184 frontend**; ruff/mypy temiz; build geçiyor.
 
 ## Durum matrisi
 
@@ -48,7 +48,7 @@ Son güncelleme: 2026-11-22 · Branch `feat/v1`
 | Panel | 🟡 | 4 sayfa; ML/NN/RL/rejim/paper/monitoring yok |
 | Scheduler | 🟡 | İki arka plan döngüsü; konfigüre edilebilir scheduler yok |
 | Testler | ✅ | Mevcut kapsam için güçlü; yeni modüller için test yok |
-| Dokümantasyon | 🟡 | 3/15 zorunlu doküman hazır; 12 eksik |
+| Dokümantasyon | 🟡 | 4/15 zorunlu doküman hazır; 11 eksik |
 | Kabul kriterleri | ❌ | ML/DL/ensemble/paper maddeleri henüz yok |
 
 Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
@@ -66,8 +66,9 @@ Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
 
 1. **Faz 2 — Veri temeli:** registry, doğrulama, provenance, JSON, M30/H4
    tamamlandı; kalan: gerçek çoklu-sembol feed ve istatistiksel outlier raporu.
-2. **Faz 3 — Dataset builder:** seçilebilir özellik setleri, purged split,
-   manifest/checksum, sızıntı testleri.
+2. **Faz 3 — Dataset builder:** özellik registry + purged/embargo split +
+   manifest/checksum tamamlandı; kalan: eğitim hattına bağlama, H4 hizalama
+   testleri ve özellik kullanılabilirlik kuralları.
 3. **Faz 5 — Klasik ML:** LightGBM/XGBoost/RF + baz çizgileri; simülatörle
    ticari değerlendirme.
 4. **Faz 6 — GRU/TCN:** ortak PyTorch trainer, MPS/CPU, checkpoint.

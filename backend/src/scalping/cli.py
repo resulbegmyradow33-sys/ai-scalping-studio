@@ -37,6 +37,7 @@ from scalping.data.registry import TIMEFRAMES, timeframe_rule
 from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
+from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
 from scalping.serialize import metrics_payload
@@ -229,6 +230,42 @@ def _cmd_data_derive(args: argparse.Namespace) -> None:
     _print_json({"symbol": args.symbol, "source": args.source, "written": written})
 
 
+def _cmd_dataset_build(args: argparse.Namespace) -> None:
+    """Build a chronological, purged dataset manifest from a stored symbol."""
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = build_features(frame, Settings().costs)
+    groups = None if args.groups == "all" else tuple(
+        part.strip() for part in args.groups.split(",") if part.strip()
+    )
+    bundle = build_dataset(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        groups=groups,
+        horizon=args.horizon,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+    )
+    path = save_manifest(args.out, bundle)
+    _print_json(
+        {
+            "manifest": str(path),
+            "dataset_id": bundle.manifest.dataset_id,
+            "rows": bundle.manifest.rows,
+            "columns": len(bundle.manifest.columns),
+            "train": bundle.rows("train"),
+            "validation": bundle.rows("validation"),
+            "test": bundle.rows("test"),
+            "purged": int((bundle.split == -1).sum()),
+        }
+    )
+
+
 # --- backtest ------------------------------------------------------------------
 def _hold(obs: np.ndarray) -> int:
     """Control policy: never trade."""
@@ -381,6 +418,21 @@ def _build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--timeframes", default="M5,M15,M30,H1,H4,D1")
     derive.add_argument("--root", default=str(DEFAULT_ROOT))
     derive.set_defaults(handler=_cmd_data_derive)
+
+    dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
+    dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
+    build = dataset_commands.add_parser("build", help="build a chronological split manifest")
+    build.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    build.add_argument("--timeframe", default="H1")
+    build.add_argument("--groups", default="all", help="comma-separated feature groups, or all")
+    build.add_argument("--horizon", type=int, default=1, help="future bars for the label")
+    build.add_argument("--train-fraction", type=float, default=0.70)
+    build.add_argument("--validation-fraction", type=float, default=0.15)
+    build.add_argument("--purge", type=int, default=0, help="bars dropped at each boundary")
+    build.add_argument("--embargo", type=int, default=0, help="extra bars after the purge")
+    build.add_argument("--root", default=str(DEFAULT_ROOT))
+    build.add_argument("--out", required=True, help="manifest JSON path")
+    build.set_defaults(handler=_cmd_dataset_build)
 
     backtest = commands.add_parser("backtest", help="replay a stored symbol")
     backtest.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)

@@ -72,7 +72,7 @@ statistical outlier/cross-source reconciliation, and a tick-table layer.
 Exit criteria: all ten specs load; the validator reports real gaps on the
 existing stores; the API exposes provenance; existing tests stay green.
 
-## Phase 3 — Feature registry and dataset builder
+## Phase 3 — Feature registry and dataset builder (IN PROGRESS)
 
 Goal: separate feature definitions from the 59-column monolith, support
 configurable subsets, and build leakage-safe train/validation/test datasets.
@@ -94,6 +94,20 @@ Affected files: `features/*`, new `datasets/*`, `features/build.py`,
 
 Dependencies: Phase 2. RAM: < 1 GB. Tests: leakage, alignment, subset
 stability, manifest reproducibility.
+
+Progress (2026-11-22):
+
+- `features/registry.py`: seven groups covering all 59 columns, canonical order,
+  `select_matrix`.
+- `datasets/builder.py`: chronological train/validation/test, purge >= horizon,
+  embargo, `split == -1` audit rows, checksum, manifest.
+- `cli dataset build`: outputs a manifest and split counts.
+- Tests: group coverage, order, split gaps, label alignment, tail drop,
+  deterministic manifest, CLI.
+
+Remaining: availability rules (flow only with tick volumes), H4 multi-timeframe
+alignment, wiring the manifest id into the trainer/registry, and a persisted
+array format for large datasets.
 
 Exit criteria: a dataset can be rebuilt from a manifest and matches checksums;
 no feature set uses future information.

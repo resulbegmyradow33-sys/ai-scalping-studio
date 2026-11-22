@@ -516,3 +516,48 @@ def test_cli_json_import_and_derive(tmp_path):
     written = json.loads(derived.stdout)["written"]
     assert set(written) == {"M5", "M30", "H1", "H4"}
     assert ParquetStore(root).read("XAUUSD", "M5").height == 1
+
+
+def test_cli_dataset_build_writes_a_manifest(tmp_path):
+    root = tmp_path / "store"
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(root),
+    )
+    assert synth.returncode == 0, synth.stderr
+    out = tmp_path / "dataset.json"
+    built = run(
+        "dataset",
+        "build",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--groups",
+        "price,momentum",
+        "--horizon",
+        "5",
+        "--purge",
+        "5",
+        "--embargo",
+        "2",
+        "--root",
+        str(root),
+        "--out",
+        str(out),
+    )
+    assert built.returncode == 0, built.stderr
+    payload = json.loads(built.stdout)
+    assert payload["columns"] == 19  # price (14) + momentum (5)
+    assert payload["test"] > 0
+    manifest = json.loads(out.read_text())
+    assert manifest["dataset_id"] == payload["dataset_id"]
+    assert manifest["purge_bars"] == 5

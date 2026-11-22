@@ -123,7 +123,7 @@ paper-trading ledger, system monitoring.
 
 Last executed runs:
 
-- backend: `uv run pytest` → **529 passed** (116.7 s);
+- backend: `uv run pytest` → **539 passed** (116.7 s);
 - frontend: `npm test` → **184 passed**;
 - `ruff check src tests scripts` → clean;
 - `mypy src` → clean (49 modules);
@@ -166,7 +166,7 @@ Legend: DONE / PARTIAL / MISSING / EXPERIMENTAL.
 | 23 | Model registry/knowledge DB | MISSING | JSON/Parquet only; no SQLite, champion/rollback |
 | 24 | Dashboard sections | PARTIAL | 4 pages; missing 6 laboratory/monitoring sections |
 | 25 | Scheduler | PARTIAL | two background loops/scripts; no configurable scheduler |
-| 26 | Tests | DONE for current scope | 529 backend, 184 frontend; no ML/DL/regime tests because absent |
+| 26 | Tests | DONE for current scope | 539 backend, 184 frontend; no ML/DL/regime tests because absent |
 | 27 | Required docs | PARTIAL | 2 of 15 complete (this audit + roadmap); 13 missing |
 | 28 | Acceptance criteria | MISSING | most ML/DL/ensemble/paper criteria unmet |
 
@@ -213,6 +213,10 @@ Legend: DONE / PARTIAL / MISSING / EXPERIMENTAL.
 Still missing from Phase 2: real data providers for the eight non-metal symbols,
 statistical outlier/cross-source checks, and a stored tick table. These are
 tracked in the roadmap.
+
+Phase 3 first slice (same date): `features/registry.py` (seven groups covering
+59 columns) and `datasets/builder.py` (chronological split, purge/embargo,
+checksum, manifest) plus `cli dataset build` and leakage/split tests.
 
 ## Next step
 
