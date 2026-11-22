@@ -66,6 +66,7 @@ To use the validated rule, copy the seed card and start with a flow store:
 
 ```bash
 cd backend
+mkdir -p runs
 cp config/strategy_card.json runs/strategy_card.json
 uv run python -m scalping.cli serve \
   --root ../data-ticks5-store --flow-root ../data-flow-store --port 8000
