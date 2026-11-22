@@ -200,13 +200,44 @@ Boundary: these are prediction metrics. A high accuracy is not a trading edge;
 the simulator with spread, commission and slippage plus a cost stress is still
 required before any profitability word is used.
 
-## 8. Limits and next slices
+## 8. CLI
+
+```bash
+cd backend
+uv run python -m scalping.cli nn train \
+  --root ../data-ticks5-store --symbol XAUUSD --timeframe H1 \
+  --model gru --window 60 --epochs 20 \
+  --checkpoint ../runs/nn/gru_h1.pt --out ../runs/nn/gru_h1.json
+
+uv run python -m scalping.cli nn evaluate \
+  --root ../data-ticks5-store --symbol XAUUSD --timeframe H1 \
+  --checkpoint ../runs/nn/gru_h1.pt
+```
+
+- `train` builds features and the chronological dataset from the store, fits
+  the chosen model, writes the checkpoint and a report, and prints one JSON
+  line (checkpoint, dataset id, best epoch, validation accuracy, stop reason,
+  device, window counts).
+- `evaluate` reloads the checkpoint, rebuilds the dataset and scores one split
+  (`--split`, default `test`). It refuses a checkpoint whose `dataset_id` does
+  not match the rebuilt data, so a wrong root/timeframe/window cannot be scored
+  silently. Use the same `--horizon`, `--purge`, `--train-fraction` and
+  `--validation-fraction` as training when they differed from the defaults.
+- `--device auto` prefers MPS, `cpu` forces the CPU and `mps` fails if the
+  machine has no MPS.
+- Checkpoints and reports live under `runs/`, which is gitignored.
+
+The subprocess test `backend/tests/test_cli_nn.py` runs `synth → derive H1 →
+nn train → nn evaluate` with a tiny model, so the whole path is exercised
+without market data or committed weights. A real TCN/GRU H1 and M15 run still
+needs the local stores.
+
+## 9. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
   loader (Phase 14). Do not silently reduce `window` to make RAM fit — record
   the choice.
 - The dataset alone says nothing about profitability. Model scores are
   prediction metrics; the simulator + cost stress decides.
-- Next slice: CLI/API wiring so `nn train` / `nn evaluate` can run GRU and
-  TCN on stored H1 and M15 data end to end; then the simulator + cost-stress
-  gate for any trading claim.
+- Next: the simulator + cost-stress gate for any trading claim, and the
+  Phase 5 comparison once `scalping.ml` lands.

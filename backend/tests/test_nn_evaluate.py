@@ -137,6 +137,14 @@ def test_empty_split_is_rejected(tmp_path) -> None:
         evaluate_checkpoint(checkpoint, empty, split="test", device="cpu")
 
 
+def test_checkpoint_dataset_must_match(tmp_path) -> None:
+    data, checkpoint = tiny_checkpoint(tmp_path)
+    other = replace(data, dataset_id="toy:other")
+
+    with pytest.raises(ValueError, match="trained on"):
+        evaluate_checkpoint(checkpoint, other, split="test", device="cpu")
+
+
 def test_rule_labels_align_with_window_timestamps() -> None:
     frame = SyntheticProvider(seed=7).fetch("XAUUSD", START, START + timedelta(days=2))
     bundle = build_dataset(build_features(frame), horizon=1, purge_bars=1)
