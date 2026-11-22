@@ -77,6 +77,12 @@ Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
 Faz 4 (rejim) ve Faz 11 (risk/backtest) paralel yürüyebilir; ağır eğitimler
 aynı anda çalışmaz.
 
+## Görev panosu
+
+- [`docs/task-board.md`](docs/task-board.md): master prompt'un tek tek görev
+  listesi; `[x]` yalnızca kod + test varsa işaretli.
+- GitHub phase issue'ları aynı listeleri taşır.
+
 ## Ekip altyapısı
 
 - `main` varsayılan branch; eski `feat/v1` uzak branch silindi.
