@@ -28,6 +28,7 @@ from sklearn.metrics import (
 from scalping.datasets.builder import DatasetBundle, build_dataset
 from scalping.features.build import FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.calibration import calibration_summary
 from scalping.ml.models import build_model
 
 __all__ = [
@@ -119,6 +120,7 @@ def _metrics(
         "f1": {str(label): float(f1[index]) for index, label in enumerate(classes)},
         "support": {str(label): int(support[index]) for index, label in enumerate(classes)},
         "confusion": confusion_matrix(y_true, predicted, labels=list(classes)).tolist(),
+        "calibration": calibration_summary(y_true, probabilities, classes),
     }
 
 

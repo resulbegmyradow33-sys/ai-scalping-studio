@@ -83,7 +83,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Flat-zero rows dropped by default with an audited count; `--include-flat` opt-in.
 - [ ] Return/volatility/regime/trade-outcome tasks.
 - [ ] Purged time-series CV with embargo.
-- [ ] Reliability curve and calibration thresholds.
+- [x] Reliability curve, ECE and guarded MCE.
+- [ ] Calibration thresholds / probability rejection gate.
 - [ ] Feature importance and ablation.
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
 - [ ] Regime breakdown of the trading evaluation.
