@@ -1,12 +1,35 @@
-"""Market-regime classification.
+"""Market-regime classification and evaluation.
 
 The rule engine in :mod:`scalping.regime.rules` is the deterministic baseline;
-statistical models (K-Means, GMM, HMM and a supervised baseline) build on the
-same aligned-label contract. Regimes describe the past, never a forecast.
+:mod:`scalping.regime.models` adds K-Means, Gaussian mixture, HMM and a
+supervised baseline on the same aligned-label contract. Regimes describe the
+past, never a forecast.
 """
 
 from __future__ import annotations
 
+from scalping.regime.evaluate import dwell_stats, transition_matrix
+from scalping.regime.features import REGIME_FEATURES, build_regime_features
+from scalping.regime.models import (
+    MODEL_NAMES,
+    ModelConfig,
+    RegimeFit,
+    RegimeModelError,
+    fit_predict,
+)
 from scalping.regime.rules import REGIME_COLUMNS, RegimeConfig, classify
 
-__all__ = ["REGIME_COLUMNS", "RegimeConfig", "classify"]
+__all__ = [
+    "MODEL_NAMES",
+    "REGIME_COLUMNS",
+    "REGIME_FEATURES",
+    "ModelConfig",
+    "RegimeConfig",
+    "RegimeFit",
+    "RegimeModelError",
+    "build_regime_features",
+    "classify",
+    "dwell_stats",
+    "fit_predict",
+    "transition_matrix",
+]

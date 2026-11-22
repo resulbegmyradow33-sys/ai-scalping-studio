@@ -59,15 +59,15 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 ## Phase 4 — Market regime engine
 
 - [x] Rule-based trend/volatility/expansion/breakout/unusual regimes.
-- [ ] K-Means regime model.
-- [ ] Gaussian mixture regime model.
-- [ ] Hidden Markov regime model.
-- [ ] Random forest / gradient boosting regime baseline.
+- [x] K-Means regime model.
+- [x] Gaussian mixture regime model.
+- [x] Hidden Markov regime model.
+- [x] Random forest / gradient boosting regime baseline.
 - [ ] Autoencoder/representation-based regime research.
 - [ ] Strategy × regime performance table.
 - [ ] API endpoint and Market Intelligence UI.
-- [ ] `docs/market-regime-detection.md`.
-- [ ] Tests: determinism, no leakage, transition sanity.
+- [x] `docs/market-regime-detection.md`.
+- [x] Tests: determinism, no leakage, transition sanity.
 
 ## Phase 5 — Classical ML
 
