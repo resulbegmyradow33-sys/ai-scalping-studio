@@ -142,6 +142,7 @@ def run_backtest(
     window: int = WINDOW,
     flow: np.ndarray | None = None,
     flow_thr: np.ndarray | None = None,
+    flow_obs: bool = False,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -169,6 +170,7 @@ def run_backtest(
         window=window,
         flow=flow,
         flow_thr=flow_thr,
+        flow_obs=flow_obs,
     )
     obs = sim.reset(_SEED)
 

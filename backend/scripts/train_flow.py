@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-bars", type=int, default=48)
     parser.add_argument("--flow-quantile", type=float, default=0.8)
     parser.add_argument("--flow-window", type=int, default=240)
+    parser.add_argument("--flow-obs", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--out-dir", default="runs")
     args = parser.parse_args(argv)
 
@@ -127,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
         train_end=args.train_end,
         flow=train_flow,
         flow_thr=train_thr,
+        flow_obs=args.flow_obs,
     )
     print(json.dumps({"run_id": result.run_id, "reward_mean": result.reward_mean}))
 
@@ -141,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         window=args.window,
         flow=eval_flow,
         flow_thr=eval_thr,
+        flow_obs=args.flow_obs,
         max_steps=len(eval_features.ts) + 1,
     )
     metrics = backtest.metrics

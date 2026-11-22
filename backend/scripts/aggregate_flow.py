@@ -24,8 +24,6 @@ from pathlib import Path
 
 import polars as pl
 
-from scalping.data.store import ParquetStore
-
 
 def _flow(path: Path) -> pl.DataFrame:
     ticks = (

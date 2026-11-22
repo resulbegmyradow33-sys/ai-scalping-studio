@@ -21,7 +21,6 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import polars as pl
 
