@@ -37,6 +37,7 @@ from scalping.data.registry import TIMEFRAMES, timeframe_rule
 from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
+from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
@@ -72,6 +73,20 @@ _RET5_INDEX: Final[int] = (WINDOW - 1) * len(FEATURE_COLUMNS) + FEATURE_COLUMNS.
 
 class CliError(ValueError):
     """A request that cannot be served because of the input data or range."""
+
+
+class _ExitCode(Exception):
+    """The handler already printed its JSON line and only sets the exit code.
+
+    A failed validation report is a normal, inspectable result: the report goes
+    to stdout like every other command, but the process exits non-zero so a
+    script can gate on it. ``main`` maps this to the code without adding an
+    error line.
+    """
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
 
 
 # --- JSON output -------------------------------------------------------------
@@ -228,6 +243,23 @@ def _cmd_data_derive(args: argparse.Namespace) -> None:
         save_provenance(store.root, provenance)
         written[key] = rows
     _print_json({"symbol": args.symbol, "source": args.source, "written": written})
+
+
+def _cmd_data_validate(args: argparse.Namespace) -> None:
+    """Print the structural validation report for one stored slice.
+
+    The report is the command's normal output, so it goes to stdout even when
+    it fails. A structural error only changes the exit code to 2, which lets a
+    pipeline stop on bad data without parsing the message.
+    """
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    report = validate_bars(frame, symbol=args.symbol, timeframe=args.timeframe)
+    _print_json(report.to_dict())
+    if not report.ok:
+        raise _ExitCode(2)
 
 
 def _cmd_dataset_build(args: argparse.Namespace) -> None:
@@ -419,6 +451,12 @@ def _build_parser() -> argparse.ArgumentParser:
     derive.add_argument("--root", default=str(DEFAULT_ROOT))
     derive.set_defaults(handler=_cmd_data_derive)
 
+    validate = sources.add_parser("validate", help="print the structural report for a stored slice")
+    validate.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    validate.add_argument("--timeframe", default="M1")
+    validate.add_argument("--root", default=str(DEFAULT_ROOT))
+    validate.set_defaults(handler=_cmd_data_validate)
+
     dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
     build = dataset_commands.add_parser("build", help="build a chronological split manifest")
@@ -462,6 +500,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     try:
         args.handler(args)
+    except _ExitCode as exc:
+        # The handler's JSON line is already on stdout; only the code is left.
+        return exc.code
     except CliError as exc:
         _print_error(str(exc))
         return 2

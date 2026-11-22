@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import polars as pl
 
 from scalping import cli
 from scalping.backtest.metrics import Metrics
@@ -561,3 +562,72 @@ def test_cli_dataset_build_writes_a_manifest(tmp_path):
     manifest = json.loads(out.read_text())
     assert manifest["dataset_id"] == payload["dataset_id"]
     assert manifest["purge_bars"] == 5
+
+
+def _synth_two_days(root: Path) -> None:
+    """Write a clean Monday–Tuesday M1 slice used by the validate tests."""
+    r = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-06",
+        "--root",
+        str(root),
+    )
+    assert r.returncode == 0, r.stderr
+
+
+def test_data_validate_prints_one_json_line_and_exits_0(tmp_path):
+    _synth_two_days(tmp_path)
+    r = run(
+        "data",
+        "validate",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    assert r.stdout.count("\n") == 1
+    report = json.loads(r.stdout)
+    assert report["ok"] is True
+    assert report["symbol"] == "XAUUSD"
+    assert report["rows"] == 2_880
+
+
+def test_data_validate_exits_2_when_a_frame_is_broken(tmp_path):
+    _synth_two_days(tmp_path)
+    frame = ParquetStore(tmp_path).read("XAUUSD", "M1")
+    broken = frame.with_columns((pl.col("bid_close") - 1.0).alias("ask_close"))
+    broken.write_parquet(tmp_path / "XAUUSD" / "M1" / "2026" / "01.parquet")
+
+    r = run("data", "validate", "--root", str(tmp_path))
+    assert r.returncode == 2
+    assert r.stderr == ""
+    report = json.loads(r.stdout)
+    assert report["ok"] is False
+    assert "crossed_quotes" in {issue["code"] for issue in report["issues"]}
+
+
+def test_data_validate_without_a_slice_exits_2_with_json_error(tmp_path):
+    r = run(
+        "data",
+        "validate",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "H1",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 2
+    assert r.stdout == ""
+    error = json.loads(r.stderr)
+    assert "XAUUSD" in error["error"] and "H1" in error["error"]
