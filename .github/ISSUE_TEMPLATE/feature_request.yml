@@ -1,0 +1,56 @@
+name: Feature or research task
+description: A scoped change with acceptance criteria.
+title: "feat: "
+labels: ["enhancement", "triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What decision or workflow is blocked today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The smallest change that solves it. Name the phase and files.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: Observable, testable statements. Include data/model states.
+      placeholder: |
+        - [ ] endpoint returns ...
+        - [ ] test covers ...
+        - [ ] docs/... updated
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Roadmap phase
+      options:
+        - "Phase 2: data foundation"
+        - "Phase 3: features / datasets"
+        - "Phase 4: regime engine"
+        - "Phase 5: classical ML"
+        - "Phase 6: neural networks"
+        - "Phase 7: transformers"
+        - "Phase 8: RL expansion"
+        - "Phase 9: ensemble / confidence"
+        - "Phase 10: autonomous learning"
+        - "Phase 11: risk / backtest"
+        - "Phase 12: paper trading"
+        - "Phase 13: dashboard"
+        - "Phase 14: optimisation"
+        - "Phase 15: acceptance"
+    validations:
+      required: true
+  - type: textarea
+    id: resources
+    attributes:
+      label: Resource estimate
+      description: Expected RAM, runtime, new dependency and licence.

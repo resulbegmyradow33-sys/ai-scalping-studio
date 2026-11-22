@@ -75,8 +75,8 @@ directories.
 Always start from the latest branch:
 
 ```bash
-git switch feat/v1
-git pull --rebase origin feat/v1
+git switch main
+git pull --rebase origin main
 ```
 
 Create a topic branch for each change:
@@ -89,21 +89,21 @@ git commit -m "feat(data): add symbol registry"
 git push -u origin feat/symbol-registry
 ```
 
-Then open a pull request into `feat/v1`:
+Then open a pull request into `main`:
 
 ```bash
-gh pr create --base feat/v1 --head feat/symbol-registry \
+gh pr create --base main --head feat/symbol-registry \
   --title "feat(data): symbol registry" --body "What changed and what was tested."
 ```
 
-Small documentation-only changes may be pushed directly to `feat/v1` if the
-team agrees; code changes should go through a PR so tests run before merge.
+Every change goes through a pull request. `main` requires green CI and one
+review, so even a documentation-only change gets the same gate.
 
 ## 6. Receiving someone else's changes
 
 ```bash
-git switch feat/v1
-git pull --rebase origin feat/v1
+git switch main
+git pull --rebase origin main
 ```
 
 If you have uncommitted work, commit or stash it first. Rebase keeps the

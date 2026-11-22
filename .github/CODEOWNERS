@@ -1,0 +1,13 @@
+# Default owner for everything.
+* @resulbegmyradow33-sys
+
+# Backend ownership
+/backend/src/scalping/data/ @resulbegmyradow33-sys
+/backend/src/scalping/features/ @resulbegmyradow33-sys
+/backend/src/scalping/env/ @resulbegmyradow33-sys
+/backend/src/scalping/rl/ @resulbegmyradow33-sys
+
+# Frontend and docs
+/frontend/ @resulbegmyradow33-sys
+/docs/ @resulbegmyradow33-sys
+/.github/ @resulbegmyradow33-sys

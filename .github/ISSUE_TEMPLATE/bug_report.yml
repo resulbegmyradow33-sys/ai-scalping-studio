@@ -1,0 +1,62 @@
+name: Bug report
+description: Something is broken or behaves differently than documented.
+title: "bug: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include secrets, data stores or huge logs. Link a commit and the
+        smallest reproduction instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Actual behavior, error text, screenshots if useful.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction
+      description: Exact commands, symbol, timeframe and data source.
+      placeholder: |
+        cd backend
+        uv run ...
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit / branch
+      placeholder: main @ 170c6fa
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - data pipeline
+        - features / datasets
+        - simulator / risk
+        - backtest
+        - strategy / calibration
+        - RL / ML
+        - API
+        - frontend
+        - docs / CI
+    validations:
+      required: true
+  - type: textarea
+    id: tests
+    attributes:
+      label: Tests run
+      description: Which tests fail, and the command.
+      placeholder: uv run pytest tests/test_x.py -q

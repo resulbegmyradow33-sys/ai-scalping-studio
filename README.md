@@ -1,5 +1,7 @@
 # AI Scalping Studio
 
+[![CI](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml)
+
 Local research and paper-trading studio for XAUUSD. Everything runs on one
 machine: no paid AI APIs, no cloud services, no real money.
 
@@ -14,6 +16,19 @@ therefore replays that rule; PPO stays in the research lab.
 - [`docs/architecture-audit.md`](docs/architecture-audit.md) — evidence-based audit.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
+
+## Team
+
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — clone, branch, test, push, PR.
+- [`docs/team-workflow.md`](docs/team-workflow.md) — roles, reviews, data/model rules.
+- [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — expected behaviour.
+- [`SECURITY.md`](SECURITY.md) — private vulnerability reporting.
+- [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE) — bug, feature, data, experiment forms.
+- [`CHANGELOG.md`](CHANGELOG.md) — what changed.
+
+`main` is protected: pull request + one review + `backend` and `frontend` CI
+checks. `scripts/setup_github.sh` applies labels, milestones and the protection
+rule to the repository.
 
 ## What is validated
 

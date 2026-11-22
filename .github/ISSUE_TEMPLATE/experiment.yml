@@ -1,0 +1,54 @@
+name: Model experiment
+description: Train, evaluate and decide on one candidate model.
+title: "exp: "
+labels: ["experiment", "research"]
+body:
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: Hypothesis
+      description: One sentence, falsifiable.
+    validations:
+      required: true
+  - type: input
+    id: dataset
+    attributes:
+      label: Dataset id / checksum
+      placeholder: XAUUSD:H1:h5:...
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: Model / architecture
+      placeholder: LightGBM, TCN, PPO, ensemble...
+    validations:
+      required: true
+  - type: textarea
+    id: splits
+    attributes:
+      label: Splits and purging
+      description: Train/validation/test ranges, purge/embargo, forward window.
+    validations:
+      required: true
+  - type: textarea
+    id: results
+    attributes:
+      label: Results
+      description: |
+        Prediction metrics, simulator metrics, cost stress, trade count and
+        regime breakdown. Link the run id; do not paste invented numbers.
+    validations:
+      required: true
+  - type: dropdown
+    id: decision
+    attributes:
+      label: Decision
+      options: [promote, reject, needs more data, needs review]
+    validations:
+      required: true
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback plan
+      description: Previous champion path/version and how to restore it.

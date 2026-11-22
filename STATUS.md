@@ -4,7 +4,7 @@ Bu dosya, `docs/requirements/master-prompt.md` hedeflerine göre deponun
 durumunu tek sayfada gösterir. Ayrıntılı kanıt: `docs/architecture-audit.md`.
 Plan: `docs/implementation-roadmap.md`.
 
-Son güncelleme: 2026-11-22 · Branch `feat/v1`
+Son güncelleme: 2026-11-22 · Branch `main`
 
 ## Bugün gerçekten çalışan şey
 

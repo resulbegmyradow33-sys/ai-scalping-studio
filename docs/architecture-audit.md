@@ -1,6 +1,6 @@
 # Architecture audit — 2026-11-22
 
-Audit of `feat/v1` at commit `e3c8095`, before the audit documents were added.
+Audit of `main` (then `feat/v1`) at commit `e3c8095`, before the audit documents were added.
 Method: source-tree inventory, targeted reading of every module named below,
 `rg` for classes and capabilities, dependency files, test collection, and the
 recorded test/evaluation runs. This is an engineering audit, not a line-by-line

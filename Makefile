@@ -1,8 +1,21 @@
-.PHONY: test lint dev e2e-backend
+.PHONY: test lint check setup-github dev e2e-backend
 test:
 	cd backend && uv run pytest
 lint:
-	cd backend && uv run ruff check . && uv run mypy src
+	cd backend && uv run ruff check src tests scripts && uv run mypy src
+
+# check: exactly what CI runs, for a local pre-push gate.
+check:
+	cd backend && uv run ruff check src tests scripts
+	cd backend && uv run mypy src
+	cd backend && uv run pytest
+	cd frontend && npx tsc --noEmit
+	cd frontend && npm test
+	cd frontend && npm run build
+
+# setup-github: labels, milestones, merge settings and main protection.
+setup-github:
+	./scripts/setup_github.sh
 dev:
 	cd backend && uv run uvicorn scalping.api.app:app --reload --port 8000
 

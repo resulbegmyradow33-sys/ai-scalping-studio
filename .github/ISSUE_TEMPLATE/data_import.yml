@@ -1,0 +1,49 @@
+name: Data import
+description: Add or replace a market dataset.
+title: "data: "
+labels: ["data", "triage"]
+body:
+  - type: input
+    id: source
+    attributes:
+      label: Source
+      description: Provider, URL, licence and whether it is free for research.
+    validations:
+      required: true
+  - type: dropdown
+    id: symbol
+    attributes:
+      label: Symbol
+      options: [XAUUSD, XAGUSD, EURUSD, GBPUSD, USDJPY, AUDUSD, NAS100, US30, USOIL, BTCUSD, other]
+    validations:
+      required: true
+  - type: dropdown
+    id: timeframe
+    attributes:
+      label: Timeframe
+      options: [tick, M1, M5, M15, M30, H1, H4, D1]
+    validations:
+      required: true
+  - type: input
+    id: coverage
+    attributes:
+      label: Coverage
+      placeholder: 2024-01-01 → 2025-12-31 UTC, 1,234,567 rows
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Quality checks
+      options:
+        - label: Timestamps are UTC and sorted.
+        - label: Duplicates checked.
+        - label: OHLC and spread consistency checked.
+        - label: Bid/ask volume present (required for flow features).
+        - label: Provenance sidecar written.
+        - label: No data files will be committed.
+  - type: textarea
+    id: notes
+    attributes:
+      label: Known gaps or caveats
+      description: Weekends, holidays, feed changes, synthetic flags.

@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Team workflow
+    url: https://github.com/resulbegmyradow33-sys/ai-scalping-studio/blob/main/docs/team-workflow.md
+    about: Branches, reviews, testing, data and model promotion rules.
+  - name: Project status
+    url: https://github.com/resulbegmyradow33-sys/ai-scalping-studio/blob/main/STATUS.md
+    about: What is implemented, partial or missing.
+  - name: Security report
+    url: https://github.com/resulbegmyradow33-sys/ai-scalping-studio/security/advisories/new
+    about: Report a vulnerability privately. Do not open a public issue.
