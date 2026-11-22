@@ -20,6 +20,8 @@ therefore replays that rule; PPO stays in the research lab.
 
 ## Team
 
+**New here? Start with [`START_HERE.md`](START_HERE.md).**
+
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — clone, branch, test, push, PR.
 - [`docs/team-workflow.md`](docs/team-workflow.md) — roles, reviews, data/model rules.
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — expected behaviour.
