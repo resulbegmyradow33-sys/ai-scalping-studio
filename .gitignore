@@ -36,6 +36,9 @@ data-real-store/
 data-real-csv/
 data-2026-cache/
 data-2026-ticks/
+/data-macro/
+/data-ticks/
+/data-ticks5/
 data-forward-cache/
 data-forward-flow/
 data-forward-store/
