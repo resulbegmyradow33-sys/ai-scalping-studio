@@ -49,6 +49,8 @@ Validation reports:
 
 - accuracy and balanced accuracy;
 - multiclass log loss and Brier score;
+- reliability bins, expected calibration error (ECE) and a guarded maximum
+  calibration error (MCE ignores bins with fewer than 20 rows);
 - per-class precision/recall/F1/support;
 - confusion matrix;
 - rows in each split and purged rows;
@@ -126,6 +128,10 @@ XAUUSD H1, horizon 5, all 59 features, 20,654 train / 4,427 validation /
 | HistGradientBoosting | 51.5%* | 51.5%* | 0.6972* | — | — |
 | LightGBM | 51.9% | 52.0% | 0.7073 | 51.0% | 0.7421 |
 | XGBoost | 51.8% | 51.9% | 0.7154 | 50.7% | 0.7523 |
+
+Logistic validation ECE is **0.043** (bins concentrated around 0.47–0.53); the
+guarded MCE is small once one-row bins are excluded. The model is reasonably
+calibrated but still uninformative: calibration does not create edge.
 
 \* hist-graded numbers are from the earlier 3-class run; the binary rerun is
 pending. **No model, including LightGBM and XGBoost, beats the prior baseline;

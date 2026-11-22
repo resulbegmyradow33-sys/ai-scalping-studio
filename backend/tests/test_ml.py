@@ -60,6 +60,8 @@ def test_logistic_learns_the_signal_and_reports_validation() -> None:
     assert result.validation["rows"] > 50
     assert result.baseline["accuracy"] < 0.7
     assert result.validation["log_loss"] < result.baseline["log_loss"]
+    assert result.validation["calibration"]["ece"] >= 0.0
+    assert result.validation["calibration"]["bins"]
     assert result.test is None
     assert result.dataset_id.startswith("XAUUSD:M1:h1:")
     assert result.split_counts["purged"] > 0
