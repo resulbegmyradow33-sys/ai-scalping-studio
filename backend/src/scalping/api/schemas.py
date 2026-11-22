@@ -53,10 +53,12 @@ class HealthResponse(BaseModel):
 
 class DataStatusResponse(BaseModel):
     symbol: str
+    timeframe: str = "M1"
     rows: int
     first_ts: str | None
     last_ts: str | None
     providers: list[str]
+    provenance: dict[str, Any] | None = None
 
 
 class DownloadRequest(BaseModel):
@@ -219,7 +221,7 @@ class CalibrateRequest(BaseModel):
     """Parameters for a nightly rule recalibration."""
 
     symbol: str = Field(default="XAUUSD", min_length=1)
-    timeframe: Literal["M1", "M5", "M15", "H1", "D1"] = "H1"
+    timeframe: Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"] = "H1"
     holdout_fraction: float = Field(default=0.2, gt=0.0, lt=1.0)
     min_train_trades: int = Field(default=100, ge=10)
     min_holdout_trades: int = Field(default=30, ge=5)

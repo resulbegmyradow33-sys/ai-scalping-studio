@@ -39,7 +39,7 @@ CARD_VERSION: int = 1
 #: The strategy the card describes.
 STRATEGY: str = "flow_momentum"
 
-_TIMEFRAMES: frozenset[str] = frozenset({"M1", "M5", "M15", "H1", "D1"})
+_TIMEFRAMES: frozenset[str] = frozenset({"M1", "M5", "M15", "M30", "H1", "H4", "D1"})
 
 
 @dataclass(frozen=True, slots=True)

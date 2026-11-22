@@ -24,6 +24,7 @@ from pathlib import Path
 import polars as pl
 
 from scalping.data.base import BAR_SCHEMA
+from scalping.data.provenance import build_provenance, save_provenance
 from scalping.data.store import ParquetStore
 
 
@@ -86,6 +87,17 @@ def main(argv: list[str] | None = None) -> int:
             flush=True,
         )
     coverage = store.coverage(args.symbol)
+    final = store.read(args.symbol, "M1")
+    if not final.is_empty():
+        save_provenance(
+            store.root,
+            build_provenance(
+                final,
+                symbol=args.symbol,
+                timeframe="M1",
+                source=f"ticks:{Path(args.dir).name}",
+            ),
+        )
     print(
         json.dumps(
             {

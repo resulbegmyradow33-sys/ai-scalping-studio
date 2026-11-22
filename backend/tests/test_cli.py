@@ -158,7 +158,7 @@ def test_synth_prints_one_json_line_and_respects_root(tmp_path):
     assert r.stderr == ""
     assert r.stdout.count("\n") == 1 and r.stdout.endswith("\n")
     payload = json.loads(r.stdout)
-    assert set(payload) == {"rows", "symbol", "first_ts", "last_ts"}
+    assert set(payload) == {"rows", "symbol", "first_ts", "last_ts", "provenance"}
     assert payload["symbol"] == "XAUUSD"
     assert payload["rows"] == 2_880  # Monday and Tuesday, 1440 M1 bars each
     assert payload["first_ts"].startswith("2026-01-05T00:00:00")
@@ -481,3 +481,38 @@ def test_main_maps_system_exit_to_one_json_line(monkeypatch, capsys):
     error = json.loads(captured.err)
     assert set(error) == {"error", "type"}
     assert error["type"] == "SystemExit"
+
+
+def test_cli_json_import_and_derive(tmp_path):
+    path = tmp_path / "bars.json"
+    rows = [
+        {
+            "timestamp": f"2026-01-05T00:0{i}:00Z",
+            "open": 100.0 + i,
+            "high": 101.0 + i,
+            "low": 99.0 + i,
+            "close": 100.5 + i,
+            "volume": 10,
+        }
+        for i in range(5)
+    ]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    root = tmp_path / "store"
+    imported = run("data", "json", "--path", str(path), "--root", str(root))
+    assert imported.returncode == 0, imported.stderr
+    payload = json.loads(imported.stdout)
+    assert payload["rows"] == 5
+    assert payload["provenance"]["source"] == "json:bars.json"
+
+    derived = run(
+        "data",
+        "derive",
+        "--root",
+        str(root),
+        "--timeframes",
+        "M5,M30,H1,H4",
+    )
+    assert derived.returncode == 0, derived.stderr
+    written = json.loads(derived.stdout)["written"]
+    assert set(written) == {"M5", "M30", "H1", "H4"}
+    assert ParquetStore(root).read("XAUUSD", "M5").height == 1

@@ -83,7 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--store", default="../data-ticks5-store")
     parser.add_argument("--flow-root", default="../data-flow-store")
     parser.add_argument("--symbol", default="XAUUSD")
-    parser.add_argument("--timeframe", default="H1", choices=("M5", "M15", "H1", "D1"))
+    parser.add_argument("--timeframe", default="H1", choices=("M5", "M15", "M30", "H1", "H4", "D1"))
     parser.add_argument("--card", default="runs/strategy_card.json")
     parser.add_argument("--history", default="runs/strategy_history.jsonl")
     parser.add_argument("--settings", default=None)

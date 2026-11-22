@@ -16,7 +16,7 @@ Son güncelleme: 2026-11-22 · Branch `feat/v1`
   24 işlem, **+0.502 R**, PF 2.15, +$481, DD %2,4.
 - Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
 - **PPO + taklit** yerelde eğitiliyor; iki bölünmede pozitif ama kuraldan zayıf.
-- Testler: **502 backend**, **184 frontend**; ruff/mypy temiz; build geçiyor.
+- Testler: **529 backend**, **184 frontend**; ruff/mypy temiz; build geçiyor.
 
 ## Durum matrisi
 
@@ -24,10 +24,10 @@ Son güncelleme: 2026-11-22 · Branch `feat/v1`
 |---|---|---|
 | Yerel, sıfır maliyet, LLM'siz | ✅ | Dış API yok; PyTorch/SB3 yerel |
 | XAUUSD veri hattı | ✅ | 5 yıl tick, 17 yıl M1, 2026 ileri |
-| Çoklu sembol (10 enstrüman) | ❌ | Sadece XAU/XAG feed; tek gold kontratı |
-| Tick–D1 zaman dilimleri | 🟡 | M1/M5/M15/H1/D1; M30/H4 yok |
-| CSV/Parquet/JSON ithal | 🟡 | CSV/Parquet var; JSON yok |
-| Veri doğrulama + provenance | 🟡 | Şema/UTC/coverage var; duplicate/outlier/gap raporu yok |
+| Çoklu sembol (10 enstrüman) | 🟡 | 10 sembol registry + kontrat metadatası var; gerçek feed hâlâ XAU/XAG (Dukascopy) |
+| Tick–D1 zaman dilimleri | ✅ | M1–D1 (M30/H4 dahil); tick ingestion scriptleri |
+| CSV/Parquet/JSON ithal | ✅ | CSV, JSON, Parquet store, Dukascopy |
+| Veri doğrulama + provenance | 🟡 | duplicate/OHLC/spread/gap raporu + checksum sidecar var; istatistiksel outlier/kaynak mutabakatı yok |
 | Özellik mühendisliği | 🟡 | 59 nedensel özellik; seçilebilir set yok |
 | Gerçek bid/ask/order-flow | 🟡 | İmzalı flow var; L2/deep book yok |
 | Çoklu zaman dilimi analizi | 🟡 | M5/M15 bağlamı; bağımsız encoder/fusion yok |
@@ -48,7 +48,7 @@ Son güncelleme: 2026-11-22 · Branch `feat/v1`
 | Panel | 🟡 | 4 sayfa; ML/NN/RL/rejim/paper/monitoring yok |
 | Scheduler | 🟡 | İki arka plan döngüsü; konfigüre edilebilir scheduler yok |
 | Testler | ✅ | Mevcut kapsam için güçlü; yeni modüller için test yok |
-| Dokümantasyon | 🟡 | Birkaç doküman var; master prompt 15 istiyor |
+| Dokümantasyon | 🟡 | 3/15 zorunlu doküman hazır; 12 eksik |
 | Kabul kriterleri | ❌ | ML/DL/ensemble/paper maddeleri henüz yok |
 
 Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
@@ -64,8 +64,8 @@ Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
 
 ## Sıradaki işler (öncelik sırası)
 
-1. **Faz 2 — Veri temeli:** 10 sembol registry, doğrulama, provenance, JSON,
-   M30/H4. (Model işinden önce.)
+1. **Faz 2 — Veri temeli:** registry, doğrulama, provenance, JSON, M30/H4
+   tamamlandı; kalan: gerçek çoklu-sembol feed ve istatistiksel outlier raporu.
 2. **Faz 3 — Dataset builder:** seçilebilir özellik setleri, purged split,
    manifest/checksum, sızıntı testleri.
 3. **Faz 5 — Klasik ML:** LightGBM/XGBoost/RF + baz çizgileri; simülatörle

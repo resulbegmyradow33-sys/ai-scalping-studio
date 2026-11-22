@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -52,7 +53,10 @@ from scalping.api.train_runner import (
 from scalping.data.base import DataProvider
 from scalping.data.csv_provider import CsvProvider
 from scalping.data.dukascopy import DataUnavailable, DukascopyProvider
+from scalping.data.provenance import build_provenance, load_provenance, save_provenance
+from scalping.data.registry import SYMBOLS
 from scalping.data.synthetic import SyntheticProvider
+from scalping.data.validate import validate_bars
 from scalping.strategy.calibrate import calibrate, card_from_report
 from scalping.strategy.card import save_card
 from scalping.strategy.flow import flow_series
@@ -95,23 +99,48 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok", version=__version__, device=_device())
 
 
+@router.get("/api/symbols")
+def symbol_registry() -> list[dict[str, Any]]:
+    """Research contract metadata for every registered instrument."""
+    return [asdict(spec) for spec in SYMBOLS.values()]
+
+
 @router.get("/api/data/status", response_model=DataStatusResponse)
-def data_status(request: Request, symbol: str) -> DataStatusResponse:
+def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> DataStatusResponse:
     store = request.app.state.store
-    frame = store.read(symbol, TIMEFRAME)
+    frame = store.read(symbol, timeframe)
+    provenance = load_provenance(store.root, symbol, timeframe)
     rows = frame.height
     if rows == 0:
-        return DataStatusResponse(symbol=symbol, rows=0, first_ts=None, last_ts=None, providers=[])
+        return DataStatusResponse(
+            symbol=symbol,
+            timeframe=timeframe,
+            rows=0,
+            first_ts=None,
+            last_ts=None,
+            providers=[],
+            provenance=None if provenance is None else provenance.to_dict(),
+        )
     first = frame.get_column("ts").min()
     last = frame.get_column("ts").max()
     providers = sorted(frame.get_column("provider").unique().to_list())
     return DataStatusResponse(
         symbol=symbol,
+        timeframe=timeframe,
         rows=rows,
         first_ts=first.isoformat() if first is not None else None,
         last_ts=last.isoformat() if last is not None else None,
         providers=providers,
+        provenance=None if provenance is None else provenance.to_dict(),
     )
+
+
+@router.get("/api/data/validate")
+def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> dict[str, Any]:
+    """Structural validation report; explicit because it reads the full slice."""
+    store = request.app.state.store
+    frame = store.read(symbol, timeframe)
+    return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
 
 
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:
@@ -151,6 +180,17 @@ def download(body: DownloadRequest, request: Request) -> DownloadResponse:
             if callable(close):
                 close()
     rows = store.write(body.symbol, TIMEFRAME, frame)
+    if not frame.is_empty():
+        save_provenance(
+            store.root,
+            build_provenance(
+                frame,
+                symbol=body.symbol,
+                timeframe=TIMEFRAME,
+                source=f"provider:{body.provider}",
+                synthetic=body.provider == "synthetic",
+            ),
+        )
     return DownloadResponse(rows=rows)
 
 

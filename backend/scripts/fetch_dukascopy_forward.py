@@ -38,6 +38,7 @@ from scalping.data.dukascopy import (
     _decompress,
     _point_divisor,
 )
+from scalping.data.provenance import build_provenance, save_provenance
 from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
 
@@ -181,9 +182,27 @@ def _aggregate(root: Path, flow_root: Path, cache: Path, symbol: str) -> dict[st
     flow.write_parquet(flow_dir / "part-0000.parquet")
 
     m1 = store.read(symbol, "M1")
-    for rule, timeframe in (("5m", "M5"), ("15m", "M15"), ("1h", "H1"), ("1d", "D1")):
+    save_provenance(
+        store.root,
+        build_provenance(
+            m1,
+            symbol=symbol,
+            timeframe="M1",
+            source="dukascopy:tick-crawl",
+        ),
+    )
+    for rule, timeframe in (("5m", "M5"), ("15m", "M15"), ("30m", "M30"), ("1h", "H1"), ("4h", "H4"), ("1d", "D1")):
         derived = resample(m1, rule).rename({"spread_mean": "spread"})
         store.write(symbol, timeframe, derived)
+        save_provenance(
+            store.root,
+            build_provenance(
+                derived,
+                symbol=symbol,
+                timeframe=timeframe,
+                source="derived:M1",
+            ),
+        )
     coverage = store.coverage(symbol)
     return {
         "event": "aggregated",

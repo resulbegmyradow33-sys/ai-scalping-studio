@@ -35,7 +35,7 @@ from scalping.strategy.flow import flow_thresholds
 from scalping.strategy.rule import FlowMomentumRule
 from scalping.strategy.signals import strategy_signals
 
-_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
+_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "4h", "D1": "1d"}
 
 
 def _flow_h1(root: Path, symbol: str, timeframe: str) -> pl.DataFrame:

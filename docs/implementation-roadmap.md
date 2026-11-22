@@ -30,7 +30,7 @@ Deliverables:
 Exit criteria: every requirement has a status; no production code changed;
 audit evidence points to real files and tests. **Met.**
 
-## Phase 2 — Data foundation and multi-symbol registry
+## Phase 2 — Data foundation and multi-symbol registry (IN PROGRESS)
 
 Goal: make the data layer capable of the ten required instruments and the full
 timeframe ladder, with validation and provenance, before any model is added.
@@ -58,6 +58,17 @@ Affected files: `data/*`, `types.py`, `config.py`, `api/routes.py`,
 Dependencies: none beyond current stack. RAM: < 500 MB. Tests: unit for
 registry, validation, provenance, JSON import, M30/H4 resampling.
 
+Progress (2026-11-22):
+
+- `data/registry.py`: ten specs, `contract_for`, `TIMEFRAMES` including M30/H4.
+- `data/validate.py`: bars/ticks structural report; no repair.
+- `data/provenance.py`: checksum + JSON sidecar; existing XAUUSD stores seeded.
+- `data/json_provider.py` and `cli data json` / `cli data derive`.
+- API: `/api/symbols`, `/api/data/validate`, status with provenance.
+- Tests: registry, validation, provenance, JSON provider, API, CLI derive.
+
+Remaining for exit: a real provider path for the eight non-metal symbols,
+statistical outlier/cross-source reconciliation, and a tick-table layer.
 Exit criteria: all ten specs load; the validator reports real gaps on the
 existing stores; the API exposes provenance; existing tests stay green.
 

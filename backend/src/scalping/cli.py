@@ -31,6 +31,10 @@ import polars as pl
 from scalping.backtest.engine import BacktestResult, run_backtest
 from scalping.config import Settings
 from scalping.data.csv_provider import CsvProvider, DataError
+from scalping.data.json_provider import JsonProvider
+from scalping.data.provenance import build_provenance, save_provenance
+from scalping.data.registry import TIMEFRAMES, timeframe_rule
+from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.env.simulator import WINDOW
@@ -129,11 +133,29 @@ def _summary(symbol: str, store: ParquetStore) -> dict[str, Any]:
     }
 
 
-def _ingest(frame: pl.DataFrame, symbol: str, store: ParquetStore) -> dict[str, Any]:
+def _ingest(
+    frame: pl.DataFrame,
+    symbol: str,
+    store: ParquetStore,
+    *,
+    source: str,
+    synthetic: bool = False,
+    timeframe: str = TIMEFRAME,
+) -> dict[str, Any]:
     if frame.is_empty():
         raise CliError(f"no bars for {symbol} in the requested range")
-    store.write(symbol, TIMEFRAME, frame)
-    return _summary(symbol, store)
+    store.write(symbol, timeframe, frame)
+    provenance = build_provenance(
+        frame,
+        symbol=symbol,
+        timeframe=timeframe,
+        source=source,
+        synthetic=synthetic,
+    )
+    save_provenance(store.root, provenance)
+    summary = _summary(symbol, store)
+    summary["provenance"] = provenance.to_dict()
+    return summary
 
 
 def _cmd_data_synth(args: argparse.Namespace) -> None:
@@ -147,7 +169,9 @@ def _cmd_data_synth(args: argparse.Namespace) -> None:
     provider = SyntheticProvider(seed=args.seed, start_price=args.start_price)
     frame = provider.fetch(args.symbol, start, end)
     store = ParquetStore(args.root)
-    _print_json(_ingest(frame, args.symbol, store))
+    _print_json(
+        _ingest(frame, args.symbol, store, source="synthetic", synthetic=True)
+    )
 
 
 def _cmd_data_csv(args: argparse.Namespace) -> None:
@@ -163,7 +187,46 @@ def _cmd_data_csv(args: argparse.Namespace) -> None:
         reason = getattr(exc, "reason", None) or str(exc)
         raise CliError(f"cannot decode {path} as UTF-8: {reason}") from exc
     store = ParquetStore(args.root)
-    _print_json(_ingest(frame, args.symbol, store))
+    _print_json(_ingest(frame, args.symbol, store, source=f"csv:{path.name}"))
+
+
+def _cmd_data_json(args: argparse.Namespace) -> None:
+    """Read a JSON bar array and merge it into the store."""
+    path = Path(args.path)
+    provider = JsonProvider(path)
+    try:
+        frame = provider.fetch(args.symbol)
+    except OSError as exc:
+        reason = exc.strerror or str(exc)
+        raise CliError(f"cannot read {path}: {reason}") from exc
+    except (ValueError, UnicodeError) as exc:
+        raise CliError(str(exc)) from exc
+    store = ParquetStore(args.root)
+    _print_json(_ingest(frame, args.symbol, store, source=f"json:{path.name}"))
+
+
+def _cmd_data_derive(args: argparse.Namespace) -> None:
+    """Derive M5–D1 partitions from a stored source timeframe."""
+    store = ParquetStore(args.root)
+    source = store.read(args.symbol, args.source)
+    if source.is_empty():
+        raise CliError(f"no {args.symbol} {args.source} bars under {args.root}")
+    written: dict[str, int] = {}
+    for timeframe in args.timeframes.split(","):
+        key = timeframe.strip().upper()
+        if key not in TIMEFRAMES or key == args.source:
+            continue
+        frame = resample(source, timeframe_rule(key)).rename({"spread_mean": "spread"})
+        rows = store.write(args.symbol, key, frame)
+        provenance = build_provenance(
+            frame,
+            symbol=args.symbol,
+            timeframe=key,
+            source=f"derived:{args.source}",
+        )
+        save_provenance(store.root, provenance)
+        written[key] = rows
+    _print_json({"symbol": args.symbol, "source": args.source, "written": written})
 
 
 # --- backtest ------------------------------------------------------------------
@@ -305,6 +368,19 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     csv.add_argument("--root", default=str(DEFAULT_ROOT))
     csv.set_defaults(handler=_cmd_data_csv)
+
+    json_source = sources.add_parser("json", help="read a JSON array of bars")
+    json_source.add_argument("--path", required=True, help="JSON file to read")
+    json_source.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    json_source.add_argument("--root", default=str(DEFAULT_ROOT))
+    json_source.set_defaults(handler=_cmd_data_json)
+
+    derive = sources.add_parser("derive", help="derive M5-M30-H1-H4-D1 from a timeframe")
+    derive.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    derive.add_argument("--source", default="M1")
+    derive.add_argument("--timeframes", default="M5,M15,M30,H1,H4,D1")
+    derive.add_argument("--root", default=str(DEFAULT_ROOT))
+    derive.set_defaults(handler=_cmd_data_derive)
 
     backtest = commands.add_parser("backtest", help="replay a stored symbol")
     backtest.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)

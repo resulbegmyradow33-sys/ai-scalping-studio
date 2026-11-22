@@ -9,7 +9,7 @@ import polars as pl
 
 __all__ = ["flow_series", "flow_thresholds"]
 
-_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
+_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "4h", "D1": "1d"}
 
 
 def flow_series(flow_root: Path, symbol: str, timeframe: str, frame: pl.DataFrame) -> np.ndarray:

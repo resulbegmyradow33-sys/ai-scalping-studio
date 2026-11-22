@@ -32,7 +32,7 @@ from scalping.strategy.labeling import CONTEXT_DIM, bandit_training_data, label_
 from scalping.strategy.rule import FlowMomentumRule
 from scalping.strategy.signals import strategy_signals
 
-_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
+_RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m", "H1": "1h", "H4": "4h", "D1": "1d"}
 
 
 def main(argv: list[str] | None = None) -> int:

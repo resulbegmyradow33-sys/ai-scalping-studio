@@ -26,6 +26,7 @@ from pathlib import Path
 import polars as pl
 
 from scalping.data.base import BAR_SCHEMA
+from scalping.data.provenance import build_provenance, save_provenance
 from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
 
@@ -141,11 +142,26 @@ def main(argv: list[str] | None = None) -> int:
     flow_dir.mkdir(parents=True, exist_ok=True)
     flow.write_parquet(flow_dir / "part-0000.parquet")
     m1 = store.read(args.symbol, "M1")
-    for rule, timeframe in (("5m", "M5"), ("15m", "M15"), ("1h", "H1"), ("1d", "D1")):
-        store.write(
-            args.symbol,
-            timeframe,
-            resample(m1, rule).rename({"spread_mean": "spread"}),
+    save_provenance(
+        store.root,
+        build_provenance(
+            m1,
+            symbol=args.symbol,
+            timeframe="M1",
+            source="github:Touhid-HZ/xauusd-tick-data-2026",
+        ),
+    )
+    for rule, timeframe in (("5m", "M5"), ("15m", "M15"), ("30m", "M30"), ("1h", "H1"), ("4h", "H4"), ("1d", "D1")):
+        derived = resample(m1, rule).rename({"spread_mean": "spread"})
+        store.write(args.symbol, timeframe, derived)
+        save_provenance(
+            store.root,
+            build_provenance(
+                derived,
+                symbol=args.symbol,
+                timeframe=timeframe,
+                source="derived:M1",
+            ),
         )
     coverage = store.coverage(args.symbol)
     print(

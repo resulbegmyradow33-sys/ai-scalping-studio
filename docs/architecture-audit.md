@@ -123,7 +123,7 @@ paper-trading ledger, system monitoring.
 
 Last executed runs:
 
-- backend: `uv run pytest` → **502 passed** (116.7 s);
+- backend: `uv run pytest` → **529 passed** (116.7 s);
 - frontend: `npm test` → **184 passed**;
 - `ruff check src tests scripts` → clean;
 - `mypy src` → clean (49 modules);
@@ -166,7 +166,7 @@ Legend: DONE / PARTIAL / MISSING / EXPERIMENTAL.
 | 23 | Model registry/knowledge DB | MISSING | JSON/Parquet only; no SQLite, champion/rollback |
 | 24 | Dashboard sections | PARTIAL | 4 pages; missing 6 laboratory/monitoring sections |
 | 25 | Scheduler | PARTIAL | two background loops/scripts; no configurable scheduler |
-| 26 | Tests | DONE for current scope | 502 backend, 184 frontend; no ML/DL/regime tests because absent |
+| 26 | Tests | DONE for current scope | 529 backend, 184 frontend; no ML/DL/regime tests because absent |
 | 27 | Required docs | PARTIAL | 2 of 15 complete (this audit + roadmap); 13 missing |
 | 28 | Acceptance criteria | MISSING | most ML/DL/ensemble/paper criteria unmet |
 
@@ -200,6 +200,19 @@ Legend: DONE / PARTIAL / MISSING / EXPERIMENTAL.
 - The `flow_momentum` forward result is positive but small-sample; it is not a
   guarantee of future profitability.
 - PPO/BC is experimental and weaker than the rule; it is not the live strategy.
+
+## Post-audit progress (2026-11-22, Phase 2 first slice)
+
+- Added `data/registry.py` with ten symbol specs and M30/H4 timeframe rules.
+- Added `data/validate.py` (bars/ticks; errors vs gap warnings, no repair).
+- Added `data/provenance.py` and seeded sidecars for the existing XAUUSD stores.
+- Added JSON import and `data derive` CLI commands.
+- Added `/api/symbols`, `/api/data/validate`, and provenance on `/api/data/status`.
+- Added tests for registry, validation, provenance, JSON import, API and CLI.
+
+Still missing from Phase 2: real data providers for the eight non-metal symbols,
+statistical outlier/cross-source checks, and a stored tick table. These are
+tracked in the roadmap.
 
 ## Next step
 
