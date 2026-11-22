@@ -129,7 +129,36 @@ A label with a low mean run length flickers and should not drive a slow
 strategy, even if its average forward return looks good. Transition and dwell
 tables are the sanity check before any strategy-by-regime table is read.
 
-## 7. Limits
+## 7. Strategy × regime table
+
+`regime/strategy.py` joins closed trades to the regime that was current at their
+**entry bar** and summarises each strategy per regime:
+
+```python
+from scalping.regime import strategy_regime_table, trades_with_regime
+
+joined = trades_with_regime(result.trades, regimes)      # per trade
+table = strategy_regime_table(result.trades, regimes)    # per strategy × regime
+```
+
+- The join is a backward as-of on `entry_ts`: a label that starts after the
+  entry can never be attached, and an entry exactly on a label timestamp uses
+  that label.
+- A trade that entered before the first label is reported as `unknown`, never
+  dropped, so missing coverage is visible.
+- Columns: `strategy`, `regime`, `trades`, `wins`, `win_rate`, `expectancy_r`,
+  `total_r`, `total_pnl`, `profit_factor`.
+- `profit_factor` is `null` when a bucket has wins but no losses; a finite
+  value would invent a denominator.
+- The input is the simulator's closed trades, so spread, commission and
+  slippage are already in `pnl`/`r_multiple`. The table does not re-price.
+
+How to read it: compare one strategy across regimes (which weather suits it),
+not two strategies in different regimes with different sample sizes. A cell with
+a handful of trades is noise; report `trades` next to every average. The table
+is descriptive evidence, not a promotion gate.
+
+## 8. Limits
 
 - Regime labels are descriptive, not predictive. Do not report "the regime
   predicts the next move"; the correct claim is "strategy X performed like this
@@ -139,6 +168,6 @@ tables are the sanity check before any strategy-by-regime table is read.
 - Unsupervised states have no inherent meaning beyond their ordering by mean
   return; a narrative name ("accumulation", "distribution") must be backed by
   the per-state statistics, not assigned by hand.
-- The strategy-by-regime report and the API/Market Intelligence page are the
-  next slices of Phase 4; they reuse this row-aligned contract and the same
-  leakage test.
+- The API endpoint and Market Intelligence page are the next slice of Phase 4;
+  they reuse this row-aligned contract, the transition/dwell tables and the
+  strategy-by-regime report.
