@@ -14,6 +14,14 @@ serve-live:
 train-bc:
 	cd backend && uv run python -m scripts.train_flow --tf H1 --train-end 2024-01-01 --steps 300000 --envs 8 --bc-steps 100000 --bc-epochs 4 --bc-lr 3e-4 --out-dir runs
 
+# forward-crawl: Dukascopy ticks (bars + bid/ask flow) for the unseen window.
+forward-crawl:
+	cd backend && uv run python -m scripts.fetch_dukascopy_forward --start 2026-06-01 --end 2026-11-21 --root ../data-forward-store --flow-root ../data-forward-flow --cache ../data-forward-cache --hour-sleep 0.8
+
+# forward-test: run the promoted card unchanged on the forward store.
+forward-test:
+	cd backend && uv run python -m scripts.forward_test
+
 # rl-lab: retry imitation+PPO only when the data digest changed; never promotes.
 rl-lab:
 	cd backend && uv run python -m scripts.nightly_rl

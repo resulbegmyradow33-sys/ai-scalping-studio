@@ -34,5 +34,8 @@ frontend/playwright-report/
 data-real/
 data-real-store/
 data-real-csv/
+data-forward-cache/
+data-forward-flow/
+data-forward-store/
 demo-data/
 demo-data-full/

@@ -112,6 +112,21 @@ Başlangıç yılına göre (her satır o yıldan 2026-05'e kadar, pencereler ö
 Her başlangıç yılı pozitif; bu tek başına kanıt değil (pencereler örtüşüyor),
 ama rejim bağımlılığının 2021-2022 ile sınırlı olmadığını gösteriyor.
 
+## Akış gerçekten imzalı olmalı
+
+Kolay bir kısayol var mı diye test ettim: toplam işlem hacmi veya mum yönü ×
+hacim, imzalı bid/ask hacim farkının yerini tutar mı?
+
+| Kapı | Eğitim (≤2023) | Holdout (2024+) |
+|---|---|---|
+| Toplam hacim (üst %15, 480 bar) | −0.035 R | −0.002 R |
+| Mum yönü × hacim (5 bar, üst %15) | −0.044 R | −0.004 R |
+| **Bid/ask hacim farkı** | **+0.003 R** | **+0.133 R** |
+
+Yani kenar "hareketlilik" veya "hacim" değil, **alıcı/satıcı tarafının
+dengesizliği**. Bu yüzden ileri veri crawl'ı toplam hacimli mumlarla değil,
+Dukascopy'nin bid/ask hacimli tick'leriyle yapılıyor.
+
 ## Sınırlar
 
 - Veri 2021-05 → 2026-05; tek sembol (XAUUSD), tek broker feed'i.
