@@ -49,6 +49,58 @@ _CACHE_SCHEMA: dict[str, pl.DataType] = {
 }
 
 
+class RateLimited(RuntimeError):
+    """The feed kept refusing after every retry; pause the whole crawl."""
+
+
+def _download(
+    provider: DukascopyProvider,
+    symbol: str,
+    hour: datetime,
+    max_wait: float,
+    attempts: int,
+) -> bytes | None:
+    """One hour with `Retry-After`-aware backoff, returning None on a 404.
+
+    The provider's own retry caps out at a few seconds, which is far too short
+    once the feed has issued a 429 ban. This loop waits up to ``max_wait`` and
+    raises :class:`RateLimited` when even that is not enough, so the caller can
+    pause instead of hammering the host.
+    """
+    wait = 5.0
+    url = provider._url(symbol, hour)
+    for _ in range(attempts):
+        response = provider._client.get(url)
+        status = response.status_code
+        if status == 200:
+            return response.content
+        if status == 404:
+            return None
+        if status in (429, 503):
+            retry_after = response.headers.get("Retry-After", "")
+            try:
+                delay = float(retry_after)
+            except ValueError:
+                delay = wait
+            delay = min(max(delay, 5.0), max_wait)
+            print(
+                json.dumps(
+                    {
+                        "event": "rate_limited",
+                        "hour": hour.isoformat(),
+                        "status": status,
+                        "wait": delay,
+                    }
+                ),
+                flush=True,
+            )
+            time.sleep(delay)
+            wait = min(wait * 2, max_wait)
+            continue
+        raise DataUnavailable(symbol, hour, status)
+    raise RateLimited(f"still refused after {attempts} attempts at {hour.isoformat()}")
+
+
 def _empty_hour() -> pl.DataFrame:
     return pl.DataFrame(schema=_CACHE_SCHEMA)
 
@@ -164,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stall-wait", type=float, default=30.0)
     parser.add_argument("--passes", type=int, default=1, help="retry missed hours this many times")
     parser.add_argument("--pass-pause", type=float, default=120.0)
+    parser.add_argument("--ban-wait", type=float, default=300.0, help="pause after a hard rate limit")
+    parser.add_argument("--ban-attempts", type=int, default=4)
     parser.add_argument("--aggregate", action="store_true")
     args = parser.parse_args(argv)
 
@@ -189,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for pass_index in range(max(1, args.passes)):
             pass_missed = 0
+            paused = False
             for index, hour in enumerate(hours, start=1):
                 path = _cache_path(cache, args.symbol, hour)
                 if path.exists():
@@ -196,7 +251,25 @@ def main(argv: list[str] | None = None) -> int:
                         done += 1
                     continue
                 try:
-                    payload = provider._download(args.symbol, hour)
+                    payload = _download(
+                        provider, args.symbol, hour, args.ban_wait, args.ban_attempts
+                    )
+                except RateLimited as exc:
+                    print(
+                        json.dumps(
+                            {
+                                "event": "pause",
+                                "pass": pass_index + 1,
+                                "hour": hour.isoformat(),
+                                "error": str(exc),
+                                "wait": args.ban_wait,
+                            }
+                        ),
+                        flush=True,
+                    )
+                    time.sleep(args.ban_wait)
+                    paused = True
+                    break
                 except DataUnavailable as exc:
                     pass_missed += 1
                     print(
@@ -242,6 +315,15 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 time.sleep(args.hour_sleep)
             missed = pass_missed
+            if paused and pass_index + 1 < args.passes:
+                print(
+                    json.dumps(
+                        {"event": "resume_after_pause", "pass": pass_index + 2}
+                    ),
+                    flush=True,
+                )
+                time.sleep(args.pass_pause)
+                continue
             if missed == 0 or pass_index + 1 >= args.passes:
                 break
             print(
@@ -254,8 +336,18 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         provider.close()
 
+    present = sum(_cache_path(cache, args.symbol, hour).exists() for hour in hours)
     summary = _aggregate(root, flow_root, cache, args.symbol)
-    summary.update({"cached": done, "empty": empty, "missed": missed})
+    summary.update(
+        {
+            "cached": done,
+            "empty": empty,
+            "missed": missed,
+            "present": present,
+            "expected": len(hours),
+            "complete": present == len(hours),
+        }
+    )
     print(json.dumps(summary), flush=True)
     return 0 if missed == 0 else 2
 
