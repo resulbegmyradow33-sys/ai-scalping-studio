@@ -7,6 +7,7 @@ const items = [
   { href: "/", label: "Simülatör" },
   { href: "/training", label: "Eğitim" },
   { href: "/performance", label: "Performans" },
+  { href: "/intelligence", label: "Piyasa Zekâsı" },
   { href: "/data", label: "Veri" },
 ] as const;
 
