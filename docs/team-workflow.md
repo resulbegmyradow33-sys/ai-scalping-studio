@@ -164,10 +164,12 @@ The repository is public, so GitHub Free includes branch protection, rulesets,
 secret scanning, push protection and CodeQL. `scripts/setup_github.sh` applies:
 
 - `main` protection: PR required, one approval, CODEOWNERS review,
-  `backend` + `frontend` checks, up-to-date branch, linear history,
-  conversation resolution, no force push/delete;
-- secret scanning and push protection;
-- vulnerability alerts and Dependabot security fixes.
+  `backend` + `frontend` + CodeQL `analyze` checks, up-to-date branch, linear
+  history, conversation resolution, no force push/delete;
+- secret scanning, push protection and private vulnerability reporting;
+- vulnerability alerts and Dependabot security fixes;
+- dependency-review gate on every PR (fails on high severity);
+- "update branch" and auto-merge enabled; squash-only merges.
 
 The local `pre-push` hook remains as defense in depth. If the repository ever
 becomes private again, server-side protection disappears on the Free plan and

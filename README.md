@@ -1,6 +1,7 @@
 # AI Scalping Studio
 
 [![CI](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml)
 
 Local research and paper-trading studio for XAUUSD. Everything runs on one
 machine: no paid AI APIs, no cloud services, no real money.
