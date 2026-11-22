@@ -110,6 +110,10 @@ class TrainRequest(BaseModel):
     entry_penalty: float = Field(default=0.05, ge=0.0, le=1.0)
     gate_signals: bool = True
     window: int = Field(default=60, ge=1, le=600)
+    timeframe: str = "M1"
+    sl_atr_mult: float = Field(default=1.0, gt=0.0, le=20.0)
+    tp_atr_mult: float = Field(default=2.0, gt=0.0, le=20.0)
+    max_bars_in_trade: int = Field(default=120, ge=1, le=100_000)
     train_end: datetime | None = None
 
 

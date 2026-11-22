@@ -111,6 +111,7 @@ class TrainConfig:
     entry_penalty: float = 0.05
     gate_signals: bool = True
     window: int = WINDOW
+    timeframe: str = "M1"
     data_hash: str = ""
 
     def __post_init__(self) -> None:

@@ -28,7 +28,7 @@ import math
 import re
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
@@ -40,7 +40,7 @@ from scalping.api.runner import MIN_BARS as SIM_MIN_BARS
 from scalping.api.runner import TIMEFRAME
 from scalping.backtest.engine import run_backtest
 from scalping.backtest.evaluate import FoldResult, cost_stress, evaluate_walkforward
-from scalping.config import Settings
+from scalping.config import ContractSpec, CostConfig, RiskConfig, Settings
 from scalping.data.store import ParquetStore
 from scalping.features.build import FeatureFrame, build_features
 from scalping.rl.policy import load_policy
@@ -289,6 +289,10 @@ class TrainRunner:
         entry_penalty: float = 0.05,
         gate_signals: bool = True,
         window: int = 60,
+        timeframe: str = "M1",
+        sl_atr_mult: float = 1.0,
+        tp_atr_mult: float = 2.0,
+        max_bars_in_trade: int = 120,
         train_end: datetime | None = None,
     ) -> str:
         """Prepare a run, reserve its id and start the worker thread.
@@ -303,7 +307,18 @@ class TrainRunner:
         run id that is already training. Data problems from the feature layer
         stay ``ValueError`` and map to 422 in the route.
         """
-        full = self.store.read(symbol, TIMEFRAME)
+        if timeframe not in ("M1", "M5", "M15"):
+            raise TrainError(f"unsupported timeframe: {timeframe!r}")
+        run_settings = replace(
+            self.settings,
+            risk=replace(
+                self.settings.risk,
+                sl_atr_mult=sl_atr_mult,
+                tp_atr_mult=tp_atr_mult,
+                max_bars_in_trade=max_bars_in_trade,
+            ),
+        )
+        full = self.store.read(symbol, timeframe)
         if full.height < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
 
@@ -321,7 +336,7 @@ class TrainRunner:
         if frame.height < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
 
-        features = build_features(frame, self.settings.costs)
+        features = build_features(frame, run_settings.costs)
         if features.X.shape[0] < MIN_BARS:
             raise TrainError(f"not enough bars: need {MIN_BARS}")
 
@@ -335,7 +350,7 @@ class TrainRunner:
         labels: pl.DataFrame | None = None
         selector: LinUCB | None = None
         if use_strategy:
-            labels = label_events(frame, self.settings)
+            labels = label_events(frame, run_settings)
             try:
                 X, arms, rewards = bandit_training_data(features, labels)
                 if X.shape[0] == 0:
@@ -354,13 +369,14 @@ class TrainRunner:
             entry_penalty=entry_penalty,
             gate_signals=gate_signals,
             window=window,
+            timeframe=timeframe,
         )
         split = (
             {"train_end": train_end_iso, "eval_start": eval_start}
             if train_end_iso is not None or eval_start is not None
             else None
         )
-        run_id, identity = run_identity(config, features, self.settings, selector, split)
+        run_id, identity = run_identity(config, features, run_settings, selector, split)
         run_dir = self.runs_root / run_id
         created_at = _now()
 
@@ -404,7 +420,16 @@ class TrainRunner:
                 selector.save(run_dir / BANDIT_NAME)
             thread = threading.Thread(
                 target=self._train,
-                args=(state, config, features, selector, labels, train_end_iso, eval_start),
+                args=(
+                    state,
+                    config,
+                    features,
+                    selector,
+                    labels,
+                    train_end_iso,
+                    eval_start,
+                    run_settings,
+                ),
                 name=f"train-{run_id}",
                 daemon=True,
             )
@@ -426,6 +451,7 @@ class TrainRunner:
         labels: pl.DataFrame | None,
         train_end: str | None,
         eval_start: str | None,
+        settings: Settings,
     ) -> None:
         """Run ``train`` in the worker thread and publish its final status."""
         status = "failed"
@@ -433,7 +459,7 @@ class TrainRunner:
             result = train(
                 config,
                 features,
-                self.settings,
+                settings,
                 selector=selector,
                 out_dir=self.runs_root,
                 labels=labels,
@@ -603,6 +629,20 @@ class TrainRunner:
         except (OSError, TypeError, ValueError, KeyError) as exc:
             raise TrainError(f"cannot load {BANDIT_NAME}: {exc}") from exc
 
+    def _settings_from_config(self, config: dict[str, Any]) -> Settings:
+        """Rebuild the run's settings, falling back to the app's when absent."""
+        raw = config.get("settings")
+        if not isinstance(raw, dict):
+            return self.settings
+        try:
+            return Settings(
+                contract=ContractSpec(**raw["contract"]),
+                risk=RiskConfig(**raw["risk"]),
+                costs=CostConfig(**raw["costs"]),
+            )
+        except (KeyError, TypeError):
+            return self.settings
+
     def _expected_data_hash(
         self, frame: pl.DataFrame, config: dict[str, Any]
     ) -> str:
@@ -645,6 +685,7 @@ class TrainRunner:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
         features = build_features(frame, self.settings.costs)
         config = _read_json(run_dir / CONFIG_NAME)
+        run_settings = self._settings_from_config(config)
         try:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
@@ -743,10 +784,12 @@ class TrainRunner:
         except (OSError, TypeError, ValueError) as exc:
             raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
         selector = self._load_selector(run_dir, config)
-        params = config.get("params") if isinstance(config.get("params"), dict) else {}
-        window = int(params.get("window", 60)) if isinstance(params, dict) else 60
-
-        full = self.store.read(symbol, TIMEFRAME)
+        raw_params = config.get("params")
+        params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
+        window = int(params.get("window", 60))
+        run_settings = self._settings_from_config(config)
+        run_timeframe = str(params.get("timeframe", "M1"))
+        full = self.store.read(symbol, run_timeframe)
         train_end = config.get("train_end")
         eval_start = config.get("eval_start")
         frame = full
@@ -755,7 +798,7 @@ class TrainRunner:
         if frame.height < SIM_MIN_BARS:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
 
-        features = build_features(frame, self.settings.costs)
+        features = build_features(frame, run_settings.costs)
         eval_data_hash = data_hash_for(features)
         run_data_hash = config.get("data_hash")
         if not isinstance(run_data_hash, str):
@@ -782,7 +825,7 @@ class TrainRunner:
                 report = evaluate_walkforward(
                     policy,
                     frame,
-                    self.settings,
+                    run_settings,
                     folds=folds,
                     strategy_selector=selector,
                     window=window,
@@ -792,22 +835,22 @@ class TrainRunner:
                     raise
                 method = "holdout"
                 labels_holdout = (
-                    label_events(frame, self.settings) if selector is not None else None
+                    label_events(frame, run_settings) if selector is not None else None
                 )
                 holdout = run_backtest(
                     policy,
                     features,
-                    self.settings,
+                    run_settings,
                     max_steps=len(features.ts) + 1,
                     strategy_selector=selector,
                     labels=labels_holdout,
                     window=window,
                 )
-            labels = label_events(frame, self.settings) if selector is not None else None
+            labels = label_events(frame, run_settings) if selector is not None else None
             stress = cost_stress(
                 policy,
                 features,
-                self.settings,
+                run_settings,
                 strategy_selector=selector,
                 labels=labels,
                 window=window,

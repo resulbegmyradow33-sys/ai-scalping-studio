@@ -168,6 +168,10 @@ async def train_start(body: TrainRequest, request: Request) -> TrainResponse:
             entry_penalty=body.entry_penalty,
             gate_signals=body.gate_signals,
             window=body.window,
+            timeframe=body.timeframe,
+            sl_atr_mult=body.sl_atr_mult,
+            tp_atr_mult=body.tp_atr_mult,
+            max_bars_in_trade=body.max_bars_in_trade,
             train_end=body.train_end,
         )
     except TrainError as exc:

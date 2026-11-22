@@ -190,7 +190,10 @@ class RiskEngine:
         if side is Side.FLAT:
             raise ValueError("side must be LONG or SHORT")
         direction = int(side)
-        return entry - direction * atr, entry + 2 * direction * atr
+        return (
+            entry - direction * atr * self.risk.sl_atr_mult,
+            entry + self.risk.tp_atr_mult * direction * atr,
+        )
 
     # --- session -----------------------------------------------------------
 

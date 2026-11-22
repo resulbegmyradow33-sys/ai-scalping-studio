@@ -142,6 +142,8 @@ class RiskConfig:
     max_notional_x: float = 20.0  # notional cap as a multiple of equity
     max_positions: int = 1
     max_bars_in_trade: int = 120
+    sl_atr_mult: float = 1.0
+    tp_atr_mult: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)
