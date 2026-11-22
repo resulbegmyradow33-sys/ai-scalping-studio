@@ -113,6 +113,11 @@ class TrainConfig:
     window: int = WINDOW
     timeframe: str = "M1"
     data_hash: str = ""
+    bc_steps: int = 0
+    bc_epochs: int = 0
+    bc_lr: float = 1e-3
+    bc_executed_actions: bool = True
+    bc_only: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_name, str) or not self.run_name.strip():
@@ -140,6 +145,16 @@ class TrainConfig:
             raise ValueError(f"ent_coef must be non-negative and finite, got {self.ent_coef}")
         if self.checkpoint_every < 1:
             raise ValueError(f"checkpoint_every must be >= 1, got {self.checkpoint_every}")
+        if self.bc_steps < 0:
+            raise ValueError(f"bc_steps must be >= 0, got {self.bc_steps}")
+        if self.bc_epochs < 0:
+            raise ValueError(f"bc_epochs must be >= 0, got {self.bc_epochs}")
+        if self.bc_epochs > 0 and self.bc_steps == 0:
+            raise ValueError("bc_epochs requires bc_steps > 0")
+        if self.bc_only and self.bc_epochs == 0:
+            raise ValueError("bc_only requires bc_epochs > 0")
+        if not np.isfinite(self.bc_lr) or self.bc_lr <= 0:
+            raise ValueError(f"bc_lr must be positive and finite, got {self.bc_lr}")
 
 
 class TrainResult(NamedTuple):
@@ -304,6 +319,170 @@ def _n_actions(env: VecEnv) -> int:
     return int(space.n)
 
 
+def _collect_teacher_data(
+    env: VecNormalize,
+    teacher_actions: np.ndarray,
+    samples: int,
+    executed_only: bool = True,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Step the vector env with the rule's action and record ``(obs, action)``.
+
+    The observations are the *normalised* ones the policy will see during PPO,
+    because they come back from the ``VecNormalize`` wrapper. ``samples`` is the
+    total across envs; each vector step contributes ``n_envs`` rows.
+    """
+    inner: Any = getattr(env, "venv", None)
+    envs = getattr(inner, "envs", None)
+    if not envs:
+        raise ValueError("behaviour cloning needs a DummyVecEnv")
+    per_step = len(envs)
+    steps = max(1, samples // per_step)
+    observations: list[np.ndarray] = []
+    actions: list[np.ndarray] = []
+    obs: Any = env.reset()
+    for _ in range(steps):
+        current = np.asarray(
+            [
+                int(teacher_actions[e.sim.bar_index])
+                if 0 <= e.sim.bar_index < len(teacher_actions)
+                else 0
+                for e in envs
+            ],
+            dtype=np.int64,
+        )
+        previous = np.asarray(obs, dtype=np.float32).copy()
+        obs, _, _, infos = env.step(current)
+        # The stateless teacher fires on every extreme bar; the environment
+        # rejects entries while a position is open or the daily loss cap hit.
+        # Teach the action that was *executed*, not the one that was requested,
+        # or the clone learns to enter far more often than the live rule can.
+        executed = current.copy()
+        if executed_only:
+            for index, info in enumerate(infos):
+                if info.get("blocked"):
+                    executed[index] = 0
+        observations.append(previous)
+        actions.append(executed)
+    return np.concatenate(observations), np.concatenate(actions)
+
+
+def _class_weights(actions: np.ndarray, n_actions: int) -> np.ndarray:
+    """Inverse-frequency weights, normalised to mean 1.
+
+    Entries are a few percent of the bars; unweighted cross-entropy would learn
+    "hold" and nothing else.
+    """
+    counts = np.bincount(actions, minlength=n_actions).astype(np.float64)
+    inverse = np.zeros_like(counts)
+    np.divide(1.0, counts, out=inverse, where=counts > 0)
+    weights = inverse[actions]
+    mean = weights.mean()
+    return weights / mean if mean > 0 else weights
+
+
+def _probabilities(distribution: Any) -> torch.Tensor | None:
+    """The class probabilities behind an SB3 categorical distribution."""
+    inner = getattr(distribution, "distribution", None)
+    probs = getattr(inner, "probs", None)
+    return probs if isinstance(probs, torch.Tensor) else None
+
+
+def _weighted_nll(
+    policy: Any,
+    obs: torch.Tensor,
+    acts: torch.Tensor,
+    weights: torch.Tensor,
+    index: torch.Tensor | None = None,
+) -> torch.Tensor:
+    sl = slice(None) if index is None else index
+    distribution = policy.get_distribution(obs[sl])
+    return -(distribution.log_prob(acts[sl]) * weights[sl]).mean()
+
+
+def _behaviour_clone(
+    model: PPO,
+    observations: np.ndarray,
+    actions: np.ndarray,
+    epochs: int,
+    learning_rate: float,
+) -> dict[str, float]:
+    """Supervised warm start: teach the policy the validated rule's actions.
+
+    A held-out slice of the demonstrations stops the clone from memorising the
+    sample: without it, ten epochs on 100k rows drove training loss to ~0 while
+    the PPO fine-tune then lost money on the evaluation window.
+    """
+    policy = model.policy
+    policy.set_training_mode(True)
+    device = policy.device
+    space = model.action_space
+    if not isinstance(space, gymnasium.spaces.Discrete):
+        raise TypeError(f"expected a Discrete action space, got {space}")
+    obs = torch.as_tensor(observations, dtype=torch.float32, device=device)
+    acts = torch.as_tensor(actions, dtype=torch.long, device=device)
+    weights = torch.as_tensor(
+        _class_weights(actions, int(space.n)),
+        dtype=torch.float32,
+        device=device,
+    )
+    order = torch.randperm(len(obs), device=device)
+    validation_size = max(1, int(len(obs) * 0.15))
+    validation = order[:validation_size]
+    training = order[validation_size:]
+    optimizer = torch.optim.Adam(policy.parameters(), lr=learning_rate)
+    batch_size = min(1024, len(training))
+    best_loss = float("inf")
+    best_state = {key: value.detach().clone() for key, value in policy.state_dict().items()}
+    epochs_run = 0
+    patience = 0
+    for _ in range(epochs):
+        epochs_run += 1
+        policy.set_training_mode(True)
+        permutation = training[torch.randperm(len(training), device=device)]
+        for start in range(0, len(permutation), batch_size):
+            index = permutation[start : start + batch_size]
+            loss = _weighted_nll(policy, obs, acts, weights, index)
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
+            optimizer.step()
+        policy.set_training_mode(False)
+        with torch.no_grad():
+            validation_loss = float(_weighted_nll(policy, obs, acts, weights, validation))
+        if validation_loss < best_loss - 1e-4:
+            best_loss = validation_loss
+            best_state = {
+                key: value.detach().clone() for key, value in policy.state_dict().items()
+            }
+            patience = 0
+        else:
+            patience += 1
+            if patience >= 2:
+                break
+    policy.load_state_dict(best_state)
+    policy.set_training_mode(True)
+    with torch.no_grad():
+        distribution = policy.get_distribution(obs[validation])
+        probs = _probabilities(distribution)
+        if probs is None:
+            predicted = acts[validation]
+        else:
+            predicted = probs.argmax(dim=-1)
+        correct = predicted == acts[validation]
+        accuracy = float(correct.float().mean())
+        entries = acts[validation] != 0
+        entry_recall = float(correct[entries].float().mean()) if bool(entries.any()) else 0.0
+        predicted_entry_rate = float((predicted != 0).float().mean())
+    return {
+        "samples": float(len(obs)),
+        "epochs": float(epochs_run),
+        "loss": best_loss,
+        "accuracy": accuracy,
+        "entry_recall": entry_recall,
+        "predicted_entry_rate": predicted_entry_rate,
+    }
+
+
 def _existing_identity(run_dir: Path, identity: dict[str, Any]) -> dict[str, Any]:
     """Refuse a directory whose config describes a different run.
 
@@ -323,7 +502,7 @@ def _existing_identity(run_dir: Path, identity: dict[str, Any]) -> dict[str, Any
             "params": stored["params"],
             "settings": stored["settings"],
             "selector": stored["selector"],
-            "split": stored.get("split"),
+            "split": stored.get("split", stored.get("identity", {}).get("split")),
             "data_hash": stored["data_hash"],
             "seed": stored["seed"],
         }
@@ -376,6 +555,7 @@ def train(
     flow: np.ndarray | None = None,
     flow_thr: np.ndarray | None = None,
     flow_obs: bool = False,
+    teacher_actions: np.ndarray | None = None,
 ) -> TrainResult:
     """Train PPO on ``features`` and write a self-contained run directory.
 
@@ -400,6 +580,13 @@ def train(
     bars = int(features.X.shape[0])
     if bars < MIN_BARS:
         raise ValueError(f"not enough bars: need {MIN_BARS}")
+    if config.bc_epochs > 0:
+        if teacher_actions is None:
+            raise ValueError("behaviour cloning needs teacher_actions")
+        teacher = np.asarray(teacher_actions, dtype=np.int64)
+        if teacher.shape != (bars,):
+            raise ValueError(f"teacher_actions must have shape ({bars},), got {teacher.shape}")
+        teacher_actions = teacher
 
     pin_threads()
     out = Path(out_dir)
@@ -479,6 +666,18 @@ def train(
         # chunk, so a checkpoint early in the next chunk cannot see the losses of
         # the update that just ran.
         model.set_logger(configure(None, format_strings=[]))
+        cloning: dict[str, float] | None = None
+        if config.bc_epochs > 0 and teacher_actions is not None:
+            observations, taken = _collect_teacher_data(
+                env,
+                teacher_actions,
+                config.bc_steps,
+                executed_only=config.bc_executed_actions,
+            )
+            cloning = _behaviour_clone(
+                model, observations, taken, config.bc_epochs, config.bc_lr
+            )
+            manifest_writer.base["behaviour_cloning"] = cloning
 
         write_json(
             run_dir / CONFIG_NAME,
@@ -511,11 +710,13 @@ def train(
                 "random_start": config.random_start,
                 "train_end": train_end,
                 "eval_start": eval_start,
+                "split": split,
                 "normalisation": {
                     "norm_obs": True,
                     "norm_reward": True,
                     "clip_obs": _CLIP_OBS,
                 },
+                "behaviour_cloning": cloning,
                 "versions": _versions(),
             },
         )
@@ -545,24 +746,30 @@ def train(
         metrics_callback.init_callback(model)
         checkpoint_callback.init_callback(model)
 
-        while int(model.num_timesteps) < config.total_steps:
-            control.react()
-            chunk = min(config.checkpoint_every, config.total_steps - int(model.num_timesteps))
-            before = int(model.num_timesteps)
-            try:
-                model.learn(
-                    total_timesteps=chunk,
-                    callback=callbacks,
-                    reset_num_timesteps=False,
-                    progress_bar=False,
-                )
-            except KeyboardInterrupt:
-                final_status = "interrupted"
-                break
-            if int(model.num_timesteps) <= before:
-                raise RuntimeError(f"PPO made no progress: num_timesteps stayed at {before}")
-        else:
+        if config.bc_only:
+            # A pure imitation baseline: save the clone without a single PPO
+            # update, so the panel can compare "copy the rule" with "learn from
+            # the rule".
             final_status = "completed"
+        else:
+            while int(model.num_timesteps) < config.total_steps:
+                control.react()
+                chunk = min(config.checkpoint_every, config.total_steps - int(model.num_timesteps))
+                before = int(model.num_timesteps)
+                try:
+                    model.learn(
+                        total_timesteps=chunk,
+                        callback=callbacks,
+                        reset_num_timesteps=False,
+                        progress_bar=False,
+                    )
+                except KeyboardInterrupt:
+                    final_status = "interrupted"
+                    break
+                if int(model.num_timesteps) <= before:
+                    raise RuntimeError(f"PPO made no progress: num_timesteps stayed at {before}")
+            else:
+                final_status = "completed"
     except TrainingHalted as halted:
         final_status = halted.status
     except KeyboardInterrupt:

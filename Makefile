@@ -10,6 +10,14 @@ dev:
 serve-live:
 	cd backend && uv run python -m scalping.cli serve --root ../data-ticks5-store --flow-root ../data-flow-store --port 8000
 
+# train-bc: imitate the live card's rule, then fine-tune PPO (experimental).
+train-bc:
+	cd backend && uv run python -m scripts.train_flow --tf H1 --train-end 2024-01-01 --steps 300000 --envs 8 --bc-steps 100000 --bc-epochs 4 --bc-lr 3e-4 --out-dir runs
+
+# rl-lab: retry imitation+PPO only when the data digest changed; never promotes.
+rl-lab:
+	cd backend && uv run python -m scripts.nightly_rl
+
 # calibrate: re-select the card on the training slice and gate it on the holdout.
 calibrate:
 	cd backend && uv run python -m scripts.nightly_calibrate --store ../data-ticks5-store --flow-root ../data-flow-store --card runs/strategy_card.json --history runs/strategy_history.jsonl

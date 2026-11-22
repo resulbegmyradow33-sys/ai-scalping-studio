@@ -29,6 +29,8 @@ from scalping.rl.train import TrainConfig, train
 from scalping.strategy.bandit import LinUCB
 from scalping.strategy.flow import flow_series, flow_thresholds
 from scalping.strategy.labeling import CONTEXT_DIM, bandit_training_data, label_events
+from scalping.strategy.rule import FlowMomentumRule
+from scalping.strategy.signals import strategy_signals
 
 _RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
 
@@ -50,6 +52,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--flow-quantile", type=float, default=0.8)
     parser.add_argument("--flow-window", type=int, default=240)
     parser.add_argument("--flow-obs", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--bc-steps", type=int, default=0)
+    parser.add_argument("--bc-epochs", type=int, default=0)
+    parser.add_argument("--bc-lr", type=float, default=1e-3)
+    parser.add_argument("--bc-only", action="store_true")
+    parser.add_argument(
+        "--bc-executed",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="teach the action the environment executed, not the one requested",
+    )
     parser.add_argument("--out-dir", default="runs")
     args = parser.parse_args(argv)
 
@@ -76,6 +88,11 @@ def main(argv: list[str] | None = None) -> int:
 
     features = build_features(train_frame, settings.costs)
     labels = label_events(train_frame, settings)
+    teacher: FlowMomentumRule | None = None
+    if args.bc_epochs > 0:
+        signal = strategy_signals(train_frame)["sig_momentum"].to_numpy()
+        teacher = FlowMomentumRule.build(train_frame, train_flow, train_thr, signal)
+        print(json.dumps({"teacher_entries": int((teacher.actions != 0).sum())}))
     X, arms, rewards = bandit_training_data(features, labels)
     selector = LinUCB(dim=CONTEXT_DIM).fit_offline(X, arms, rewards).freeze()
     print(json.dumps({"bandit_labels": int(X.shape[0])}))
@@ -90,6 +107,11 @@ def main(argv: list[str] | None = None) -> int:
         gate_signals=True,
         entry_penalty=0.05,
         random_start=True,
+        bc_steps=args.bc_steps,
+        bc_epochs=args.bc_epochs,
+        bc_lr=args.bc_lr,
+        bc_only=args.bc_only,
+        bc_executed_actions=args.bc_executed,
     )
     result = train(
         config,
@@ -102,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
         flow=train_flow,
         flow_thr=train_thr,
         flow_obs=args.flow_obs,
+        teacher_actions=None if teacher is None else teacher.actions,
     )
     print(json.dumps({"run_id": result.run_id, "reward_mean": result.reward_mean}))
 

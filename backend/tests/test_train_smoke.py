@@ -60,7 +60,15 @@ def _frame(seed: int = 5) -> FeatureFrame:
 
 
 def _train(tmp_path: Path, **overrides) -> TrainResult:
-    train_keys = {"stop_event", "pause_event", "train_end", "eval_start", "selector", "labels"}
+    train_keys = {
+        "stop_event",
+        "pause_event",
+        "train_end",
+        "eval_start",
+        "selector",
+        "labels",
+        "teacher_actions",
+    }
     train_kwargs = {key: overrides.pop(key) for key in list(overrides) if key in train_keys}
     fields = {
         "run_name": "smoke",
@@ -591,3 +599,46 @@ def test_unexpected_failure_writes_a_failed_manifest(tmp_path, monkeypatch):
     manifest = load_run(run_dirs[0])
     assert manifest["status"] == "failed"
     assert "kaboom" in manifest["error"]
+
+
+def test_bc_epochs_need_steps() -> None:
+    with pytest.raises(ValueError, match="bc_epochs requires"):
+        TrainConfig(run_name="bc", bc_epochs=2)
+
+
+@pytest.mark.slow
+def test_behaviour_cloning_is_recorded(tmp_path):
+    """PPO can start from the rule's actions instead of pure exploration."""
+    frame = _frame()
+    teacher = np.ones(frame.X.shape[0], dtype=np.int64)
+    result = _train(
+        tmp_path,
+        total_steps=256,
+        bc_steps=512,
+        bc_epochs=1,
+        bc_lr=1e-3,
+        teacher_actions=teacher,
+    )
+    config = json.loads((tmp_path / result.run_id / "config.json").read_text())
+    cloning = config["behaviour_cloning"]
+    assert cloning["samples"] == 512
+    assert cloning["epochs"] == 1
+    assert 0.0 <= cloning["accuracy"] <= 1.0
+    assert 0.0 <= cloning["entry_recall"] <= 1.0
+    assert 0.0 <= cloning["predicted_entry_rate"] <= 1.0
+
+
+@pytest.mark.slow
+def test_bc_only_saves_a_clone_without_ppo(tmp_path):
+    frame = _frame()
+    teacher = np.ones(frame.X.shape[0], dtype=np.int64)
+    result = _train(
+        tmp_path,
+        total_steps=256,
+        bc_steps=512,
+        bc_epochs=1,
+        bc_only=True,
+        teacher_actions=teacher,
+    )
+    assert result.steps == 0
+    assert (tmp_path / result.run_id / "model.zip").is_file()

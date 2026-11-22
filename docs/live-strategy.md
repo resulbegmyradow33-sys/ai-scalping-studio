@@ -98,10 +98,25 @@ Kart ve kalibrasyon kaydı: `docs/cards/strategy_card_2026-11-22.json`,
 Sıralı simülatör, aynı anda tek pozisyon kuralını uyguladığı için etiket
 sayısından daha az işlem yapar; bu yüzden asıl kanıt ikinci satırdır.
 
+Başlangıç yılına göre (her satır o yıldan 2026-05'e kadar, pencereler örtüşür):
+
+| Başlangıç | İşlem | R/işlem | PF | Max DD | Net |
+|---|---|---|---|---|---|
+| 2021-05 | 604 | +0.046 | 1.09 | %11,4 | +$1.201 |
+| 2022-01 | 531 | +0.063 | 1.13 | %7,5 | +$1.494 |
+| 2023-01 | 410 | +0.114 | 1.23 | %5,4 | +$2.166 |
+| 2024-01 | 266 | +0.068 | 1.11 | %4,9 | +$616 |
+| 2025-01 | 123 | +0.103 | 1.12 | %4,9 | +$308 |
+| 2026-01 | 6 | +0.998 | 3.96 | %0,5 | +$264 |
+
+Her başlangıç yılı pozitif; bu tek başına kanıt değil (pencereler örtüşüyor),
+ama rejim bağımlılığının 2021-2022 ile sınırlı olmadığını gösteriyor.
+
 ## Sınırlar
 
 - Veri 2021-05 → 2026-05; tek sembol (XAUUSD), tek broker feed'i.
 - Spread arşivi ortalama 0.446; canlı broker spread'i farklıysa sonuç değişir.
-- Kart, PPO ajanını terfi ettirmez. RL panelde deneysel kalır.
+- Kart, PPO ajanını terfi ettirmez. RL panelde deneysel kalır; taklit deneyi
+  ve sonuçları `docs/rl-imitation.md`, otomatik tekrarı `scripts/nightly_rl.py`.
 - Gece kalibrasyonu bir mühendislik döngüsüdür, garanti değil: her terfi aynı
   holdout'u tekrar gördüğü için kanıt gücü zamanla azalır.
