@@ -64,7 +64,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Hidden Markov regime model.
 - [x] Random forest / gradient boosting regime baseline.
 - [ ] Autoencoder/representation-based regime research.
-- [ ] Strategy × regime performance table.
+- [x] Strategy × regime performance table.
 - [ ] API endpoint and Market Intelligence UI.
 - [x] `docs/market-regime-detection.md`.
 - [x] Tests: determinism, no leakage, transition sanity.
