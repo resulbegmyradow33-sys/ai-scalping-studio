@@ -25,6 +25,7 @@ therefore replays that rule; PPO stays in the research lab.
 
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — clone, branch, test, push, PR.
 - [`docs/team-workflow.md`](docs/team-workflow.md) — roles, reviews, data/model rules.
+- [`TEAM.md`](TEAM.md) — members, roles and permissions.
 - [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) — expected behaviour.
 - [`SECURITY.md`](SECURITY.md) — private vulnerability reporting.
 - [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE) — bug, feature, data, experiment forms.

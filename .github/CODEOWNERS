@@ -1,13 +1,13 @@
-# Default owner for everything.
-* @resulbegmyradow33-sys
+# Default: either member can review.
+* @resulbegmyradow33-sys @lukmanhekim099
 
-# Backend ownership
-/backend/src/scalping/data/ @resulbegmyradow33-sys
-/backend/src/scalping/features/ @resulbegmyradow33-sys
-/backend/src/scalping/env/ @resulbegmyradow33-sys
-/backend/src/scalping/rl/ @resulbegmyradow33-sys
-
-# Frontend and docs
-/frontend/ @resulbegmyradow33-sys
-/docs/ @resulbegmyradow33-sys
+# Repository, security and CI configuration stays owner-only.
 /.github/ @resulbegmyradow33-sys
+/CODEOWNERS @resulbegmyradow33-sys
+/SECURITY.md @resulbegmyradow33-sys
+/scripts/setup_github.sh @resulbegmyradow33-sys
+
+# Code and docs: both members.
+/backend/ @resulbegmyradow33-sys @lukmanhekim099
+/frontend/ @resulbegmyradow33-sys @lukmanhekim099
+/docs/ @resulbegmyradow33-sys @lukmanhekim099
