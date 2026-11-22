@@ -665,6 +665,8 @@ class TrainRunner:
             )
 
         selector = self._load_selector(run_dir, config)
+        params = config.get("params") if isinstance(config.get("params"), dict) else {}
+        window = int(params.get("window", 60)) if isinstance(params, dict) else 60
         labels = label_events(frame, self.settings) if selector is not None else None
         try:
             result = run_backtest(
@@ -675,6 +677,7 @@ class TrainRunner:
                 max_steps=max(len(features.ts) + 1, 1),
                 strategy_selector=selector,
                 labels=labels,
+                window=window,
             )
         except (TypeError, ValueError) as exc:
             raise TrainError(f"run {run_id} cannot be replayed: {exc}") from exc
@@ -740,6 +743,8 @@ class TrainRunner:
         except (OSError, TypeError, ValueError) as exc:
             raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
         selector = self._load_selector(run_dir, config)
+        params = config.get("params") if isinstance(config.get("params"), dict) else {}
+        window = int(params.get("window", 60)) if isinstance(params, dict) else 60
 
         full = self.store.read(symbol, TIMEFRAME)
         train_end = config.get("train_end")
@@ -780,6 +785,7 @@ class TrainRunner:
                     self.settings,
                     folds=folds,
                     strategy_selector=selector,
+                    window=window,
                 )
             except ValueError as exc:
                 if "not enough data" not in str(exc):
@@ -795,6 +801,7 @@ class TrainRunner:
                     max_steps=len(features.ts) + 1,
                     strategy_selector=selector,
                     labels=labels_holdout,
+                    window=window,
                 )
             labels = label_events(frame, self.settings) if selector is not None else None
             stress = cost_stress(

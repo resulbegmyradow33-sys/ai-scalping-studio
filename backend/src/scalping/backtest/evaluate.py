@@ -221,6 +221,7 @@ def evaluate_walkforward(
     train_months: int = 6,
     folds: int = 3,
     strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
+    window: int = 60,
 ) -> WalkForwardReport:
     """Evaluate ``policy`` out of sample on ``folds`` walk-forward windows.
 
@@ -345,6 +346,7 @@ def cost_stress(
     multipliers: Sequence[float] = (1, 2, 3),
     strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
     labels: pl.DataFrame | None = None,
+    window: int = 60,
 ) -> list[StressResult]:
     """Rerun ``policy`` with each cost multiplier and return the results.
 
@@ -375,6 +377,7 @@ def cost_stress(
             max_steps=max(len(features.ts) + 1, 1),
             strategy_selector=strategy_selector,
             labels=labels,
+            window=window,
         )
         results.append(
             StressResult(multiplier=multiplier, metrics=result.metrics, trades=result.trades)

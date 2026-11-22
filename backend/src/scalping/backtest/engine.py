@@ -36,7 +36,7 @@ import polars as pl
 
 from scalping.backtest.metrics import Metrics, compute
 from scalping.config import Settings
-from scalping.env.simulator import ArmSelector, Simulator
+from scalping.env.simulator import WINDOW, ArmSelector, Simulator
 from scalping.features.build import FeatureFrame
 from scalping.types import Trade
 
@@ -139,6 +139,7 @@ def run_backtest(
     max_steps: int | None = None,
     strategy_selector: ArmSelector | Callable[[np.ndarray], int] | None = None,
     labels: pl.DataFrame | None = None,
+    window: int = WINDOW,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -163,6 +164,7 @@ def run_backtest(
         max_steps=max_steps,
         strategy_selector=strategy_selector,
         labels=labels,
+        window=window,
     )
     obs = sim.reset(_SEED)
 
