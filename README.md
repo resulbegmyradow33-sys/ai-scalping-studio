@@ -8,6 +8,13 @@ learn a gold scalping edge from tick data? The honest answer so far is **no, but
 a small rule with signed order-flow does have a measured edge**. The live panel
 therefore replays that rule; PPO stays in the research lab.
 
+## Project status
+
+- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing.
+- [`docs/architecture-audit.md`](docs/architecture-audit.md) — evidence-based audit.
+- [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
+- [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
+
 ## What is validated
 
 `flow_momentum`, H1, card `backend/config/strategy_card.json`:
