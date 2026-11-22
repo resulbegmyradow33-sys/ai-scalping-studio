@@ -158,7 +158,27 @@ not two strategies in different regimes with different sample sizes. A cell with
 a handful of trades is noise; report `trades` next to every average. The table
 is descriptive evidence, not a promotion gate.
 
-## 8. Limits
+## 8. API
+
+`GET /api/regime?symbol=XAUUSD&timeframe=M1&limit=500`
+
+- `rows` — every stored bar that was classified;
+- `current` — the latest bar's axes (`trend`, `trend_strength`, `volatility`,
+  `expansion`, `breakout`, `unusual`, `regime`);
+- `counts` — bars and share per summary regime, largest first; the bars sum to
+  `rows`;
+- `series` — the last `limit` bars (`1..5000`, default 500) with `ts`, `regime`,
+  `trend` and `volatility` for the timeline.
+
+Only the timeline is capped: counts always cover the whole stored slice. An
+empty store is a normal `200` with `rows: 0`, `current: null` and empty lists,
+matching `/api/data/status`; it is not an error.
+
+Rule-based labels are cheap enough to compute per request. Statistical models
+are research tools and are not fitted inside a request; a fitted model belongs
+in the run registry (Phase 10) before it can serve labels.
+
+## 9. Limits
 
 - Regime labels are descriptive, not predictive. Do not report "the regime
   predicts the next move"; the correct claim is "strategy X performed like this
