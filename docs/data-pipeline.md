@@ -181,6 +181,7 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/symbols` | ten symbol specs |
+| `GET /api/timeframes` | supported bar sizes and their resample rules |
 | `GET /api/data/status?symbol&timeframe` | rows, span, providers, provenance |
 | `GET /api/data/validate?symbol&timeframe` | structural report |
 | `POST /api/data/download` | synthetic/CSV/Dukascopy import |
