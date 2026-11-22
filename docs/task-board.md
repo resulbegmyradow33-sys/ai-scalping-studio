@@ -92,7 +92,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 6 — Neural network framework
 
-- [ ] Windowed tensor dataset with train-only normalisation.
+- [x] Windowed tensor dataset with train-only normalisation.
 - [ ] PyTorch trainer: MPS when reliable, CPU fallback.
 - [ ] Gradient clipping, early stopping, checkpoints, resume, cancellation.
 - [ ] RAM guard and one-job policy.
