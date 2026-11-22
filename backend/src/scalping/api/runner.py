@@ -41,6 +41,7 @@ is the single place the future policy hook replaces.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -347,12 +348,44 @@ class SimulationRunner:
             return None
 
     # --- lifecycle -------------------------------------------------------
+    def _forward_result(self) -> dict[str, Any] | None:
+        """The latest weekly forward test, trimmed for the panel."""
+        if self._card_path is None:
+            return None
+        history = self._card_path.parent / "forward_history.jsonl"
+        if not history.exists():
+            return None
+        last: dict[str, Any] | None = None
+        for line in history.read_text(encoding="utf-8").splitlines():
+            try:
+                last = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+        if not isinstance(last, dict) or not isinstance(last.get("forward"), dict):
+            return None
+        forward = last["forward"]
+        return {
+            "at": last.get("at"),
+            "start": last.get("start"),
+            "end": last.get("end"),
+            "trades": forward.get("trades"),
+            "expectancy_r": forward.get("expectancy_r"),
+            "profit_factor": forward.get("profit_factor"),
+            "net_profit": forward.get("net_profit"),
+            "max_drawdown": forward.get("max_drawdown"),
+        }
+
     def strategy_card(self) -> dict[str, Any]:
         """The active card, or ``{"active": False}`` when the legacy rule runs."""
         card = load_card(self._card_path)
         if card is None:
-            return {"active": False, "strategy": STRATEGY, "timeframe": TIMEFRAME}
-        return {"active": True, **card.to_dict()}
+            return {
+                "active": False,
+                "strategy": STRATEGY,
+                "timeframe": TIMEFRAME,
+                "forward": self._forward_result(),
+            }
+        return {"active": True, **card.to_dict(), "forward": self._forward_result()}
 
     def _card_settings(self, card: PolicyCard) -> Settings:
         params = card.params

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -124,3 +125,33 @@ def test_runner_falls_back_when_the_card_frame_is_missing(tmp_path, flow_root) -
         response = client.post("/api/sim/start", json={"speed": 0, "mode": "replay"})
     assert response.status_code == 200
     assert app.state.sim.strategy_card()["active"] is True
+
+
+def test_card_includes_the_latest_forward_result(tmp_path, flow_root) -> None:
+    runs = tmp_path / "runs"
+    save_card(runs / "strategy_card.json", _card())
+    (runs / "forward_history.jsonl").write_text(
+        json.dumps(
+            {
+                "at": "2026-11-22T06:41:59+00:00",
+                "start": "2026-06-01",
+                "end": "2026-11-21",
+                "forward": {
+                    "trades": 24,
+                    "expectancy_r": 0.502,
+                    "profit_factor": 2.15,
+                    "net_profit": 480.6,
+                    "max_drawdown": 0.024,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    with TestClient(
+        create_app(data_root=tmp_path, runs_root=runs, flow_root=flow_root)
+    ) as client:
+        body = client.get("/api/strategy/card").json()
+    assert body["forward"]["trades"] == 24
+    assert body["forward"]["expectancy_r"] == pytest.approx(0.502)
+    assert body["forward"]["start"] == "2026-06-01"

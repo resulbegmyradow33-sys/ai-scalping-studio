@@ -38,6 +38,16 @@ const card: StrategyCard = {
   digest: "abc",
   created_at: "2026-11-22T05:36:40+00:00",
   note: "holdout reused across nightly runs",
+  forward: {
+    at: "2026-11-22T06:41:59+00:00",
+    start: "2026-06-01",
+    end: "2026-11-21",
+    trades: 24,
+    expectancy_r: 0.502,
+    profit_factor: 2.15,
+    net_profit: 480.6,
+    max_drawdown: 0.024,
+  },
 };
 
 describe("StrategyCardPanel", () => {
@@ -60,6 +70,9 @@ describe("StrategyCardPanel", () => {
       "+0.159 R · PF 1.32 · DD -%8,10 · 215 işlem",
     );
     expect(screen.getByText("holdout reused across nightly runs")).toBeInTheDocument();
+    expect(screen.getByTestId("strategy-card-forward")).toHaveTextContent(
+      "+0.502 R · PF 2.15 · 24 işlem (2026-06→2026-11)",
+    );
   });
 
   it("reports a rejected calibration honestly", () => {

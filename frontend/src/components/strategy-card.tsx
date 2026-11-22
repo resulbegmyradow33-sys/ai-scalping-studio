@@ -7,7 +7,12 @@
  */
 
 import { formatPct, formatTs } from "@/lib/format";
-import type { CalibrateResponse, RuleMetrics, StrategyCard } from "@/lib/types";
+import type {
+  CalibrateResponse,
+  ForwardResult,
+  RuleMetrics,
+  StrategyCard,
+} from "@/lib/types";
 
 export interface StrategyCardPanelProps {
   card: StrategyCard | undefined;
@@ -17,6 +22,19 @@ export interface StrategyCardPanelProps {
   result?: CalibrateResponse | null;
   calibrateError?: string | null;
   onCalibrate?: () => void;
+}
+
+function forwardLine(result: ForwardResult | undefined): string | null {
+  if (result === undefined || !Number.isFinite(result.expectancy_r)) return null;
+  const r = result.expectancy_r ?? 0;
+  const pf = Number.isFinite(result.profit_factor)
+    ? (result.profit_factor ?? 0).toFixed(2)
+    : "—";
+  const months =
+    result.start && result.end
+      ? `${result.start.slice(0, 7)}→${result.end.slice(0, 7)}`
+      : "ileri";
+  return `${r >= 0 ? "+" : ""}${r.toFixed(3)} R · PF ${pf} · ${result.trades ?? 0} işlem (${months})`;
 }
 
 function holdoutLine(metrics: RuleMetrics | undefined): string {
@@ -104,6 +122,17 @@ export function StrategyCardPanel({
             <dt className="text-slate-500">Holdout</dt>
             <dd data-testid="strategy-card-holdout">{holdoutLine(card.holdout)}</dd>
           </div>
+          {forwardLine(card.forward) !== null && (
+            <div className="flex flex-wrap gap-1">
+              <dt className="text-slate-500">İleri test</dt>
+              <dd
+                data-testid="strategy-card-forward"
+                className={(card.forward?.expectancy_r ?? 0) >= 0 ? "text-profit" : "text-loss"}
+              >
+                {forwardLine(card.forward)}
+              </dd>
+            </div>
+          )}
           <div className="flex flex-wrap gap-1 text-slate-500">
             <dt>Kart</dt>
             <dd>{formatTs(card.created_at ?? null)}</dd>

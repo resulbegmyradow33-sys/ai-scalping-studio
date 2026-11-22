@@ -237,6 +237,18 @@ export interface RuleMetrics {
   total_r: number;
 }
 
+/** The latest weekly forward test, attached to the card by the backend. */
+export interface ForwardResult {
+  at?: string;
+  start?: string;
+  end?: string;
+  trades?: number;
+  expectancy_r?: number;
+  profit_factor?: number;
+  net_profit?: number;
+  max_drawdown?: number;
+}
+
 /** `GET /api/strategy/card`; optional fields are absent when inactive. */
 export interface StrategyCard {
   active: boolean;
@@ -250,6 +262,7 @@ export interface StrategyCard {
   created_at?: string;
   note?: string;
   version?: number;
+  forward?: ForwardResult;
 }
 
 export interface CalibrateRequest {
