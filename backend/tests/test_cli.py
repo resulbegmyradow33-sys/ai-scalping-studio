@@ -738,3 +738,19 @@ def test_cli_ml_evaluate_trades_a_saved_model(tmp_path):
     assert {"trades", "net_profit", "profit_factor"} <= set(payload["metrics"])
     assert payload["hold"]["trades"] == 0
     assert "x2" in payload["stress"]
+
+
+def test_cli_import_does_not_load_boosting_libraries():
+    code = (
+        "import sys\n"
+        "import scalping.cli\n"
+        "print('lightgbm' in sys.modules, 'xgboost' in sys.modules)\n"
+    )
+    import subprocess
+    import sys as _sys
+
+    completed = subprocess.run(
+        [_sys.executable, "-c", code], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "False False"

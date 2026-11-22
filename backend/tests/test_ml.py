@@ -116,6 +116,18 @@ def test_flat_rows_are_dropped_by_default() -> None:
     assert sorted(int(value) for value in result.model.classes_) == [-1, 1]
 
 
+@pytest.mark.parametrize("model", ["lightgbm", "xgboost"])
+def test_boosting_models_learn_the_signal(model: str) -> None:
+    result = train_classifier(
+        _learnable_frame(),
+        symbol="XAUUSD",
+        timeframe="M1",
+        spec=TrainSpec(model=model, horizon=1, purge_bars=1, embargo_bars=1),
+    )
+    assert result.validation["accuracy"] > 0.8
+    assert sorted(int(value) for value in result.model.classes_) == [-1, 1]
+
+
 def test_unknown_model_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown model"):
         build_model("magic")
