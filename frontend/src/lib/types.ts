@@ -153,7 +153,6 @@ export interface RunDetail {
 }
 
 // --- WebSocket ---------------------------------------------------------------
-
 export type SimState =
   | "idle"
   | "running"
@@ -215,3 +214,64 @@ export type SimMessage =
   | SimMessageOf<"episode_end", EpisodeEndPayload>;
 
 export type SimMessageType = SimMessage["type"];
+
+// --- strategy card -----------------------------------------------------------
+
+/** Parameters the promoted flow-momentum rule replays. */
+export interface RuleParams {
+  timeframe: string;
+  flow_quantile: number;
+  flow_window: number;
+  sl_atr_mult: number;
+  tp_atr_mult: number;
+  max_bars_in_trade: number;
+}
+
+/** One slice's realised behaviour: training or holdout. */
+export interface RuleMetrics {
+  trades: number;
+  expectancy_r: number;
+  profit_factor: number;
+  win_rate: number;
+  max_drawdown: number;
+  total_r: number;
+}
+
+/** `GET /api/strategy/card`; optional fields are absent when inactive. */
+export interface StrategyCard {
+  active: boolean;
+  strategy: string;
+  timeframe?: string;
+  symbol?: string;
+  params?: RuleParams;
+  train?: RuleMetrics;
+  holdout?: RuleMetrics;
+  digest?: string;
+  created_at?: string;
+  note?: string;
+  version?: number;
+}
+
+export interface CalibrateRequest {
+  symbol?: string;
+  timeframe?: "M1" | "M5" | "M15" | "H1" | "D1";
+  holdout_fraction?: number;
+  min_train_trades?: number;
+  min_holdout_trades?: number;
+  dry_run?: boolean;
+}
+
+/** `POST /api/strategy/calibrate`: the gate's verdict plus the evidence. */
+export interface CalibrateResponse {
+  promoted: boolean;
+  reason: string;
+  digest: string;
+  evaluated: number;
+  candidate: {
+    params: RuleParams;
+    train: RuleMetrics;
+    holdout: RuleMetrics;
+  };
+  incumbent: RuleMetrics | null;
+  card: StrategyCard;
+}

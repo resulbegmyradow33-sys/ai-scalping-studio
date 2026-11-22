@@ -47,7 +47,9 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
@@ -56,6 +58,10 @@ from scalping.config import Settings
 from scalping.data.store import ParquetStore
 from scalping.env.simulator import Simulator
 from scalping.features.build import FeatureFrame, build_features
+from scalping.strategy.card import PolicyCard, load_card
+from scalping.strategy.flow import flow_series, flow_thresholds
+from scalping.strategy.rule import FlowMomentumRule
+from scalping.strategy.signals import strategy_signals
 from scalping.types import Position, Side, Trade
 
 logger = logging.getLogger(__name__)
@@ -184,12 +190,23 @@ class SimulationRunner:
         settings: Settings,
         symbol: str = DEFAULT_SYMBOL,
         ring_size: int = RING_SIZE,
+        flow_root: str | Path | None = None,
+        card_path: str | Path | None = None,
     ) -> None:
         if ring_size <= 0:
             raise ValueError("ring_size must be positive")
         self._store = store
         self._settings = settings
         self._symbol = symbol
+        self._flow_root = Path(flow_root) if flow_root is not None else None
+        self._card_path = Path(card_path) if card_path is not None else None
+        # Reloaded on every start, so a nightly card lands without a restart.
+        self._card: PolicyCard | None = None
+        self._rule: FlowMomentumRule | None = None
+        self._strategy = STRATEGY
+        # The card carries its own stop/target/timeout; the simulator must use
+        # those, not the app-wide defaults.
+        self._run_settings = settings
         self._ring: deque[dict[str, Any]] = deque(maxlen=ring_size)
         self._lock = threading.RLock()
         self._seq = 0
@@ -215,6 +232,19 @@ class SimulationRunner:
     @property
     def symbol(self) -> str:
         return self._symbol
+
+    @property
+    def flow_root(self) -> Path | None:
+        return self._flow_root
+
+    @property
+    def card_path(self) -> Path | None:
+        return self._card_path
+
+    def card_params(self) -> Any:
+        """The active card's parameters, reloaded from disk, or ``None``."""
+        card = load_card(self._card_path)
+        return None if card is None else card.params
 
     @property
     def seq(self) -> int:
@@ -317,7 +347,67 @@ class SimulationRunner:
             return None
 
     # --- lifecycle -------------------------------------------------------
+    def strategy_card(self) -> dict[str, Any]:
+        """The active card, or ``{"active": False}`` when the legacy rule runs."""
+        card = load_card(self._card_path)
+        if card is None:
+            return {"active": False, "strategy": STRATEGY, "timeframe": TIMEFRAME}
+        return {"active": True, **card.to_dict()}
+
+    def _card_settings(self, card: PolicyCard) -> Settings:
+        params = card.params
+        return replace(
+            self._settings,
+            risk=replace(
+                self._settings.risk,
+                sl_atr_mult=params.sl_atr_mult,
+                tp_atr_mult=params.tp_atr_mult,
+                max_bars_in_trade=params.max_bars_in_trade,
+            ),
+        )
+
+    def _load_card_features(self, card: PolicyCard) -> FeatureFrame | None:
+        """Build the card's timeframe, flow gate and rule; ``None`` on no data."""
+        params = card.params
+        frame = self._store.read(self._symbol, params.timeframe)
+        if frame.is_empty():
+            logger.warning(
+                "strategy card wants %s %s but the store has no bars",
+                self._symbol,
+                params.timeframe,
+            )
+            return None
+        settings = self._card_settings(card)
+        features = build_features(frame, settings.costs)
+        if features.X.shape[0] < MIN_BARS:
+            logger.warning("strategy card frame has only %d usable rows", features.X.shape[0])
+            return None
+        if self._flow_root is None:
+            logger.warning("strategy card is active but no flow root is configured")
+            return None
+        flow = flow_series(self._flow_root, self._symbol, params.timeframe, frame)
+        threshold = flow_thresholds(flow, params.flow_window, params.flow_quantile)
+        signal = strategy_signals(frame)["sig_momentum"].to_numpy()
+        self._run_settings = settings
+        self._rule = FlowMomentumRule.build(frame, flow, threshold, signal)
+        return features
+
     def _load_features(self) -> FeatureFrame:
+        self._card = load_card(self._card_path)
+        if self._card is not None:
+            try:
+                features = self._load_card_features(self._card)
+            except (OSError, ValueError, KeyError) as exc:
+                logger.warning("strategy card could not be applied: %s", exc)
+                features = None
+            if features is not None:
+                self._strategy = self._card.strategy
+                return features
+        # No promoted card (or it could not be built): replay the original
+        # five-bar momentum rule on M1, which is what the v1 panel shipped.
+        self._rule = None
+        self._run_settings = self._settings
+        self._strategy = STRATEGY
         frame = self._store.read(self._symbol, TIMEFRAME)
         if frame.is_empty():
             raise NoDataError(
@@ -339,7 +429,9 @@ class SimulationRunner:
         if not speed >= 0.0:
             raise ValueError("speed must be non-negative")
         features = self._load_features()
-        sim = Simulator(features, self._settings, strategy=STRATEGY)
+        if self._rule is not None:
+            self._rule.reset()
+        sim = Simulator(features, self._run_settings, strategy=self._strategy)
         session_id = uuid.uuid4().hex[:8]
         with self._lock:
             self._features = features
@@ -396,7 +488,9 @@ class SimulationRunner:
         """Restart the episode from the beginning; the caller holds the lock."""
         features = self._features if self._features is not None else self._load_features()
         self._features = features
-        self._sim = Simulator(features, self._settings, strategy=STRATEGY)
+        if self._rule is not None:
+            self._rule.reset()
+        self._sim = Simulator(features, self._run_settings, strategy=self._strategy)
         self._side = None
         self._playing = False
         self._state = "idle"
@@ -485,11 +579,15 @@ class SimulationRunner:
         action = self._action(index, features)
         result = sim.step(action)
         info = result.info
+        blocked = info["blocked"]
+        rule_blocked = None
+        if blocked is None and self._rule is not None:
+            rule_blocked = self._rule.blocked_reason(index)
 
         self._emit("bar", _bar_payload(features, index))
         self._emit(
             "decision",
-            {"action": int(action), "strategy": sim.strategy, "blocked": info["blocked"]},
+            {"action": int(action), "strategy": sim.strategy, "blocked": blocked or rule_blocked},
         )
         position: Position | None = info["position"]
         opened: Position | None = info["opened"]
@@ -500,8 +598,8 @@ class SimulationRunner:
             self._emit("trade_open", _position_payload(opened))
         if trade is not None:
             self._emit("trade_close", _trade_payload(trade))
-        if info["blocked"]:
-            self._emit("risk_blocked", {"reason": info["blocked"]})
+        if blocked:
+            self._emit("risk_blocked", {"reason": blocked})
         self._emit("equity", {"equity": float(info["equity"]), "balance": float(sim.balance)})
         self._side = None if position is None else position.side
 
@@ -511,6 +609,8 @@ class SimulationRunner:
             self._emit("episode_end", {"reason": info["reason"] or "finished"})
 
     def _action(self, index: int, features: FeatureFrame) -> int:
+        if self._rule is not None:
+            return self._rule.act(index)
         if index < _MOMENTUM_BARS:
             return _HOLD
         close = float(features.ohlc[index, 3])

@@ -261,7 +261,10 @@ def _cmd_serve(args: argparse.Namespace) -> None:
     port = int(listener.getsockname()[1])
     try:
         config = uvicorn.Config(
-            create_app(data_root=Path(args.root)),
+            create_app(
+                data_root=Path(args.root),
+                flow_root=Path(args.flow_root) if args.flow_root else None,
+            ),
             host=args.host,
             port=port,
             log_config=_stderr_log_config(uvicorn.config.LOGGING_CONFIG),
@@ -316,6 +319,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
     serve.add_argument("--root", default=str(DEFAULT_ROOT))
+    serve.add_argument(
+        "--flow-root",
+        default=None,
+        help="tick-flow side store; enables the promoted flow-momentum card",
+    )
     serve.set_defaults(handler=_cmd_serve)
 
     return parser

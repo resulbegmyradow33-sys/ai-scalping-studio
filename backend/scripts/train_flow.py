@@ -18,7 +18,6 @@ import json
 import sys
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 
 from scalping.backtest.engine import run_backtest
@@ -28,35 +27,10 @@ from scalping.features.build import build_features
 from scalping.rl.policy import load_policy
 from scalping.rl.train import TrainConfig, train
 from scalping.strategy.bandit import LinUCB
+from scalping.strategy.flow import flow_series, flow_thresholds
 from scalping.strategy.labeling import CONTEXT_DIM, bandit_training_data, label_events
 
 _RULE = {"M1": "1m", "M5": "5m", "M15": "15m", "H1": "1h", "D1": "1d"}
-
-
-def _flow_series(flow_root: Path, symbol: str, rule: str, frame: pl.DataFrame) -> np.ndarray:
-    parts = sorted((flow_root / symbol / "M1").glob("*.parquet"))
-    if not parts:
-        raise SystemExit(f"no flow partitions under {flow_root / symbol / 'M1'}")
-    flow = pl.concat([pl.read_parquet(p) for p in parts]).unique("ts").sort("ts")
-    if rule != "1m":
-        flow = flow.group_by_dynamic("ts", every=rule, closed="left", label="left").agg(
-            pl.col("flow").mean()
-        )
-    flow = flow.with_columns(pl.col("ts").dt.cast_time_unit("us"))
-    joined = frame.select("ts").with_columns(pl.col("ts").dt.cast_time_unit("us")).join(
-        flow, on="ts", how="left"
-    )
-    return joined["flow"].to_numpy()
-
-
-def _thresholds(flow: np.ndarray, window: int, quantile: float) -> np.ndarray:
-    series = pl.Series("f", np.abs(flow))
-    thr = (
-        series.rolling_quantile(quantile, window_size=window, min_samples=min(60, window))
-        .shift(1)
-        .to_numpy()
-    )
-    return np.asarray(thr, dtype=np.float64)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -79,7 +53,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-dir", default="runs")
     args = parser.parse_args(argv)
 
-    rule = _RULE[args.tf]
     settings = Settings(
         contract=ContractSpec(),
         risk=RiskConfig(
@@ -96,8 +69,8 @@ def main(argv: list[str] | None = None) -> int:
     eval_frame = frame.filter(pl.col("ts") >= split)
     print(json.dumps({"tf": args.tf, "train": train_frame.height, "eval": eval_frame.height}))
 
-    flow_all = _flow_series(Path(args.flow_root), args.symbol, rule, frame)
-    thr_all = _thresholds(flow_all, args.flow_window, args.flow_quantile)
+    flow_all = flow_series(Path(args.flow_root), args.symbol, args.tf, frame)
+    thr_all = flow_thresholds(flow_all, args.flow_window, args.flow_quantile)
     train_flow, train_thr = flow_all[: train_frame.height], thr_all[: train_frame.height]
     eval_flow, eval_thr = flow_all[train_frame.height :], thr_all[train_frame.height :]
 

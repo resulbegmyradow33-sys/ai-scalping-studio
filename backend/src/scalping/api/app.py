@@ -56,6 +56,7 @@ def create_app(
     data_root: Path | None = None,
     settings_path: Path | None = None,
     runs_root: Path | None = None,
+    flow_root: Path | None = None,
 ) -> FastAPI:
     """Build an app whose store, settings and runner belong to this call only."""
     root = Path(data_root) if data_root is not None else DEFAULT_DATA_ROOT
@@ -73,7 +74,12 @@ def create_app(
     app.state.runs_root = runs
     app.state.settings = settings
     app.state.store = ParquetStore(root)
-    app.state.sim = SimulationRunner(app.state.store, settings)
+    app.state.sim = SimulationRunner(
+        app.state.store,
+        settings,
+        flow_root=flow_root,
+        card_path=runs / "strategy_card.json",
+    )
     # Training threads belong to this app: the runner map is per factory call
     # and the lifespan stops and joins them before the process exits.
     app.state.trains = TrainRunner(app.state.store, settings, runs)

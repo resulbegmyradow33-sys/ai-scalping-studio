@@ -18,6 +18,7 @@ __all__ = [
     "BacktestRequest",
     "BacktestResponse",
     "BanditWeight",
+    "CalibrateRequest",
     "ControlRequest",
     "DataStatusResponse",
     "DownloadRequest",
@@ -212,3 +213,14 @@ class EvaluateResponse(BaseModel):
     overfit_warning: bool
     stress: list[StressSummary]
     method: str = "walk_forward"
+
+
+class CalibrateRequest(BaseModel):
+    """Parameters for a nightly rule recalibration."""
+
+    symbol: str = Field(default="XAUUSD", min_length=1)
+    timeframe: Literal["M1", "M5", "M15", "H1", "D1"] = "H1"
+    holdout_fraction: float = Field(default=0.2, gt=0.0, lt=1.0)
+    min_train_trades: int = Field(default=100, ge=10)
+    min_holdout_trades: int = Field(default=30, ge=5)
+    dry_run: bool = False

@@ -1,4 +1,6 @@
 import type {
+  CalibrateRequest,
+  CalibrateResponse,
   DataStatus,
   DownloadRequest,
   DownloadResponse,
@@ -11,6 +13,7 @@ import type {
   SimMessage,
   SimStartRequest,
   StartResponse,
+  StrategyCard,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -20,6 +23,9 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 
 /** `/api/data/download` blocks on the provider, so it outlasts the default. */
 const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/** Recalibration labels years of bars; a 5-year H1 grid takes minutes. */
+const CALIBRATE_TIMEOUT_MS = 600_000;
 
 /**
  * A failed API call. `status` is the HTTP status, or `0` when the request never
@@ -146,6 +152,15 @@ export const api = {
 
   controlRun(id: string, action: RunControlAction): Promise<OkResponse> {
     return post<OkResponse>(`/api/runs/${encodeURIComponent(id)}/control`, { action });
+  },
+
+  getStrategyCard(): Promise<StrategyCard> {
+    return request<StrategyCard>("/api/strategy/card");
+  },
+
+  calibrateStrategy(body: CalibrateRequest = {}): Promise<CalibrateResponse> {
+    // The grid labels years of bars on the backend, so this outlasts the rest.
+    return post<CalibrateResponse>("/api/strategy/calibrate", body, CALIBRATE_TIMEOUT_MS);
   },
 };
 

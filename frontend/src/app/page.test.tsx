@@ -55,6 +55,17 @@ vi.mock("@/hooks/use-data-status", () => ({
 
 vi.mock("@/hooks/use-simulation", () => ({ useSimulation: () => state.simulation }));
 vi.mock("@/hooks/use-health", () => ({ useHealth: () => state.health }));
+vi.mock("@/hooks/use-strategy-card", () => ({
+  useStrategyCard: () => ({
+    card: { active: false, strategy: "momentum" },
+    error: undefined,
+    isLoading: false,
+    running: false,
+    result: null,
+    calibrateError: null,
+    recalibrate: vi.fn(),
+  }),
+}));
 
 const { default: SimulatorPage } = await import("./page");
 

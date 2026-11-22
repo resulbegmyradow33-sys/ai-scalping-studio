@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 from anyio import ClosedResourceError
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
@@ -25,6 +26,7 @@ from scalping.api.runner import (
 from scalping.api.schemas import (
     BacktestRequest,
     BacktestResponse,
+    CalibrateRequest,
     ControlRequest,
     DataStatusResponse,
     DownloadRequest,
@@ -51,6 +53,9 @@ from scalping.data.base import DataProvider
 from scalping.data.csv_provider import CsvProvider
 from scalping.data.dukascopy import DataUnavailable, DukascopyProvider
 from scalping.data.synthetic import SyntheticProvider
+from scalping.strategy.calibrate import calibrate, card_from_report
+from scalping.strategy.card import save_card
+from scalping.strategy.flow import flow_series
 
 __all__ = ["router"]
 
@@ -272,6 +277,63 @@ async def sim_control(body: ControlRequest, request: Request) -> OkResponse:
     except RunnerError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return OkResponse(ok=ok)
+
+
+@router.get("/api/strategy/card")
+def strategy_card(request: Request) -> dict[str, Any]:
+    """The promoted rule the panel replays, or ``active: false``."""
+    return _runner(request).strategy_card()
+
+
+@router.post("/api/strategy/calibrate")
+async def strategy_calibrate(body: CalibrateRequest, request: Request) -> dict[str, Any]:
+    """Re-select the rule on the training slice and gate it on the holdout.
+
+    Heavy CPU work (labels over years of bars), so it runs in a worker thread.
+    A card is written only when the holdout gate passes and ``dry_run`` is
+    false; the response always carries the report so a rejected calibration is
+    inspectable instead of silent.
+    """
+    runner = _runner(request)
+    flow_root = runner.flow_root
+    if flow_root is None:
+        raise HTTPException(status_code=409, detail="no flow store configured")
+    card_path = runner.card_path
+    if card_path is None:
+        raise HTTPException(status_code=409, detail="no strategy card path configured")
+
+    def work() -> dict[str, Any]:
+        frame = request.app.state.store.read(body.symbol, body.timeframe)
+        if frame.is_empty():
+            raise ValueError(f"no {body.symbol} {body.timeframe} bars in the store")
+        flow = flow_series(flow_root, body.symbol, body.timeframe, frame)
+        incumbent = runner.card_params()
+        report = calibrate(
+            frame,
+            flow,
+            symbol=body.symbol,
+            timeframe=body.timeframe,
+            base=request.app.state.settings,
+            holdout_fraction=body.holdout_fraction,
+            min_train_trades=body.min_train_trades,
+            min_holdout_trades=body.min_holdout_trades,
+            incumbent=incumbent,
+        )
+        payload = report.to_dict()
+        if report.promoted and not body.dry_run:
+            card = card_from_report(
+                report,
+                symbol=body.symbol,
+                note="holdout reused across nightly runs; treat later promotions as weaker evidence",
+            )
+            save_card(card_path, card)
+        payload["card"] = runner.strategy_card()
+        return payload
+
+    try:
+        return await asyncio.to_thread(work)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.websocket("/ws/sim")

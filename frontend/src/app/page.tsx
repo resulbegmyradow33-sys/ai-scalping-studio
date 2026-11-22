@@ -14,8 +14,10 @@ import { EquitySparkline } from "@/components/equity-sparkline";
 import { PositionCard } from "@/components/position-card";
 import { SimControls } from "@/components/sim-controls";
 import { StatCard } from "@/components/stat-card";
+import { StrategyCardPanel } from "@/components/strategy-card";
 import { useHealth } from "@/hooks/use-health";
 import { useSimulation } from "@/hooks/use-simulation";
+import { useStrategyCard } from "@/hooks/use-strategy-card";
 import { API_BASE } from "@/lib/api";
 import type { Timeframe } from "@/lib/chart-data";
 import { formatMoney, formatNumber, formatPct } from "@/lib/format";
@@ -60,6 +62,7 @@ function describeStartError(error: string | null, status: number | null): string
 export default function SimulatorPage() {
   const sim = useSimulation();
   const health = useHealth();
+  const strategy = useStrategyCard();
   const [timeframe, setTimeframe] = useState<Timeframe>("M1");
 
   const lastEquity = sim.equity.at(-1) ?? null;
@@ -126,6 +129,16 @@ export default function SimulatorPage() {
           {startError}
         </div>
       )}
+
+      <StrategyCardPanel
+        card={strategy.card}
+        loading={strategy.isLoading}
+        error={strategy.error instanceof Error ? strategy.error : null}
+        running={strategy.running}
+        result={strategy.result}
+        calibrateError={strategy.calibrateError}
+        onCalibrate={() => void strategy.recalibrate()}
+      />
 
       <SimControls
         status={sim.status}
