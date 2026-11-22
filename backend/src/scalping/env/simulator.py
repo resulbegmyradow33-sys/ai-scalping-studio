@@ -92,6 +92,21 @@ _DD_LIMIT: Final[float] = 0.03
 #: ``_RISK_BONUS`` is a one-time entry credit, never a per-bar payment.
 _DD_PENALTY: Final[float] = 50.0
 _OPEN_PENALTY: Final[float] = 0.05
+
+#: Flow observation: signed imbalance, its excess over the gate threshold, and
+#: the 5-bar change.
+_FLOW_CONTEXT: Final[int] = 3
+
+
+def _flow_features(flow: np.ndarray, threshold: np.ndarray) -> np.ndarray:
+    """The three causal flow values appended to the observation."""
+    flow64 = np.asarray(flow, dtype=np.float64)
+    thr = np.asarray(threshold, dtype=np.float64)
+    change = flow64 - np.concatenate(([flow64[0]] * 5, flow64[:-5]))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        excess = np.where(thr > 0, (np.abs(flow64) - thr) / thr, 0.0)
+    out = np.column_stack((flow64, excess, change)).astype(np.float32)
+    return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
 _RISK_BONUS: Final[float] = 0.02
 _REWARD_CLIP: Final[float] = 5.0
 
@@ -166,6 +181,7 @@ class Simulator:
         window: int = WINDOW,
         flow: np.ndarray | None = None,
         flow_thr: np.ndarray | None = None,
+        flow_obs: bool = False,
     ) -> None:
         self.features = features
         self.settings = settings
@@ -223,7 +239,14 @@ class Simulator:
             raise ValueError("flow and flow_thr must be provided together")
         self._flow = flow_arr
         self._flow_thr = thr_arr
-        self.obs_dim = self.window * self._n_features + POSITION_FEATURES
+        self._flow_obs: np.ndarray | None = None
+        if flow_arr is not None and thr_arr is not None and flow_obs:
+            self._flow_obs = _flow_features(flow_arr, thr_arr)
+        self.obs_dim = (
+            self.window * self._n_features
+            + POSITION_FEATURES
+            + (0 if self._flow_obs is None else _FLOW_CONTEXT)
+        )
         if self._strategy_selector is not None:
             self.obs_dim += _STRATEGY_CONTEXT
         self._last_index = (len(features.X) if end is None else min(int(end), len(features.X))) - 1
@@ -595,13 +618,16 @@ class Simulator:
                 self._risk_used(position, account.equity),
             )
         position_features = np.asarray(extras, dtype=np.float32)
-        if self._strategy_selector is None:
-            return np.concatenate((flat, position_features))
-        context = np.zeros(_STRATEGY_CONTEXT, dtype=np.float32)
-        if self._arm >= 0:
-            context[self._arm] = 1.0
-            context[-1] = self._arm_strength
-        return np.concatenate((flat, position_features, context))
+        parts = [flat, position_features]
+        if self._strategy_selector is not None:
+            context = np.zeros(_STRATEGY_CONTEXT, dtype=np.float32)
+            if self._arm >= 0:
+                context[self._arm] = 1.0
+                context[-1] = self._arm_strength
+            parts.append(context)
+        if self._flow_obs is not None:
+            parts.append(self._flow_obs[self._i].astype(np.float32, copy=False))
+        return np.concatenate(parts)
 
     @staticmethod
     def _day_pnl_pct(account: AccountState) -> float:
