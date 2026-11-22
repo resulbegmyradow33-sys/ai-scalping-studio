@@ -166,6 +166,7 @@ async def train_start(body: TrainRequest, request: Request) -> TrainResponse:
             symbol=body.symbol,
             use_strategy=body.use_strategy,
             entry_penalty=body.entry_penalty,
+            gate_signals=body.gate_signals,
             train_end=body.train_end,
         )
     except TrainError as exc:

@@ -287,6 +287,7 @@ class TrainRunner:
         symbol: str,
         use_strategy: bool = True,
         entry_penalty: float = 0.05,
+        gate_signals: bool = True,
         train_end: datetime | None = None,
     ) -> str:
         """Prepare a run, reserve its id and start the worker thread.
@@ -350,6 +351,7 @@ class TrainRunner:
             n_envs=n_envs,
             seed=seed,
             entry_penalty=entry_penalty,
+            gate_signals=gate_signals,
         )
         split = (
             {"train_end": train_end_iso, "eval_start": eval_start}

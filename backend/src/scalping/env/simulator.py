@@ -162,6 +162,7 @@ class Simulator:
         random_start: bool = False,
         seed: int = 0,
         entry_penalty: float | None = None,
+        gate_signals: bool = False,
     ) -> None:
         self.features = features
         self.settings = settings
@@ -210,14 +211,21 @@ class Simulator:
         # the per-step labelling cost.
         self._strategy_context: np.ndarray | None = None
         self._strategy_strengths: np.ndarray | None = None
+        self._strategy_signals: np.ndarray | None = None
+        self.gate_signals = bool(gate_signals)
         if strategy_selector is not None:
             # Local import: labeling imports the env package (broker, risk), so a
             # module-level import here would break `import scalping.strategy.labeling`
             # while ``scalping.env`` is still initialising this module.
-            from scalping.strategy.labeling import context_matrix, strength_matrix
+            from scalping.strategy.labeling import (
+                context_matrix,
+                signal_matrix,
+                strength_matrix,
+            )
 
             self._strategy_context = context_matrix(features, labels=labels)
             self._strategy_strengths = strength_matrix(features)
+            self._strategy_signals = signal_matrix(features)
 
         # Episode state, fully established by reset().
         self.balance = self._initial
@@ -420,6 +428,24 @@ class Simulator:
 
     # --- actions -----------------------------------------------------------
 
+    def _signal_for_arm(self) -> int:
+        """The selected arm's signal on the current bar, 0 when unknown."""
+        if self._strategy_signals is None or self._arm < 0:
+            return 0
+        return int(self._strategy_signals[self._i, int(self._arm)])
+
+    def _gate_blocks(self, action: int) -> bool:
+        """True when the strategy gate forbids this entry."""
+        if not self.gate_signals or self._signals_unknown():
+            return False
+        signal = self._signal_for_arm()
+        if signal == 0:
+            return True
+        return (action == _BUY and signal < 0) or (action == _SELL and signal > 0)
+
+    def _signals_unknown(self) -> bool:
+        return self._strategy_signals is None or self._arm < 0
+
     def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, Position | None, str | None]:
         """Execute ``action`` at ``bar``; return ``(trade, opened, blocked)``.
 
@@ -438,6 +464,8 @@ class Simulator:
                 blocked = reason
             elif self.broker.position is not None:  # only reachable with max_positions > 1
                 blocked = "position_open"
+            elif self._gate_blocks(action):
+                blocked = "no_signal" if self._signal_for_arm() == 0 else "signal_conflict"
             else:
                 atr = self._atr(self._i)
                 if atr <= 0:

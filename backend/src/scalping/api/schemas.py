@@ -108,6 +108,7 @@ class TrainRequest(BaseModel):
     symbol: str = Field(min_length=1)
     use_strategy: bool = True
     entry_penalty: float = Field(default=0.05, ge=0.0, le=1.0)
+    gate_signals: bool = True
     train_end: datetime | None = None
 
 

@@ -109,6 +109,7 @@ class TrainConfig:
     checkpoint_every: int = 10_000
     random_start: bool = True
     entry_penalty: float = 0.05
+    gate_signals: bool = True
     data_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -245,6 +246,7 @@ def _make_vec_env(
     gamma: float,
     random_start: bool,
     entry_penalty: float,
+    gate_signals: bool,
 ) -> tuple[VecNormalize, list[int]]:
     """Build ``n_envs`` normalised envs on distinct (or random) start bars."""
 
@@ -259,6 +261,7 @@ def _make_vec_env(
                 random_start=random_start,
                 seed=seed + index,
                 entry_penalty=entry_penalty,
+                gate_signals=gate_signals,
             )
 
         return make
@@ -413,6 +416,7 @@ def train(
         config.gamma,
         config.random_start,
         config.entry_penalty,
+        config.gate_signals,
     )
     model: PPO | None = None
     final_status: str | None = None

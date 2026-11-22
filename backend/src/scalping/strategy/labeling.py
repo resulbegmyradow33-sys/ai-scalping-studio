@@ -552,6 +552,31 @@ def strength_matrix(features: FeatureFrame) -> np.ndarray:
     return matrix
 
 
+def signal_matrix(features: FeatureFrame) -> np.ndarray:
+    """The arms' ``(T, len(ALL_STRATEGIES))`` int8 signal, one row per feature row.
+
+    Column ``k`` is ``sig_<ALL_STRATEGIES[k]>`` in the frozen arm order. The
+    environment uses it as an entry gate: a ``Buy``/``Sell`` is only allowed
+    when the selected arm fired in that direction on the decision bar. Rows are
+    aligned with ``features.ts`` exactly like :func:`strength_matrix`.
+    """
+    height = int(features.X.shape[0])
+    if height == 0:
+        return np.zeros((0, len(ALL_STRATEGIES)), dtype=np.int8)
+    signals = strategy_signals(_bars_frame(features))
+    stamps = signals["ts"].to_numpy()
+    if stamps.shape != (height,) or not np.array_equal(
+        stamps, features.ts.astype("datetime64[us]")
+    ):
+        raise ValueError("signal rows are not aligned with the feature frame")
+    matrix = np.column_stack(
+        [signals[f"sig_{strategy.value}"].to_numpy().astype(np.int8, copy=True) for strategy in ALL_STRATEGIES]
+    )
+    if matrix.shape != (height, len(ALL_STRATEGIES)):  # pragma: no cover - guard only
+        raise RuntimeError(f"signal matrix shape drifted: {matrix.shape}")
+    return matrix
+
+
 def context_matrix(features: FeatureFrame, labels: pl.DataFrame | None = None) -> np.ndarray:
     """The bandit's ``(T, CONTEXT_DIM)`` context, one row per feature row.
 

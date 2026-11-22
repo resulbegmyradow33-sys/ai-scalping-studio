@@ -208,3 +208,78 @@ def test_strength_matrix_rejects_a_misaligned_frame():
     )
     with pytest.raises(ValueError, match="not aligned"):
         strength_matrix(shuffled)
+
+
+def _signal_bar(df, name: str = "sig_momentum", value: int = 1) -> tuple[object, int]:
+    """Return features and the first usable bar whose momentum signal equals ``value``."""
+    from scalping.features.build import build_features
+    from scalping.strategy.signals import strategy_signals
+
+    signals = strategy_signals(df)
+    column = signals[name].to_numpy()
+    features = build_features(df)
+    first = features.valid_from + 60 - 1
+    for index in range(first, len(column) - 2):
+        if int(column[index]) == value:
+            return features, index
+    raise AssertionError(f"no bar with {name} == {value}")
+
+
+def test_gate_blocks_a_buy_when_the_arm_is_silent() -> None:
+    from scalping.config import Settings
+    from scalping.data.synthetic import SyntheticProvider
+    from scalping.env.trading_env import TradingEnv
+
+    df = SyntheticProvider(seed=5).fetch(
+        "XAUUSD",
+        datetime(2026, 1, 5, tzinfo=UTC),
+        datetime(2026, 1, 7, tzinfo=UTC),
+    )
+    features, index = _signal_bar(df, value=0)
+    env = TradingEnv(
+        features, Settings(), strategy_selector=lambda ctx: 0, gate_signals=True, start=index
+    )
+    env.reset(seed=1)
+    _, _, _, _, info = env.step(1)
+    assert info["position"] is None
+    assert info["blocked"] == "no_signal"
+
+
+def test_gate_allows_a_buy_when_the_arm_fires_long() -> None:
+    from scalping.config import Settings
+    from scalping.data.synthetic import SyntheticProvider
+    from scalping.env.trading_env import TradingEnv
+
+    df = SyntheticProvider(seed=5).fetch(
+        "XAUUSD",
+        datetime(2026, 1, 5, tzinfo=UTC),
+        datetime(2026, 1, 7, tzinfo=UTC),
+    )
+    features, index = _signal_bar(df, value=1)
+    env = TradingEnv(
+        features, Settings(), strategy_selector=lambda ctx: 0, gate_signals=True, start=index
+    )
+    env.reset(seed=1)
+    _, _, _, _, info = env.step(1)
+    assert info["position"] is not None
+    assert info["blocked"] is None
+
+
+def test_gate_rejects_a_sell_against_a_long_signal() -> None:
+    from scalping.config import Settings
+    from scalping.data.synthetic import SyntheticProvider
+    from scalping.env.trading_env import TradingEnv
+
+    df = SyntheticProvider(seed=5).fetch(
+        "XAUUSD",
+        datetime(2026, 1, 5, tzinfo=UTC),
+        datetime(2026, 1, 7, tzinfo=UTC),
+    )
+    features, index = _signal_bar(df, value=1)
+    env = TradingEnv(
+        features, Settings(), strategy_selector=lambda ctx: 0, gate_signals=True, start=index
+    )
+    env.reset(seed=1)
+    _, _, _, _, info = env.step(2)
+    assert info["position"] is None
+    assert info["blocked"] == "signal_conflict"
