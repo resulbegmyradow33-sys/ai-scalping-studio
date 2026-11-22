@@ -80,6 +80,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Direction task (3-class, configurable horizon).
 - [x] Train/validation split, purge/embargo and dataset id.
 - [x] Brier, log loss, balanced accuracy, per-class metrics, confusion, baseline.
+- [x] Flat-zero rows dropped by default with an audited count; `--include-flat` opt-in.
 - [ ] Return/volatility/regime/trade-outcome tasks.
 - [ ] Purged time-series CV with embargo.
 - [ ] Reliability curve and calibration thresholds.

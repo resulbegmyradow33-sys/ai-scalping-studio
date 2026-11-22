@@ -55,6 +55,7 @@ class TrainSpec:
     embargo_bars: int = 5
     seed: int = 0
     evaluate_test: bool = False
+    include_flat: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,19 +117,23 @@ def _metrics(
     }
 
 
-def _baseline(y_train: np.ndarray, y_validation: np.ndarray) -> dict[str, Any]:
+def _baseline(
+    y_train: np.ndarray,
+    y_validation: np.ndarray,
+    classes: tuple[int, ...],
+) -> dict[str, Any]:
     labels, counts = np.unique(y_train, return_counts=True)
     majority = int(labels[int(np.argmax(counts))])
-    prior = np.zeros(len(CLASSES), dtype=np.float64)
-    for index, label in enumerate(CLASSES):
+    prior = np.zeros(len(classes), dtype=np.float64)
+    for index, label in enumerate(classes):
         prior[index] = float(np.sum(y_train == label)) / max(1, y_train.size)
     prior = np.clip(prior, 1e-9, None)
     prior /= prior.sum()
     return {
         "majority_class": majority,
         "accuracy": float(np.mean(y_validation == majority)),
-        "log_loss": float(log_loss(y_validation, np.tile(prior, (y_validation.size, 1)), labels=list(CLASSES))),
-        "class_prior": {str(label): float(prior[index]) for index, label in enumerate(CLASSES)},
+        "log_loss": float(log_loss(y_validation, np.tile(prior, (y_validation.size, 1)), labels=list(classes))),
+        "class_prior": {str(label): float(prior[index]) for index, label in enumerate(classes)},
     }
 
 
@@ -151,17 +156,24 @@ def train_classifier(
         purge_bars=max(spec.purge_bars, spec.horizon),
         embargo_bars=spec.embargo_bars,
     )
-    train_mask = bundle.split == 0
-    validation_mask = bundle.split == 1
-    test_mask = bundle.split == 2
+    # A 3-class target on H1 is effectively binary: an exact flat close is one
+    # row in 4k. Keeping that class makes accuracy look better while the model
+    # never predicts it. Drop flat rows by default and say how many were
+    # dropped, instead of hiding the imbalance behind a misleading score.
+    flat = bundle.y_direction == 0
+    keep = np.ones(bundle.split.shape[0], dtype=bool) if spec.include_flat else ~flat
+    train_mask = (bundle.split == 0) & keep
+    validation_mask = (bundle.split == 1) & keep
+    test_mask = (bundle.split == 2) & keep
     if int(train_mask.sum()) < 20:
         raise ValueError("not enough training rows; adjust fractions or horizon")
     if int(validation_mask.sum()) < 5:
         raise ValueError("not enough validation rows; adjust fractions or embargo")
 
+    y_train = bundle.y_direction[train_mask]
+    classes = tuple(int(value) for value in np.unique(y_train))
     model = build_model(spec.model, seed=spec.seed)
-    model.fit(bundle.X[train_mask], bundle.y_direction[train_mask])
-    classes = tuple(int(value) for value in getattr(model, "classes_", CLASSES))
+    model.fit(bundle.X[train_mask], y_train)
     probabilities = model.predict_proba(bundle.X[validation_mask])
     validation = _metrics(bundle.y_direction[validation_mask], probabilities, classes)
     test = None
@@ -178,12 +190,13 @@ def train_classifier(
         columns=bundle.manifest.columns,
         validation=validation,
         test=test,
-        baseline=_baseline(bundle.y_direction[train_mask], bundle.y_direction[validation_mask]),
+        baseline=_baseline(y_train, bundle.y_direction[validation_mask], classes),
         split_counts={
-            "train": bundle.rows("train"),
-            "validation": bundle.rows("validation"),
-            "test": bundle.rows("test"),
+            "train": int(train_mask.sum()),
+            "validation": int(validation_mask.sum()),
+            "test": int(test_mask.sum()),
             "purged": int((bundle.split == -1).sum()),
+            "flat_dropped": int(flat.sum()),
         },
     )
 

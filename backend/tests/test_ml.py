@@ -74,6 +74,40 @@ def test_model_survives_a_save_and_load(tmp_path) -> None:
     assert np.allclose(a, b)
 
 
+def test_flat_rows_are_dropped_by_default() -> None:
+    n = 700
+    signal = np.where(np.arange(n) % 2 == 0, 1.0, -1.0)
+    close = np.empty(n, dtype=np.float64)
+    close[0] = 100.0
+    for index in range(1, n):
+        if index % 10 == 0:
+            close[index] = close[index - 1]  # exact flat return on this bar
+        else:
+            close[index] = close[index - 1] * (1.0 + 0.002 * signal[index - 1])
+    X = np.zeros((n, len(FEATURE_COLUMNS)), dtype=np.float32)
+    X[:, 0] = signal
+    ts = np.array(
+        [np.datetime64("2026-01-05T00:00", "us") + np.timedelta64(i, "m") for i in range(n)]
+    )
+    frame = FeatureFrame(
+        X=X,
+        ts=ts,
+        ohlc=np.column_stack((close, close + 0.01, close - 0.01, close)),
+        spread=np.full(n, 0.2),
+        atr=np.full(n, 0.5),
+        valid_from=10,
+        columns=list(FEATURE_COLUMNS),
+    )
+    result = train_classifier(
+        frame,
+        symbol="XAUUSD",
+        timeframe="M1",
+        spec=TrainSpec(model="logistic", horizon=1, purge_bars=1, embargo_bars=1),
+    )
+    assert result.split_counts["flat_dropped"] > 0
+    assert sorted(int(value) for value in result.model.classes_) == [-1, 1]
+
+
 def test_unknown_model_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown model"):
         build_model("magic")

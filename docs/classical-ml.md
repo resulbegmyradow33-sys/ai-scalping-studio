@@ -28,8 +28,14 @@ other experiment:
 - the dataset id, feature columns and spec are stored with the model;
 - the test split is untouched unless `evaluate_test=True` is explicit.
 
-The first task is 3-class direction over `horizon` bars: `{-1, 0, +1}`. Labels
-use future closes only as targets; inputs come from the causal feature matrix.
+The first task is binary direction over `horizon` bars: `{-1, +1}`. Exact-zero
+returns are dropped by default because on H1 they are about one row in four
+thousand; keeping that third class inflates accuracy while the model never
+predicts it. The number of dropped rows is recorded as `flat_dropped`.
+`--include-flat` restores the old behaviour for comparison.
+
+Labels use future closes only as targets; inputs come from the causal feature
+matrix.
 
 ## Metrics
 
@@ -78,12 +84,33 @@ runs/ml/ml-<model>-<dataset-suffix>/
 `load_model(path)` returns `(model, columns)`. A future SQLite registry
 (Phase 10) will index these directories, add champion/rollback and drift.
 
+## First real run (not promoted)
+
+XAUUSD H1, horizon 5, all 59 features, 20,654 train / 4,427 validation /
+4,408 test rows, purge 5 + embargo 5, flat rows dropped:
+
+| Model | Val accuracy | Val balanced | Val log loss | Test accuracy | Test log loss |
+|---|---|---|---|---|---|
+| Majority/prior baseline | 54.3% | — | **0.6919** | — | — |
+| Logistic | 51.6% | 51.8% | 0.6921 | 49.3% | 0.6961 |
+| Random forest | 50.5% | 50.8% | 0.6937 | 50.6% | 0.6985 |
+| HistGradientBoosting | 51.5%* | 51.5%* | 0.6972* | — | — |
+
+\* hist-graded numbers are from the earlier 3-class run; the binary rerun is
+pending. No model beats the prior baseline; none is promoted. This is a useful
+negative result: the 59 causal features do not predict 5-bar direction on H1
+with these baselines. The next attempt must add evidence (flow/macro/regime
+interactions, different horizon, or a different task) rather than blindly adding
+capacity.
+
 ## What this proves
 
 - The pipeline can train a genuine classical classifier on leakage-safe,
   time-ordered data.
 - Validation metrics are reproducible and compared with a simple baseline.
 - Artifacts are versioned by dataset id and spec.
+- On the first real H1 run the baselines lose to the prior; the system reports
+  that instead of hiding it.
 
 ## What it does not prove
 

@@ -320,6 +320,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         embargo_bars=args.embargo,
         seed=args.seed,
         evaluate_test=args.evaluate_test,
+        include_flat=args.include_flat,
     )
     result = train_classifier(
         features,
@@ -518,6 +519,11 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_train.add_argument("--embargo", type=int, default=5)
     ml_train.add_argument("--seed", type=int, default=0)
     ml_train.add_argument("--evaluate-test", action="store_true")
+    ml_train.add_argument(
+        "--include-flat",
+        action="store_true",
+        help="keep exact-zero returns as a third class (usually harmful)",
+    )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
     ml_train.set_defaults(handler=_cmd_ml_train)
