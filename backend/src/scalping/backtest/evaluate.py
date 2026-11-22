@@ -268,6 +268,7 @@ def evaluate_walkforward(
             max_steps=max(len(train_features.ts) + 1, 1),
             strategy_selector=strategy_selector,
             labels=train_labels,
+            window=window,
         )
         test_result = run_backtest(
             policy,
@@ -276,6 +277,7 @@ def evaluate_walkforward(
             max_steps=max(len(test_features.ts) + 1, 1),
             strategy_selector=strategy_selector,
             labels=test_labels,
+            window=window,
         )
         fold_results.append(
             FoldResult(
