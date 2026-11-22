@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--flow-root", default="../data-forward-flow")
     parser.add_argument("--history", default="runs/forward_history.jsonl")
     parser.add_argument("--weeks", default="22-50")
+    parser.add_argument("--force", action="store_true", help="rerun even without new weeks")
     parser.add_argument("--start", default="2026-06-01")
     parser.add_argument("--end", default="2026-11-21")
     args = parser.parse_args(argv)
@@ -97,6 +98,16 @@ def main(argv: list[str] | None = None) -> int:
         ),
         flush=True,
     )
+
+    new_files = sum(1 for _, status in downloads if status == "ok")
+    if new_files == 0 and not args.force and Path(args.history).exists():
+        print(
+            json.dumps(
+                {"event": "skipped", "reason": "no new weekly file", "history": args.history}
+            ),
+            flush=True,
+        )
+        return 0
 
     _run(
         "scripts.ingest_2026_ticks",

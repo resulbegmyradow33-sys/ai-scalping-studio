@@ -55,6 +55,18 @@ Tickmill akışını taşıyor, Dukascopy akışı ise ~10 kat küçük. Bu yüz
 PF 3.03, 20 işlem. İki sonucu da raporluyorum; Temmuz'u seçip Haziran'ı
 gizlemek olmaz. Asıl ileri test Haziran başlangıcıdır.
 
+## Ablasyon: kapı gerçekten iş yapıyor
+
+Aynı ileri dilimde (2026-06→11), aynı risk profiliyle:
+
+| Kural | İşlem | R/işlem | PF | Net |
+|---|---|---|---|---|
+| **Momentum + akış kapısı** | **24** | **+0.502** | **2.15** | **+$481** |
+| Sadece momentum (kapı yok) | 58 | −0.128 | 0.79 | −$327 |
+
+Kapıyı kaldırınca işlem sayısı 2,4 katına çıkıyor ve kenar negatife dönüyor.
+Yani ileri testte kazandıran şey momentum değil, **imzalı akış kapısı**.
+
 ## İstatistiksel dürüstlük
 
 24 işlem az. R serisinin ortalaması +0.502, standart sapması 1.34:
@@ -86,7 +98,8 @@ make forward-update
 ```
 
 Yeni haftaları indirir, cache'i atlar, store'u yeniden kurar, testi koşar ve
-sonucu `backend/runs/forward_history.jsonl`'e ekler.
+sonucu `backend/runs/forward_history.jsonl`'e ekler. Yeni hafta yoksa hiçbir
+şey yapmaz; `--force` ile zorlanabilir.
 
 ## Sonraki adım
 
