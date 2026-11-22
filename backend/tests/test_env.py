@@ -701,3 +701,20 @@ def test_deterministic_start_remains_the_default():
     sim.reset(0)
     assert sim.bar_index == frame.valid_from + WINDOW - 1
     assert sim.episode_start == sim.bar_index
+
+
+def test_observation_window_is_configurable() -> None:
+    from datetime import UTC, datetime
+
+    from scalping.data.synthetic import SyntheticProvider
+    from scalping.env.trading_env import TradingEnv
+    from scalping.features.build import build_features
+
+    df = SyntheticProvider(seed=5).fetch(
+        "XAUUSD", datetime(2026, 1, 5, tzinfo=UTC), datetime(2026, 1, 6, tzinfo=UTC)
+    )
+    features = build_features(df)
+    env = TradingEnv(features, Settings(), window=20)
+    assert env.obs_dim == 20 * len(features.columns) + 5
+    obs, _ = env.reset(seed=1)
+    assert obs.shape == (env.obs_dim,)

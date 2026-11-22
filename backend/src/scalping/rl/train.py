@@ -110,6 +110,7 @@ class TrainConfig:
     random_start: bool = True
     entry_penalty: float = 0.05
     gate_signals: bool = True
+    window: int = WINDOW
     data_hash: str = ""
 
     def __post_init__(self) -> None:
@@ -161,7 +162,7 @@ def data_hash_for(features: FeatureFrame) -> str:
     return digest.hexdigest()
 
 
-def env_starts_for(features: FeatureFrame, n_envs: int) -> list[int]:
+def env_starts_for(features: FeatureFrame, n_envs: int, window: int = WINDOW) -> list[int]:
     """Return one disjoint start bar per env over the usable part of the frame.
 
     The first start is the earliest decision bar the simulator accepts; each
@@ -170,7 +171,7 @@ def env_starts_for(features: FeatureFrame, n_envs: int) -> list[int]:
     """
     if n_envs < 1:
         raise ValueError(f"n_envs must be >= 1, got {n_envs}")
-    first = int(features.valid_from) + WINDOW - 1
+    first = int(features.valid_from) + window - 1
     usable = len(features.X) - first
     if usable <= 0:
         raise ValueError("no usable bars after the warm-up window")
@@ -247,6 +248,7 @@ def _make_vec_env(
     random_start: bool,
     entry_penalty: float,
     gate_signals: bool,
+    window: int,
 ) -> tuple[VecNormalize, list[int]]:
     """Build ``n_envs`` normalised envs on distinct (or random) start bars."""
 
@@ -262,11 +264,12 @@ def _make_vec_env(
                 seed=seed + index,
                 entry_penalty=entry_penalty,
                 gate_signals=gate_signals,
+                window=window,
             )
 
         return make
 
-    starts = env_starts_for(features, n_envs)
+    starts = env_starts_for(features, n_envs, window)
     inner = DummyVecEnv([factory(index) for index in range(n_envs)])
     inner.seed(seed)
     normalized = VecNormalize(
@@ -417,6 +420,7 @@ def train(
         config.random_start,
         config.entry_penalty,
         config.gate_signals,
+        config.window,
     )
     model: PPO | None = None
     final_status: str | None = None

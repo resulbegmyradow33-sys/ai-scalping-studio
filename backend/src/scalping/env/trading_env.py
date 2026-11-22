@@ -61,6 +61,7 @@ class TradingEnv(gym.Env):
         seed: int = 0,
         entry_penalty: float | None = None,
         gate_signals: bool = False,
+        window: int = 60,
     ) -> None:
         super().__init__()
         self.sim = Simulator(
@@ -73,6 +74,7 @@ class TradingEnv(gym.Env):
             seed=seed,
             entry_penalty=entry_penalty,
             gate_signals=gate_signals,
+            window=window,
         )
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)

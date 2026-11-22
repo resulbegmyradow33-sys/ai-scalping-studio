@@ -163,6 +163,7 @@ class Simulator:
         seed: int = 0,
         entry_penalty: float | None = None,
         gate_signals: bool = False,
+        window: int = WINDOW,
     ) -> None:
         self.features = features
         self.settings = settings
@@ -200,11 +201,16 @@ class Simulator:
         self._arm_strength = 0.0
         self._initial = float(settings.contract.initial_balance)
         self._n_features = int(features.X.shape[1])
-        self.obs_dim = WINDOW * self._n_features + POSITION_FEATURES
+        if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+            raise ValueError(f"window must be a positive int, got {window!r}")
+        self.window = int(window)
+        self.obs_dim = self.window * self._n_features + POSITION_FEATURES
         if self._strategy_selector is not None:
             self.obs_dim += _STRATEGY_CONTEXT
         self._last_index = (len(features.X) if end is None else min(int(end), len(features.X))) - 1
-        self._first_index = max(int(start), features.valid_from + WINDOW - 1, WINDOW - 1)
+        self._first_index = max(
+            int(start), features.valid_from + self.window - 1, self.window - 1
+        )
 
         # Both matrices are frame-wide but causal for the rows they expose, so
         # building them once is equivalent to rebuilding a row per step without
@@ -543,7 +549,7 @@ class Simulator:
         With a selector, the chosen arm's one-hot and strength on this bar
         follow the position features.
         """
-        start = self._i - WINDOW + 1
+        start = self._i - self.window + 1
         window = self.features.X[start : self._i + 1].reshape(-1)
         flat = window.astype(np.float32, copy=True)
         if not np.isfinite(flat).all():
@@ -608,7 +614,7 @@ class Simulator:
     # --- bars --------------------------------------------------------------
 
     def _has_window(self) -> bool:
-        return self._i >= WINDOW - 1 and self._i <= self._last_index
+        return self._i >= self.window - 1 and self._i <= self._last_index
 
     def _ts(self, index: int) -> datetime:
         stamp = np.datetime64(self.features.ts[index], "us").astype(datetime)

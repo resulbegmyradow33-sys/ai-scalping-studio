@@ -288,6 +288,7 @@ class TrainRunner:
         use_strategy: bool = True,
         entry_penalty: float = 0.05,
         gate_signals: bool = True,
+        window: int = 60,
         train_end: datetime | None = None,
     ) -> str:
         """Prepare a run, reserve its id and start the worker thread.
@@ -327,7 +328,7 @@ class TrainRunner:
         # Validate the env count here, with the trainer's own check: doing it in
         # the worker would return 202 and then leave a half-created run behind.
         try:
-            env_starts_for(features, n_envs)
+            env_starts_for(features, n_envs, window)
         except ValueError as exc:
             raise TrainError(str(exc)) from exc
 
@@ -352,6 +353,7 @@ class TrainRunner:
             seed=seed,
             entry_penalty=entry_penalty,
             gate_signals=gate_signals,
+            window=window,
         )
         split = (
             {"train_end": train_end_iso, "eval_start": eval_start}
