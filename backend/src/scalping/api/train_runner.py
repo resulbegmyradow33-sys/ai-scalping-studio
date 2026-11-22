@@ -810,6 +810,7 @@ class TrainRunner:
                 self.settings,
                 strategy_selector=selector,
                 labels=labels,
+                window=window,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
             raise TrainError(f"run {run_id} cannot be evaluated: {exc}") from exc
