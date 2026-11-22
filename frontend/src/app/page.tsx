@@ -78,6 +78,15 @@ export default function SimulatorPage() {
   // last point changed; memoise on the stream's own reference.
   const equityValues = useMemo(() => sim.equity.map((point) => point.equity), [sim.equity]);
 
+  // An active card streams its own timeframe; converting those bars with the
+  // M1/M5/M15 preview buckets would mislabel them, so the selector only shows
+  // for the legacy M1 replay.
+  const cardTimeframe =
+    strategy.card?.active === true ? strategy.card.params?.timeframe : undefined;
+  const cardBarTimeframe = cardTimeframe !== undefined && cardTimeframe !== "M1";
+  const chartTimeframe: Timeframe = cardBarTimeframe ? "M1" : timeframe;
+  const chartLabel = cardBarTimeframe ? cardTimeframe : timeframe;
+
   const startError = describeStartError(sim.error, sim.errorStatus);
   // `data === undefined` is the first pending response: that is not an outage
   // yet, so the banner must not flash before health answers.
@@ -151,24 +160,26 @@ export default function SimulatorPage() {
         <div className="flex min-w-0 flex-col gap-2 lg:col-span-9">
           <div className="flex flex-wrap items-baseline justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-sm font-semibold text-slate-100">Fiyat ({timeframe})</h2>
-              <div role="group" aria-label="Mum periyodu" className="flex items-center gap-1">
-                {TIMEFRAMES.map((option) => (
-                  <button
-                    key={option}
-                    type="button"
-                    aria-pressed={timeframe === option}
-                    onClick={() => setTimeframe(option)}
-                    className={
-                      timeframe === option
-                        ? "rounded-sm border border-accent bg-accent/20 px-2 py-0.5 text-xs font-medium text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                        : "rounded-sm border border-slate-800 px-2 py-0.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
-                    }
-                  >
-                    {option}
-                  </button>
-                ))}
-              </div>
+              <h2 className="text-sm font-semibold text-slate-100">Fiyat ({chartLabel})</h2>
+              {!cardBarTimeframe && (
+                <div role="group" aria-label="Mum periyodu" className="flex items-center gap-1">
+                  {TIMEFRAMES.map((option) => (
+                    <button
+                      key={option}
+                      type="button"
+                      aria-pressed={timeframe === option}
+                      onClick={() => setTimeframe(option)}
+                      className={
+                        timeframe === option
+                          ? "rounded-sm border border-accent bg-accent/20 px-2 py-0.5 text-xs font-medium text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                          : "rounded-sm border border-slate-800 px-2 py-0.5 text-xs text-slate-400 transition-colors hover:border-slate-700 hover:text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                      }
+                    >
+                      {option}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
             <dl className="flex items-baseline gap-4 text-xs">
               <div className="flex items-baseline gap-1.5">
@@ -189,7 +200,7 @@ export default function SimulatorPage() {
             bars={sim.bars}
             trades={sim.trades}
             position={sim.position}
-            timeframe={timeframe}
+            timeframe={chartTimeframe}
             height={380}
           />
         </div>

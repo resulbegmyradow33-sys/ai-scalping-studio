@@ -85,6 +85,8 @@ sunucu logu gösterir.
 ## Doğrulanmış sonuç (22 Kasım 2026)
 
 Kartın ilk terfisi: `flow_quantile=0.85`, `flow_window=480`, 3/6 ATR, 48 bar.
+Kart ve kalibrasyon kaydı: `docs/cards/strategy_card_2026-11-22.json`,
+`docs/cards/strategy_history_2026-11-22.jsonl`.
 
 | Dilim | İşlem | R/işlem | PF | Max DD | Net |
 |---|---|---|---|---|---|

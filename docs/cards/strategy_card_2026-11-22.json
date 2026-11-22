@@ -1,0 +1,32 @@
+{
+  "created_at": "2026-11-22T05:36:40+00:00",
+  "digest": "b970c5aa345d6952",
+  "holdout": {
+    "expectancy_r": 0.15924767843962587,
+    "max_drawdown": 0.0811159312123946,
+    "profit_factor": 1.3196508906874378,
+    "total_r": 34.238250864519564,
+    "trades": 215,
+    "win_rate": 0.4604651162790698
+  },
+  "note": "holdout reused across nightly runs; treat later promotions as weaker evidence",
+  "params": {
+    "flow_quantile": 0.85,
+    "flow_window": 480,
+    "max_bars_in_trade": 48,
+    "sl_atr_mult": 3.0,
+    "timeframe": "H1",
+    "tp_atr_mult": 6.0
+  },
+  "strategy": "flow_momentum",
+  "symbol": "XAUUSD",
+  "train": {
+    "expectancy_r": 0.0422769785495422,
+    "max_drawdown": 0.4049410528381156,
+    "profit_factor": 1.0789898372974414,
+    "total_r": 72.6318491481135,
+    "trades": 1718,
+    "win_rate": 0.40454016298020956
+  },
+  "version": 1
+}

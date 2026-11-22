@@ -10,6 +10,7 @@ import type { BarPayload, EquityPayload, SimState } from "@/lib/types";
 const state = vi.hoisted(() => ({
   simulation: {} as Record<string, unknown>,
   health: {} as Record<string, unknown>,
+  strategy: {} as Record<string, unknown>,
 }));
 
 /**
@@ -55,17 +56,7 @@ vi.mock("@/hooks/use-data-status", () => ({
 
 vi.mock("@/hooks/use-simulation", () => ({ useSimulation: () => state.simulation }));
 vi.mock("@/hooks/use-health", () => ({ useHealth: () => state.health }));
-vi.mock("@/hooks/use-strategy-card", () => ({
-  useStrategyCard: () => ({
-    card: { active: false, strategy: "momentum" },
-    error: undefined,
-    isLoading: false,
-    running: false,
-    result: null,
-    calibrateError: null,
-    recalibrate: vi.fn(),
-  }),
-}));
+vi.mock("@/hooks/use-strategy-card", () => ({ useStrategyCard: () => state.strategy }));
 
 const { default: SimulatorPage } = await import("./page");
 
@@ -101,6 +92,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.simulation = simulation();
   state.health = { error: undefined, data: { status: "ok", version: "0.1.0", device: "cpu" } };
+  state.strategy = {
+    card: { active: false, strategy: "momentum" },
+    error: undefined,
+    isLoading: false,
+    running: false,
+    result: null,
+    calibrateError: null,
+    recalibrate: vi.fn(),
+  };
   statusHook.providers = ["synthetic"];
   chartState.chart.addSeries.mockReturnValue(chartState.series);
   chartState.chart.timeScale.mockReturnValue(chartState.timeScale);
@@ -326,6 +326,22 @@ describe("SimulatorPage timeframe switch", () => {
     expect(screen.getByRole("button", { name: "M5" })).toHaveAttribute("aria-pressed", "true");
     expect(screen.getByRole("button", { name: "M1" })).toHaveAttribute("aria-pressed", "false");
     expect(screen.getByRole("heading", { name: "Fiyat (M5)" })).toBeInTheDocument();
+  });
+
+  it("labels the chart with the promoted card's timeframe", () => {
+    state.strategy = {
+      ...state.strategy,
+      card: {
+        active: true,
+        strategy: "flow_momentum",
+        params: { timeframe: "H1", flow_quantile: 0.85, flow_window: 480 },
+      },
+    };
+
+    render(<SimulatorPage />);
+
+    expect(screen.getByText("Fiyat (H1)")).toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Mum periyodu" })).not.toBeInTheDocument();
   });
 
   it("offers all three timeframes", () => {
