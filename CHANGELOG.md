@@ -14,7 +14,9 @@ project does not yet follow strict semantic versioning.
 - Feature-group registry covering all 59 causal columns.
 - Chronological dataset builder with purge/embargo and manifest checksums.
 - Team infrastructure: CI, PR/issue templates, CODEOWNERS, security policy,
-  contributor guide and GitHub setup script.
+  contributor guide, team workflow, labels, milestones and GitHub setup script.
+- Local `pre-push` guard for the private GitHub Free plan, plus `make hooks`.
+- Calmer Dependabot policy: major versions ignored, minor/patch grouped.
 
 ## 2026-11-22
 

@@ -51,6 +51,12 @@ npm install
 npm test
 ```
 
+Install the local guard (needed on the private GitHub Free plan):
+
+```bash
+make hooks     # blocks direct pushes to main unless ALLOW_MAIN_PUSH=1
+```
+
 ## 4. Data is not in the repository
 
 Stores are hundreds of MB to several GB and are gitignored on purpose:
@@ -70,7 +76,13 @@ Real data sources and scripts are listed in `README.md` and
 `docs/forward-test.md`. Never commit data, credentials or generated run
 directories.
 
-## 5. Daily workflow
+## 5. Issues and milestones
+
+Non-trivial work starts as an issue (bug, feature, data import or experiment
+template). Pick the phase milestone; keep at most three issues in progress per
+person. The repository board uses Backlog / Ready / In progress / Review / Done.
+
+## 6. Daily workflow
 
 Always start from the latest branch:
 
@@ -99,7 +111,7 @@ gh pr create --base main --head feat/symbol-registry \
 Every change goes through a pull request. `main` requires green CI and one
 review, so even a documentation-only change gets the same gate.
 
-## 6. Receiving someone else's changes
+## 7. Receiving someone else's changes
 
 ```bash
 git switch main
@@ -120,7 +132,7 @@ If a rebase goes wrong:
 git rebase --abort
 ```
 
-## 7. Before every push
+## 8. Before every push
 
 ```bash
 cd backend
@@ -138,7 +150,7 @@ Do not push with failing tests, unformatted code or committed data. If a test
 is too slow for a quick loop, run the relevant file first and the full suite
 before opening the PR.
 
-## 8. What not to commit
+## 9. What not to commit
 
 - `backend/runs/` and `runs/` (cards, histories, checkpoints)
 - `data-*` stores, CSV/Parquet/tick caches
@@ -153,7 +165,7 @@ accident:
 git restore --staged <path>
 ```
 
-## 9. Commit style
+## 10. Commit style
 
 Short imperative subject, scope when useful:
 
@@ -166,7 +178,7 @@ test(api): cover provenance endpoint
 
 Keep one logical change per commit. Do not mix refactors with behavior changes.
 
-## 10. Reporting state honestly
+## 11. Reporting state honestly
 
 The project separates four states; use them in PRs and reports:
 

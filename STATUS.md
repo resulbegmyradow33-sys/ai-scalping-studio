@@ -77,6 +77,16 @@ Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
 Faz 4 (rejim) ve Faz 11 (risk/backtest) paralel yürüyebilir; ağır eğitimler
 aynı anda çalışmaz.
 
+## Ekip altyapısı
+
+- `main` varsayılan branch; eski `feat/v1` uzak branch silindi.
+- CI: her PR'da `backend` (ruff + mypy + 539 test) ve `frontend` (tsc + 184 test + build).
+- PR/issue şablonları, CODEOWNERS, SECURITY, CODE_OF_CONDUCT, CHANGELOG.
+- 27 etiket, 14 faz milestone'u, 5 açılış issue'su.
+- `make hooks`: doğrudan `main` push'unu yerelde engeller.
+- Private GitHub Free sunucu tarafı branch protection'ı desteklemiyor; repo public
+  yapılırsa protection + secret scanning + CodeQL ücretsiz açılır. Karar issue #16.
+
 ## Çalıştırma
 
 ```bash
