@@ -73,7 +73,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 - [x] Add scikit-learn (LightGBM/XGBoost still open).
 - [x] Logistic regression, random forest, extra trees, HistGradientBoosting.
-- [ ] LightGBM and XGBoost.
+- [x] LightGBM and XGBoost (lazy imports; macOS needs `libomp`).
 - [ ] SGDClassifier incremental path.
 - [ ] Isolation forest anomaly detector.
 - [ ] SVM only if timing is practical.

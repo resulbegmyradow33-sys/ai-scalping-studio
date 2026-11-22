@@ -12,10 +12,16 @@ simulator run, and it is never promoted from this page alone.
 | `random_forest` | `RandomForestClassifier` | 300 trees, depth 10, leaf 20 |
 | `extra_trees` | `ExtraTreesClassifier` | 300 trees, depth 12, leaf 20 |
 | `hist_gradient` | `HistGradientBoostingClassifier` | 300 iterations, depth 6 |
+| `lightgbm` | `LGBMClassifier` | 500 trees, 31 leaves, balanced weights |
+| `xgboost` | `XGBClassifier` | 500 trees, depth 6, histogram, label-encoded wrapper |
 
-`scikit-learn` is the only new dependency. LightGBM, XGBoost, SGDClassifier,
-isolation forest and SVM are **not implemented yet**; the roadmap keeps them in
-Phase 5 rather than pretending the list is complete.
+Dependencies: scikit-learn, LightGBM and XGBoost. On macOS both boosting
+libraries need the OpenMP runtime (`brew install libomp`); the imports are lazy,
+so the rest of the CLI and simulator keep working without it. CI's Linux wheels
+ship OpenMP.
+
+SGDClassifier, isolation forest and SVM are **not implemented yet**; the
+roadmap keeps them in Phase 5 rather than pretending the list is complete.
 
 ## Data contract
 
@@ -118,9 +124,12 @@ XAUUSD H1, horizon 5, all 59 features, 20,654 train / 4,427 validation /
 | Logistic | 51.6% | 51.8% | 0.6921 | 49.3% | 0.6961 |
 | Random forest | 50.5% | 50.8% | 0.6937 | 50.6% | 0.6985 |
 | HistGradientBoosting | 51.5%* | 51.5%* | 0.6972* | — | — |
+| LightGBM | 51.9% | 52.0% | 0.7073 | 51.0% | 0.7421 |
+| XGBoost | 51.8% | 51.9% | 0.7154 | 50.7% | 0.7523 |
 
 \* hist-graded numbers are from the earlier 3-class run; the binary rerun is
-pending. No model beats the prior baseline; none is promoted. This is a useful
+pending. **No model, including LightGBM and XGBoost, beats the prior baseline;
+none is promoted.** This is a useful
 negative result: the 59 causal features do not predict 5-bar direction on H1
 with these baselines. The next attempt must add evidence (flow/macro/regime
 interactions, different horizon, or a different task) rather than blindly adding

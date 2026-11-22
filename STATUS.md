@@ -31,7 +31,7 @@ Son güncelleme: 2026-11-22 · Branch `main`
 | Özellik mühendisliği | 🟡 | 59 nedensel özellik; seçilebilir set yok |
 | Gerçek bid/ask/order-flow | 🟡 | İmzalı flow var; L2/deep book yok |
 | Çoklu zaman dilimi analizi | 🟡 | M5/M15 bağlamı; bağımsız encoder/fusion yok |
-| Klasik ML (RF, LGBM, XGB) | 🟡 | Logistic/RF/ExtraTrees/HistGB + metrikler var; LGBM/XGB, simülatör değerlendirmesi ve promosyon yok |
+| Klasik ML (RF, LGBM, XGB) | 🟡 | Logistic/RF/ExtraTrees/HistGB/LightGBM/XGBoost + simülatör değerlendirmesi var; kalibrasyon/CV/promosyon yok |
 | Derin öğrenme (CNN/RNN/GRU/TCN) | ❌ | Sadece PPO'nun 64×64 MLP'si |
 | Transformer araştırması | ❌ | Modül yok |
 | RL (PPO + taklit) | 🟡 | PPO/BC var; SAC/TD3/DQN/A2C yok |
