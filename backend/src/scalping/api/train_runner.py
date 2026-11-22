@@ -685,7 +685,6 @@ class TrainRunner:
             raise TrainError(f"not enough bars: need {SIM_MIN_BARS}")
         features = build_features(frame, self.settings.costs)
         config = _read_json(run_dir / CONFIG_NAME)
-        run_settings = self._settings_from_config(config)
         try:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
