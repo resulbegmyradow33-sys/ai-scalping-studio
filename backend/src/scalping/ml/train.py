@@ -34,6 +34,7 @@ __all__ = [
     "MLResult",
     "TrainSpec",
     "load_model",
+    "load_result",
     "save_result",
     "train_classifier",
 ]
@@ -64,6 +65,8 @@ class MLResult:
 
     model: Any
     spec: TrainSpec
+    symbol: str
+    timeframe: str
     dataset_id: str
     columns: tuple[str, ...]
     validation: dict[str, Any]
@@ -75,6 +78,8 @@ class MLResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "model": self.spec.model,
+            "symbol": self.symbol,
+            "timeframe": self.timeframe,
             "dataset_id": self.dataset_id,
             "columns": list(self.columns),
             "validation": self.validation,
@@ -186,6 +191,8 @@ def train_classifier(
     return MLResult(
         model=model,
         spec=spec,
+        symbol=symbol,
+        timeframe=timeframe,
         dataset_id=bundle.manifest.dataset_id,
         columns=bundle.manifest.columns,
         validation=validation,
@@ -224,3 +231,40 @@ def save_result(result: MLResult, directory: str | Path) -> tuple[Path, Path]:
 def load_model(path: str | Path) -> tuple[Any, list[str]]:
     payload = joblib.load(Path(path))
     return payload["model"], payload["columns"]
+
+
+def load_result(directory: str | Path) -> MLResult:
+    """Rebuild an ``MLResult`` from a saved model directory."""
+    target = Path(directory)
+    metadata = json.loads((target / "metrics.json").read_text(encoding="utf-8"))
+    spec_raw = metadata["spec"]
+    spec = TrainSpec(
+        model=str(spec_raw["model"]),
+        horizon=int(spec_raw["horizon"]),
+        groups=tuple(str(value) for value in spec_raw["groups"]),
+        train_fraction=float(spec_raw["train_fraction"]),
+        validation_fraction=float(spec_raw["validation_fraction"]),
+        purge_bars=int(spec_raw["purge_bars"]),
+        embargo_bars=int(spec_raw["embargo_bars"]),
+        seed=int(spec_raw["seed"]),
+        evaluate_test=bool(spec_raw.get("evaluate_test", False)),
+        include_flat=bool(spec_raw.get("include_flat", False)),
+    )
+    model, columns = load_model(target / "model.joblib")
+    dataset_id = str(metadata["dataset_id"])
+    parts = dataset_id.split(":")
+    symbol = str(metadata.get("symbol") or (parts[0] if parts else ""))
+    timeframe = str(metadata.get("timeframe") or (parts[1] if len(parts) > 1 else "M1"))
+    return MLResult(
+        model=model,
+        spec=spec,
+        symbol=symbol,
+        timeframe=timeframe,
+        dataset_id=dataset_id,
+        columns=tuple(columns),
+        validation=metadata["validation"],
+        test=metadata.get("test"),
+        baseline=metadata["baseline"],
+        split_counts=metadata["split_counts"],
+        created_at=str(metadata["created_at"]),
+    )

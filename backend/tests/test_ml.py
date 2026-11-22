@@ -5,9 +5,17 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from scalping.config import Settings
 from scalping.features.build import FEATURE_COLUMNS, FeatureFrame
+from scalping.ml.evaluate import evaluate_model
 from scalping.ml.models import build_model
-from scalping.ml.train import TrainSpec, load_model, save_result, train_classifier
+from scalping.ml.train import (
+    TrainSpec,
+    load_model,
+    load_result,
+    save_result,
+    train_classifier,
+)
 
 
 def _learnable_frame(n: int = 700, valid_from: int = 10) -> FeatureFrame:
@@ -128,3 +136,44 @@ def test_test_split_is_optional() -> None:
     )
     assert result.test is not None
     assert result.test["rows"] > 0
+
+
+def test_evaluate_model_trades_in_the_simulator_without_bypassing_risk() -> None:
+    frame = _learnable_frame()
+    result = train_classifier(
+        frame,
+        symbol="XAUUSD",
+        timeframe="M1",
+        spec=TrainSpec(model="logistic", horizon=1, purge_bars=1, embargo_bars=1),
+    )
+    evaluation = evaluate_model(
+        result,
+        frame,
+        Settings(),
+        split="validation",
+        threshold=0.55,
+        exit_threshold=0.55,
+        stress=(2.0,),
+    )
+    assert evaluation.metrics["trades"] > 0
+    assert evaluation.hold["trades"] == 0
+    keys = {"trades", "net_profit", "profit_factor", "expectancy_r", "max_drawdown"}
+    assert keys <= set(evaluation.metrics)
+    assert keys <= set(evaluation.stress["x2"])
+    assert evaluation.split == "validation"
+
+
+def test_saved_result_round_trip_keeps_identity(tmp_path) -> None:
+    result = train_classifier(
+        _learnable_frame(),
+        symbol="XAUUSD",
+        timeframe="M1",
+        spec=TrainSpec(model="logistic", horizon=1, purge_bars=1, embargo_bars=1),
+    )
+    _, metrics_path = save_result(result, tmp_path / "run")
+    loaded = load_result(metrics_path.parent)
+    assert loaded.symbol == result.symbol
+    assert loaded.timeframe == result.timeframe
+    assert loaded.dataset_id == result.dataset_id
+    assert loaded.spec == result.spec
+    assert load_model(tmp_path / "run" / "model.joblib")[1] == list(result.columns)

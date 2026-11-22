@@ -143,6 +143,7 @@ destroy the only clean forward test.
 cd backend
 uv run python -m scalping.cli serve --root ../data-ticks5-store --flow-root ../data-flow-store
 uv run python -m scalping.cli ml train --help
+uv run python -m scalping.cli ml evaluate --help
 uv run python -m scripts.nightly_calibrate --help
 uv run python -m scripts.nightly_rl --help
 uv run python -m scripts.forward_test --help

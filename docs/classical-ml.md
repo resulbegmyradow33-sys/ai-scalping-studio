@@ -73,6 +73,29 @@ uv run python -m scalping.cli ml train ... --evaluate-test
 Output is one JSON line with the dataset id, split counts, validation metrics,
 baseline, optional test metrics and artifact paths.
 
+## Trading evaluation
+
+A classifier is not a strategy until it pays the simulator's costs. The
+evaluation policy is deliberately small:
+
+- flat: BUY when `p_up >= threshold`, SELL when `p_down >= threshold`;
+- long: CLOSE when `p_down >= exit_threshold`;
+- short: CLOSE when `p_up >= exit_threshold`;
+- the simulator still owns sizing, SL/TP, time stop and every risk block.
+
+```bash
+uv run python -m scalping.cli ml evaluate   --run runs/ml/ml-logistic-316312dff683   --root ../data-ticks5-store   --split validation --stress 2,3
+```
+
+This runs on one chronological split (validation by default), reports the same
+net/PF/expectancy/drawdown/cost fields as every other strategy and a hold
+baseline, and repeats the run at the requested cost multipliers. The test split
+is available with `--split test`, but should be read once per candidate.
+
+Limitations of this first slice: no regime breakdown yet, no probability
+calibration gate, and the threshold policy is not trained end-to-end as a
+trading objective.
+
 ## Artifacts
 
 ```
@@ -102,6 +125,20 @@ negative result: the 59 causal features do not predict 5-bar direction on H1
 with these baselines. The next attempt must add evidence (flow/macro/regime
 interactions, different horizon, or a different task) rather than blindly adding
 capacity.
+
+### Trading evaluation of the same logistic model
+
+Validation split, threshold 0.55, simulator costs included:
+
+| Cost | Trades | Net | PF | Expectancy | Max DD | Costs |
+|---|---|---|---|---|---|---|
+| ×1 | 407 | **−$2,002** | 0.83 | −0.131 R | 22.3% | $1,503 |
+| ×2 | 226 | −$2,002 | 0.71 | −0.231 R | 20.9% | $1,731 |
+| ×3 | 185 | −$2,006 | 0.65 | −0.274 R | 20.5% | $2,114 |
+
+Holding was flat (net $0). The classifier is worse than doing nothing after
+costs; the trading evaluation exists to catch exactly this, which accuracy and
+log loss alone did not.
 
 ## What this proves
 
