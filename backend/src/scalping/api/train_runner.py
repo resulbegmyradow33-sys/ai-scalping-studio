@@ -307,7 +307,7 @@ class TrainRunner:
         run id that is already training. Data problems from the feature layer
         stay ``ValueError`` and map to 422 in the route.
         """
-        if timeframe not in ("M1", "M5", "M15"):
+        if timeframe not in ("M1", "M5", "M15", "H1", "D1"):
             raise TrainError(f"unsupported timeframe: {timeframe!r}")
         run_settings = replace(
             self.settings,
