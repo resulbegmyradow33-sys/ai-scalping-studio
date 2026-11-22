@@ -164,6 +164,8 @@ class Simulator:
         entry_penalty: float | None = None,
         gate_signals: bool = False,
         window: int = WINDOW,
+        flow: np.ndarray | None = None,
+        flow_thr: np.ndarray | None = None,
     ) -> None:
         self.features = features
         self.settings = settings
@@ -204,6 +206,23 @@ class Simulator:
         if isinstance(window, bool) or not isinstance(window, int) or window < 1:
             raise ValueError(f"window must be a positive int, got {window!r}")
         self.window = int(window)
+        height = int(features.X.shape[0])
+        if flow is not None:
+            flow_arr = np.asarray(flow, dtype=np.float64)
+            if flow_arr.shape != (height,):
+                raise ValueError(f"flow must have shape ({height},), got {flow_arr.shape}")
+        else:
+            flow_arr = None
+        if flow_thr is not None:
+            thr_arr = np.asarray(flow_thr, dtype=np.float64)
+            if thr_arr.shape != (height,):
+                raise ValueError(f"flow_thr must have shape ({height},), got {thr_arr.shape}")
+        else:
+            thr_arr = None
+        if (flow_arr is None) != (thr_arr is None):
+            raise ValueError("flow and flow_thr must be provided together")
+        self._flow = flow_arr
+        self._flow_thr = thr_arr
         self.obs_dim = self.window * self._n_features + POSITION_FEATURES
         if self._strategy_selector is not None:
             self.obs_dim += _STRATEGY_CONTEXT
@@ -440,14 +459,20 @@ class Simulator:
             return 0
         return int(self._strategy_signals[self._i, int(self._arm)])
 
-    def _gate_blocks(self, action: int) -> bool:
-        """True when the strategy gate forbids this entry."""
-        if not self.gate_signals or self._signals_unknown():
-            return False
-        signal = self._signal_for_arm()
-        if signal == 0:
-            return True
-        return (action == _BUY and signal < 0) or (action == _SELL and signal > 0)
+    def _gate_reason(self, action: int) -> str | None:
+        """The reason this entry is blocked, or ``None`` when it may proceed."""
+        if self.gate_signals and not self._signals_unknown():
+            signal = self._signal_for_arm()
+            if signal == 0:
+                return "no_signal"
+            if (action == _BUY and signal < 0) or (action == _SELL and signal > 0):
+                return "signal_conflict"
+        if self._flow is not None and self._flow_thr is not None:
+            value = float(self._flow[self._i])
+            threshold = float(self._flow_thr[self._i])
+            if not isfinite(value) or not isfinite(threshold) or abs(value) <= threshold:
+                return "no_flow"
+        return None
 
     def _signals_unknown(self) -> bool:
         return self._strategy_signals is None or self._arm < 0
@@ -470,8 +495,8 @@ class Simulator:
                 blocked = reason
             elif self.broker.position is not None:  # only reachable with max_positions > 1
                 blocked = "position_open"
-            elif self._gate_blocks(action):
-                blocked = "no_signal" if self._signal_for_arm() == 0 else "signal_conflict"
+            elif (gate_reason := self._gate_reason(action)) is not None:
+                blocked = gate_reason
             else:
                 atr = self._atr(self._i)
                 if atr <= 0:

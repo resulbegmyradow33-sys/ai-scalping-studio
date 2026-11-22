@@ -62,6 +62,8 @@ class TradingEnv(gym.Env):
         entry_penalty: float | None = None,
         gate_signals: bool = False,
         window: int = 60,
+        flow: np.ndarray | None = None,
+        flow_thr: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.sim = Simulator(
@@ -75,6 +77,8 @@ class TradingEnv(gym.Env):
             entry_penalty=entry_penalty,
             gate_signals=gate_signals,
             window=window,
+            flow=flow,
+            flow_thr=flow_thr,
         )
         self.action_space = spaces.Discrete(4)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)

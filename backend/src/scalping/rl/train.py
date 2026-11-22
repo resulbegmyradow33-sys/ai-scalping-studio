@@ -250,6 +250,8 @@ def _make_vec_env(
     entry_penalty: float,
     gate_signals: bool,
     window: int,
+    flow: np.ndarray | None = None,
+    flow_thr: np.ndarray | None = None,
 ) -> tuple[VecNormalize, list[int]]:
     """Build ``n_envs`` normalised envs on distinct (or random) start bars."""
 
@@ -266,6 +268,8 @@ def _make_vec_env(
                 entry_penalty=entry_penalty,
                 gate_signals=gate_signals,
                 window=window,
+                flow=flow,
+                flow_thr=flow_thr,
             )
 
         return make
@@ -367,6 +371,8 @@ def train(
     eval_start: str | None = None,
     stop_event: threading.Event | None = None,
     pause_event: threading.Event | None = None,
+    flow: np.ndarray | None = None,
+    flow_thr: np.ndarray | None = None,
 ) -> TrainResult:
     """Train PPO on ``features`` and write a self-contained run directory.
 
@@ -422,6 +428,8 @@ def train(
         config.entry_penalty,
         config.gate_signals,
         config.window,
+        flow,
+        flow_thr,
     )
     model: PPO | None = None
     final_status: str | None = None

@@ -718,3 +718,37 @@ def test_observation_window_is_configurable() -> None:
     assert env.obs_dim == 20 * len(features.columns) + 5
     obs, _ = env.reset(seed=1)
     assert obs.shape == (env.obs_dim,)
+
+
+def test_flow_gate_blocks_a_weak_imbalance() -> None:
+    import numpy as np
+
+    frame = flat_frame()
+    n = frame.X.shape[0]
+    sim = Simulator(
+        frame,
+        Settings(),
+        flow=np.zeros(n),
+        flow_thr=np.full(n, 0.5),
+    )
+    sim.reset(seed=1)
+    _, _, _, _, info = sim.step(1)
+    assert info["position"] is None
+    assert info["blocked"] == "no_flow"
+
+
+def test_flow_gate_allows_a_strong_imbalance() -> None:
+    import numpy as np
+
+    frame = flat_frame()
+    n = frame.X.shape[0]
+    sim = Simulator(
+        frame,
+        Settings(),
+        flow=np.full(n, 2.0),
+        flow_thr=np.full(n, 0.5),
+    )
+    sim.reset(seed=1)
+    _, _, _, _, info = sim.step(1)
+    assert info["position"] is not None
+    assert info["blocked"] is None
