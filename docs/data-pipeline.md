@@ -155,6 +155,14 @@ uv run python -m scalping.cli data derive \
   --root ../demo-data --symbol XAUUSD --timeframes M5,M15,M30,H1,H4,D1
 ```
 
+Validate one stored slice (one JSON report line on stdout; exit 2 when a
+structural error is found, so a script can gate on it):
+
+```bash
+uv run python -m scalping.cli data validate \
+  --root ../demo-data --symbol XAUUSD --timeframe H1
+```
+
 Dukascopy (ticks → M1):
 
 ```bash
