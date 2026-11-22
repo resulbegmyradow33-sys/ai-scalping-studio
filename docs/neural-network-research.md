@@ -168,12 +168,45 @@ next epoch.
 The best weights are stored, but evaluation is the next slice: a trainer
 result is a validation-loss curve, not a trading result.
 
-## 7. Limits and next slices
+## 7. Evaluator
+
+`scalping.nn.evaluate_checkpoint(checkpoint, data, split="test")` rebuilds the
+checkpoint's model (best validation weights when available) and scores one
+split:
+
+| Metric | Meaning |
+|---|---|
+| `accuracy` | share of correct labels |
+| `balanced_accuracy` | mean per-class recall; a majority-class model cannot hide here |
+| `log_loss` | mean `-log p(true)` with probabilities clipped at `1e-12` |
+| `brier` | multiclass Brier score, `mean(sum((p - onehot)^2))` |
+| `per_class` | precision, recall, F1 and support for every class |
+| `confusion` | counts in the checkpoint's class order |
+
+`compare_predictors(y_true, {"gru": (...), "rule": (...)}, classes=...)` scores
+any mix of label-only and probability predictors on the same rows and sorts by
+accuracy. The result always includes `rows` and `trading_claim: false`.
+
+The rule comparison is the repo's `ret_5` momentum baseline
+(`momentum_rule_labels`), mapped to `-1/0/+1` and scored on the same window-end
+timestamps as the network. It is **not** the validated `flow_momentum` card;
+that card needs tick flow and is judged by the strategy layer.
+
+Classical ML models (Phase 5) plug into the same two functions: pass their
+label array, and their probability matrix when available. Nothing in the
+evaluator imports `scalping.ml`, so the two phases stay independent.
+
+Boundary: these are prediction metrics. A high accuracy is not a trading edge;
+the simulator with spread, commission and slippage plus a cost stress is still
+required before any profitability word is used.
+
+## 8. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
   loader (Phase 14). Do not silently reduce `window` to make RAM fit — record
   the choice.
 - The dataset alone says nothing about profitability. Model scores are
   prediction metrics; the simulator + cost stress decides.
-- Next slice: the shared evaluator against Phase 5 and the rule (simulator +
-  cost stress), plus the CLI/API wiring for training runs.
+- Next slice: CLI/API wiring so `nn train` / `nn evaluate` can run GRU and
+  TCN on stored H1 and M15 data end to end; then the simulator + cost-stress
+  gate for any trading claim.
