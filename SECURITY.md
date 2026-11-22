@@ -10,9 +10,13 @@ Use GitHub's private vulnerability reporting:
 
 https://github.com/resulbegmyradow33-sys/ai-scalping-studio/security/advisories/new
 
-Do not open a public issue for a vulnerability. Include the commit, a minimal
-reproduction, impact and any suggested fix. The maintainer aims to acknowledge
-within 7 days and to publish a fix or mitigation before disclosure.
+If that form is unavailable on the current plan, open a regular issue titled
+`security contact request` **without details** and the maintainer will provide
+a private channel.
+
+Do not open a public issue with the vulnerability details. Include the commit,
+a minimal reproduction, impact and any suggested fix. The maintainer aims to
+acknowledge within 7 days and to publish a fix or mitigation before disclosure.
 
 ## Scope
 
