@@ -87,13 +87,51 @@ data.X_train.shape     # (n_train, 60, 59)
 - constant features do not divide by zero;
 - deterministic builds, memory guard, config validation, non-finite rejection.
 
-## 5. Limits and next slices
+## 5. Model zoo
+
+`scalping.nn.build_model(name, n_features=..., window=..., seed=...)` returns a
+`torch.nn.Module` that maps `(batch, window, features)` to logits
+`(batch, classes)`:
+
+| Name | Family | Notes |
+|---|---|---|
+| `mlp` | flattened MLP | one hidden layer |
+| `deep_mlp` | flattened MLP | four hidden layers + dropout |
+| `residual_mlp` | residual MLP | two pre-norm residual blocks |
+| `rnn` | vanilla RNN | last hidden state |
+| `lstm` | LSTM | last hidden state |
+| `gru` | GRU | last hidden state |
+| `cnn` | 1D CNN | one conv layer, same length |
+| `dilated_cnn` | dilated 1D CNN | dilations 1, 2, 4 |
+| `cnn_lstm` | CNN + LSTM | conv front end, LSTM over steps |
+| `tcn` | causal TCN | left-padded residual blocks, configurable kernel/levels |
+
+Shared choices:
+
+- `hidden` (default 64), `dropout` (default 0.1), `n_classes` (default 3) and
+  `seed`; `build_model` seeds `torch` before construction so the same seed
+  gives the same initial weights.
+- The output is always **logits**; the trainer applies cross-entropy.
+- The TCN's receptive field is
+  `1 + 2 * (kernel - 1) * sum(dilations)`. With the default kernel 3 and levels
+  1, 2, 4 it is 29 bars. Windows shorter than that are allowed; the early steps
+  simply see padded zeros.
+- Only the TCN promises **causality inside the window**: `forward_sequence`
+  computes per-step states with left-only padding. The test feeds two inputs
+  that differ from step 10 and requires steps 0–9 to stay identical. The other
+  models may look both ways inside the window; the window itself ends at the
+  prediction bar, so that is not look-ahead.
+
+Determinism, shapes, the input contract, the receptive-field formula and the
+TCN prefix test live in `backend/tests/test_nn_models.py`.
+
+## 6. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
   loader (Phase 14). Do not silently reduce `window` to make RAM fit — record
   the choice.
 - The dataset alone says nothing about profitability. Model scores are
   prediction metrics; the simulator + cost stress decides.
-- Next slices: model zoo (MLP/RNN/LSTM/GRU/CNN/TCN), trainer (MPS with CPU
-  fallback, early stopping, checkpoints, cancellation, one-job policy) and the
-  shared evaluator against Phase 5 and the rule.
+- Next slices: trainer (MPS with CPU fallback, early stopping, checkpoints,
+  cancellation, one-job policy) and the shared evaluator against Phase 5 and
+  the rule.
