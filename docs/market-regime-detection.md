@@ -84,13 +84,61 @@ Thresholds are not fitted to the forward store and must not be tuned on it.
 - empty and short frames keep the column contract;
 - impossible thresholds are rejected at construction.
 
-## 5. Limits
+## 5. Statistical models
 
-- Rule labels are descriptive, not predictive. Do not report "the regime
+`scalping.regime.fit_predict(frame, model, config)` trains on the first
+`train_fraction` of the rows (default 70%) and labels every row:
+
+| Model | Implementation | Output states |
+|---|---|---|
+| `kmeans` | scikit-learn `KMeans`, `n_init=10` | `state_0..state_{k-1}` |
+| `gmm` | scikit-learn `GaussianMixture`, full covariance | `state_0..state_{k-1}` |
+| `hmm` | hmmlearn `GaussianHMM`, diagonal covariance, Viterbi | `state_0..state_{k-1}` |
+| `supervised` | `HistGradientBoostingClassifier` fitted to the rule `regime` label | the rule labels seen in training |
+
+Contract:
+
+- feature matrix from `regime/features.py` (eight causal columns: 1/5/15-bar
+  returns, realised volatility, ATR/price, range/ATR, range efficiency, volume
+  z-score);
+- `StandardScaler` is fitted on the training slice only;
+- unsupervised ids are canonicalised by the mean training `ret_1` of each
+  cluster, so `state_0` is the lowest-return state regardless of initialisation;
+- the feature frame is validated for nulls/NaN before it reaches a model;
+- an unknown model name, a frame below `min_rows` (120) or a training slice
+  smaller than `3 * n_states` is rejected.
+
+The supervised baseline is a distillation check: it measures how much of the
+rule structure the eight features can reproduce. It does not replace the rule
+and its accuracy is not a trading result.
+
+Dependencies: `scikit-learn` (BSD-3) and `hmmlearn` (BSD-3). Both install as
+ARM64 wheels, add no service or credential, and the fixtures run in well under
+a second; a 5-year M1 frame is a few hundred thousand rows and stays far below
+the 1 GB Phase 4 budget.
+
+## 6. Evaluation
+
+`regime/evaluate.py`:
+
+- `transition_matrix(labels)` — row-normalised state-to-state probabilities with
+  every observed pair present (including zeros);
+- `dwell_stats(labels)` — runs, bars, share, mean and max run length per state.
+
+A label with a low mean run length flickers and should not drive a slow
+strategy, even if its average forward return looks good. Transition and dwell
+tables are the sanity check before any strategy-by-regime table is read.
+
+## 7. Limits
+
+- Regime labels are descriptive, not predictive. Do not report "the regime
   predicts the next move"; the correct claim is "strategy X performed like this
   inside regime Y on this dataset".
 - The volatility axis is relative to the symbol's own recent history, so "high"
   does not compare gold with an index.
-- Statistical models (K-Means, GMM, HMM and a supervised baseline) and the
-  strategy-by-regime report are the next slices of Phase 4; they will reuse the
-  same row-aligned contract and the same leakage test.
+- Unsupervised states have no inherent meaning beyond their ordering by mean
+  return; a narrative name ("accumulation", "distribution") must be backed by
+  the per-state statistics, not assigned by hand.
+- The strategy-by-regime report and the API/Market Intelligence page are the
+  next slices of Phase 4; they reuse this row-aligned contract and the same
+  leakage test.
