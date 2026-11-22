@@ -35,6 +35,7 @@ __all__ = [
     "StartRequest",
     "StartResponse",
     "StressSummary",
+    "TimeframeSpec",
     "TrainRequest",
     "TrainResponse",
     "TrainingPoint",
@@ -49,6 +50,13 @@ class HealthResponse(BaseModel):
     status: str
     version: str
     device: str
+
+
+class TimeframeSpec(BaseModel):
+    """One supported bar size and the Polars rule that builds it from M1."""
+
+    timeframe: str
+    rule: str
 
 
 class DataStatusResponse(BaseModel):

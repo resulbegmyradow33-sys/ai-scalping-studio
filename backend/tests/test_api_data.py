@@ -25,6 +25,15 @@ def test_symbol_registry_lists_all_required_instruments() -> None:
     assert gold["price_precision"] == 2
 
 
+def test_timeframe_ladder_matches_the_registry() -> None:
+    with TestClient(create_app()) as client:
+        body = client.get("/api/timeframes").json()
+    rules = {row["timeframe"]: row["rule"] for row in body}
+    assert list(rules) == ["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+    assert rules["M30"] == "30m"
+    assert rules["H4"] == "4h"
+
+
 def test_download_writes_provenance_and_status_returns_it(tmp_path) -> None:
     with TestClient(create_app(data_root=tmp_path)) as client:
         response = client.post("/api/data/download", json=BODY)

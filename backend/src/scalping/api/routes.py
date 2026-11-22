@@ -41,6 +41,7 @@ from scalping.api.schemas import (
     RunSummary,
     StartRequest,
     StartResponse,
+    TimeframeSpec,
     TrainRequest,
     TrainResponse,
 )
@@ -54,7 +55,7 @@ from scalping.data.base import DataProvider
 from scalping.data.csv_provider import CsvProvider
 from scalping.data.dukascopy import DataUnavailable, DukascopyProvider
 from scalping.data.provenance import build_provenance, load_provenance, save_provenance
-from scalping.data.registry import SYMBOLS
+from scalping.data.registry import SYMBOLS, TIMEFRAMES
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.strategy.calibrate import calibrate, card_from_report
@@ -103,6 +104,16 @@ def health() -> HealthResponse:
 def symbol_registry() -> list[dict[str, Any]]:
     """Research contract metadata for every registered instrument."""
     return [asdict(spec) for spec in SYMBOLS.values()]
+
+
+@router.get("/api/timeframes", response_model=list[TimeframeSpec])
+def timeframe_registry() -> list[TimeframeSpec]:
+    """Supported bar sizes and the rule that resamples each one from M1.
+
+    The panel reads this instead of hard-coding its timeframe labels, so a
+    change in ``data/registry.py`` reaches the UI without a frontend edit.
+    """
+    return [TimeframeSpec(timeframe=name, rule=rule) for name, rule in TIMEFRAMES.items()]
 
 
 @router.get("/api/data/status", response_model=DataStatusResponse)
