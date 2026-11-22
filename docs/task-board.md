@@ -85,7 +85,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Purged time-series CV with embargo.
 - [ ] Reliability curve and calibration thresholds.
 - [ ] Feature importance and ablation.
-- [ ] Simulator evaluation + cost stress + regime breakdown.
+- [x] Simulator/cost-stress trading evaluation for a saved classifier.
+- [ ] Regime breakdown of the trading evaluation.
 - [ ] Model registry metadata in SQLite (Phase 10).
 - [x] `docs/classical-ml.md`.
 

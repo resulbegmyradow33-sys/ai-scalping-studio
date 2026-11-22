@@ -42,7 +42,8 @@ from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
 from scalping.features.registry import DEFAULT_GROUPS
-from scalping.ml.train import TrainSpec, save_result, train_classifier
+from scalping.ml.evaluate import evaluate_model
+from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
 from scalping.serialize import metrics_payload
 
 __all__ = ["main"]
@@ -346,6 +347,41 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
+    """Trade a saved classifier on one chronological split."""
+    result = load_result(Path(args.run))
+    store = ParquetStore(args.root)
+    frame = store.read(result.symbol, result.timeframe)
+    if frame.is_empty():
+        raise CliError(
+            f"no {result.symbol} {result.timeframe} bars under {args.root}"
+        )
+    features = build_features(frame, Settings().costs)
+    multipliers = tuple(float(value) for value in args.stress.split(",") if value)
+    evaluation = evaluate_model(
+        result,
+        features,
+        Settings(),
+        split=args.split,
+        threshold=args.threshold,
+        exit_threshold=args.exit_threshold,
+        window=args.window,
+        stress=multipliers,
+    )
+    _print_json(
+        {
+            "run": str(Path(args.run)),
+            "dataset_id": result.dataset_id,
+            "split": evaluation.split,
+            "threshold": evaluation.threshold,
+            "exit_threshold": evaluation.exit_threshold,
+            "metrics": evaluation.metrics,
+            "hold": evaluation.hold,
+            "stress": evaluation.stress,
+        }
+    )
+
+
 # --- backtest ------------------------------------------------------------------
 def _hold(obs: np.ndarray) -> int:
     """Control policy: never trade."""
@@ -527,6 +563,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
     ml_train.set_defaults(handler=_cmd_ml_train)
+
+    ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
+    ml_evaluate.add_argument("--run", required=True, help="runs/ml/<run> directory")
+    ml_evaluate.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_evaluate.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    ml_evaluate.add_argument("--threshold", type=float, default=0.55)
+    ml_evaluate.add_argument("--exit-threshold", type=float, default=0.55)
+    ml_evaluate.add_argument("--window", type=int, default=WINDOW)
+    ml_evaluate.add_argument("--stress", default="", help="comma-separated cost multipliers")
+    ml_evaluate.set_defaults(handler=_cmd_ml_evaluate)
 
     dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
     dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)

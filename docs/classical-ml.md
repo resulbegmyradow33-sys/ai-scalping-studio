@@ -73,6 +73,29 @@ uv run python -m scalping.cli ml train ... --evaluate-test
 Output is one JSON line with the dataset id, split counts, validation metrics,
 baseline, optional test metrics and artifact paths.
 
+## Trading evaluation
+
+A classifier is not a strategy until it pays the simulator's costs. The
+evaluation policy is deliberately small:
+
+- flat: BUY when `p_up >= threshold`, SELL when `p_down >= threshold`;
+- long: CLOSE when `p_down >= exit_threshold`;
+- short: CLOSE when `p_up >= exit_threshold`;
+- the simulator still owns sizing, SL/TP, time stop and every risk block.
+
+```bash
+uv run python -m scalping.cli ml evaluate   --run runs/ml/ml-logistic-316312dff683   --root ../data-ticks5-store   --split validation --stress 2,3
+```
+
+This runs on one chronological split (validation by default), reports the same
+net/PF/expectancy/drawdown/cost fields as every other strategy and a hold
+baseline, and repeats the run at the requested cost multipliers. The test split
+is available with `--split test`, but should be read once per candidate.
+
+Limitations of this first slice: no regime breakdown yet, no probability
+calibration gate, and the threshold policy is not trained end-to-end as a
+trading objective.
+
 ## Artifacts
 
 ```
