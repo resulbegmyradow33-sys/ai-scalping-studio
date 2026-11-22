@@ -58,7 +58,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 4 — Market regime engine
 
-- [ ] Rule-based trend/volatility/expansion/breakout/unusual regimes.
+- [x] Rule-based trend/volatility/expansion/breakout/unusual regimes.
 - [ ] K-Means regime model.
 - [ ] Gaussian mixture regime model.
 - [ ] Hidden Markov regime model.
