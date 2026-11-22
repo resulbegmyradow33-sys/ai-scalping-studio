@@ -5,6 +5,11 @@ project does not yet follow strict semantic versioning.
 
 ## Unreleased
 
+### Changed
+
+- Repository made public. Server-side `main` protection, secret scanning,
+  push protection and CodeQL are now enabled at no cost.
+
 ### Added
 
 - Symbol registry for ten instruments and M30/H4 timeframes.

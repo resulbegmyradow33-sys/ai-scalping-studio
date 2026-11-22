@@ -34,6 +34,10 @@ for topic in algorithmic-trading quantitative-finance reinforcement-learning \
   gh repo edit "$REPO" --add-topic "$topic" >/dev/null 2>&1 || true
 done
 
+# Secret scanning is free on public repositories; ignore on private Free.
+gh repo edit "$REPO" --enable-secret-scanning --enable-secret-scanning-push-protection \
+  >/dev/null 2>&1 || echo "warning: secret scanning not enabled (visibility or plan)"
+
 # --- labels ------------------------------------------------------------------
 label() {
   gh label create "$1" --repo "$REPO" --color "$2" --description "$3" --force >/dev/null

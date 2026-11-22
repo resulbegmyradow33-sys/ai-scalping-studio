@@ -1,7 +1,7 @@
 # Contributing / collaborator guide
 
-The repository is **private**. A new developer needs an invite before any git
-command can reach it.
+The repository is **public**. Anyone can read it; write access still requires an
+invitation (or a fork + pull request).
 
 ## 1. Get access
 
@@ -51,7 +51,7 @@ npm install
 npm test
 ```
 
-Install the local guard (needed on the private GitHub Free plan):
+Install the local guard (defense in depth; the server also protects `main`):
 
 ```bash
 make hooks     # blocks direct pushes to main unless ALLOW_MAIN_PUSH=1

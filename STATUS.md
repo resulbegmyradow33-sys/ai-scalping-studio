@@ -84,8 +84,9 @@ aynı anda çalışmaz.
 - PR/issue şablonları, CODEOWNERS, SECURITY, CODE_OF_CONDUCT, CHANGELOG.
 - 27 etiket, 14 faz milestone'u, 5 açılış issue'su.
 - `make hooks`: doğrudan `main` push'unu yerelde engeller.
-- Private GitHub Free sunucu tarafı branch protection'ı desteklemiyor; repo public
-  yapılırsa protection + secret scanning + CodeQL ücretsiz açılır. Karar issue #16.
+- Repo **public**; sunucu tarafı branch protection, secret scanning, push
+  protection ve CodeQL ücretsiz aktif.
+- Yerel `pre-push` hook ek savunma olarak duruyor.
 
 ## Çalıştırma
 

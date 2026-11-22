@@ -1,7 +1,7 @@
 # Team workflow
 
 How work moves from an idea to `main` without breaking the validated system.
-The repository is private; access is granted per person, not per team (a
+The repository is public; write access is granted per person, not per team (a
 personal GitHub account has collaborators, not org teams).
 
 ## Roles
@@ -158,21 +158,17 @@ Tags are `v0.x.y` on `main`. A release notes file is generated from
 - vulnerability alerts and Dependabot security fixes;
 - `main` branch protection **when the plan allows it**.
 
-### Private repository on GitHub Free
+### Public repository
 
-Branch protection and rulesets are a paid feature for private repositories:
-the API returns `403 Upgrade to GitHub Pro or make this repository public`.
-Zero-cost options:
+The repository is public, so GitHub Free includes branch protection, rulesets,
+secret scanning, push protection and CodeQL. `scripts/setup_github.sh` applies:
 
-1. **Keep it private and enforce locally.** `make hooks` installs
-   `.githooks/pre-push`, which blocks direct pushes to `main`; CI still runs on
-   every PR, and the team follows the PR rule by discipline. Bypass only for
-   repository maintenance with `ALLOW_MAIN_PUSH=1 git push`.
-2. **Make the repository public.** Public repositories get branch protection,
-   rulesets, secret scanning and CodeQL at no cost. This exposes the code and
-   research results; it is a product decision, not an automatic one.
+- `main` protection: PR required, one approval, CODEOWNERS review,
+  `backend` + `frontend` checks, up-to-date branch, linear history,
+  conversation resolution, no force push/delete;
+- secret scanning and push protection;
+- vulnerability alerts and Dependabot security fixes.
 
-The owner must choose. The script never changes visibility on its own.
-
-Secret scanning and CodeQL code scanning require GitHub Advanced Security on a
-private repository. On a public repository they are free.
+The local `pre-push` hook remains as defense in depth. If the repository ever
+becomes private again, server-side protection disappears on the Free plan and
+the hook becomes the only local gate.
