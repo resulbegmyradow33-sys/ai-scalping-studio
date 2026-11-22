@@ -631,3 +631,110 @@ def test_data_validate_without_a_slice_exits_2_with_json_error(tmp_path):
     assert r.stdout == ""
     error = json.loads(r.stderr)
     assert "XAUUSD" in error["error"] and "H1" in error["error"]
+
+
+def test_cli_ml_train_writes_a_model_and_metrics(tmp_path):
+    root = tmp_path / "store"
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(root),
+    )
+    assert synth.returncode == 0, synth.stderr
+    out = tmp_path / "ml"
+    trained = run(
+        "ml",
+        "train",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--model",
+        "logistic",
+        "--groups",
+        "price,momentum",
+        "--horizon",
+        "5",
+        "--purge",
+        "5",
+        "--embargo",
+        "2",
+        "--root",
+        str(root),
+        "--out",
+        str(out),
+    )
+    assert trained.returncode == 0, trained.stderr
+    payload = json.loads(trained.stdout)
+    assert payload["model"] == "logistic"
+    assert payload["validation"] > 0
+    assert Path(payload["model_path"]).is_file()
+    assert Path(payload["metrics_path"]).is_file()
+    assert payload["validation_metrics"]["rows"] == payload["validation"]
+
+
+def test_cli_ml_evaluate_trades_a_saved_model(tmp_path):
+    root = tmp_path / "store"
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(root),
+    )
+    assert synth.returncode == 0, synth.stderr
+    out = tmp_path / "ml"
+    trained = run(
+        "ml",
+        "train",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--model",
+        "logistic",
+        "--groups",
+        "price,momentum",
+        "--horizon",
+        "5",
+        "--purge",
+        "5",
+        "--embargo",
+        "2",
+        "--root",
+        str(root),
+        "--out",
+        str(out),
+    )
+    assert trained.returncode == 0, trained.stderr
+    run_dir = Path(json.loads(trained.stdout)["model_path"]).parent
+    evaluated = run(
+        "ml",
+        "evaluate",
+        "--run",
+        str(run_dir),
+        "--root",
+        str(root),
+        "--split",
+        "validation",
+        "--stress",
+        "2",
+    )
+    assert evaluated.returncode == 0, evaluated.stderr
+    payload = json.loads(evaluated.stdout)
+    assert payload["split"] == "validation"
+    assert {"trades", "net_profit", "profit_factor"} <= set(payload["metrics"])
+    assert payload["hold"]["trades"] == 0
+    assert "x2" in payload["stress"]

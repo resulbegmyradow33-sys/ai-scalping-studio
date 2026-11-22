@@ -31,11 +31,11 @@ make hooks
 
 cd backend
 uv sync
-uv run pytest          # 539 test, ~2 dakika
+uv run pytest          # 556 test, ~2 dakika
 
 cd ../frontend
 npm ci
-npm test               # 184 test
+npm test               # 188 test
 ```
 
 Fork kullanıyorsan:
