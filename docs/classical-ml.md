@@ -126,6 +126,20 @@ with these baselines. The next attempt must add evidence (flow/macro/regime
 interactions, different horizon, or a different task) rather than blindly adding
 capacity.
 
+### Trading evaluation of the same logistic model
+
+Validation split, threshold 0.55, simulator costs included:
+
+| Cost | Trades | Net | PF | Expectancy | Max DD | Costs |
+|---|---|---|---|---|---|---|
+| ×1 | 407 | **−$2,002** | 0.83 | −0.131 R | 22.3% | $1,503 |
+| ×2 | 226 | −$2,002 | 0.71 | −0.231 R | 20.9% | $1,731 |
+| ×3 | 185 | −$2,006 | 0.65 | −0.274 R | 20.5% | $2,114 |
+
+Holding was flat (net $0). The classifier is worse than doing nothing after
+costs; the trading evaluation exists to catch exactly this, which accuracy and
+log loss alone did not.
+
 ## What this proves
 
 - The pipeline can train a genuine classical classifier on leakage-safe,

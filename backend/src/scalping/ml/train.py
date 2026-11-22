@@ -251,12 +251,16 @@ def load_result(directory: str | Path) -> MLResult:
         include_flat=bool(spec_raw.get("include_flat", False)),
     )
     model, columns = load_model(target / "model.joblib")
+    dataset_id = str(metadata["dataset_id"])
+    parts = dataset_id.split(":")
+    symbol = str(metadata.get("symbol") or (parts[0] if parts else ""))
+    timeframe = str(metadata.get("timeframe") or (parts[1] if len(parts) > 1 else "M1"))
     return MLResult(
         model=model,
         spec=spec,
-        symbol=str(metadata["symbol"]),
-        timeframe=str(metadata["timeframe"]),
-        dataset_id=str(metadata["dataset_id"]),
+        symbol=symbol,
+        timeframe=timeframe,
+        dataset_id=dataset_id,
         columns=tuple(columns),
         validation=metadata["validation"],
         test=metadata.get("test"),
