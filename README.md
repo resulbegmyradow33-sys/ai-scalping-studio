@@ -15,6 +15,7 @@ therefore replays that rule; PPO stays in the research lab.
 - [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing.
 - [`docs/architecture-audit.md`](docs/architecture-audit.md) — evidence-based audit.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
+- [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
 
 ## Team
