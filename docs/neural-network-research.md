@@ -221,8 +221,9 @@ uv run python -m scalping.cli nn evaluate \
 - `evaluate` reloads the checkpoint, rebuilds the dataset and scores one split
   (`--split`, default `test`). It refuses a checkpoint whose `dataset_id` does
   not match the rebuilt data, so a wrong root/timeframe/window cannot be scored
-  silently. Use the same `--horizon`, `--purge`, `--train-fraction` and
-  `--validation-fraction` as training when they differed from the defaults.
+  silently. Use the same `--horizon`, `--purge`, `--clip`,
+  `--train-fraction` and `--validation-fraction` as training when they differed
+  from the defaults.
 - `--device auto` prefers MPS, `cpu` forces the CPU and `mps` fails if the
   machine has no MPS.
 - Checkpoints and reports live under `runs/`, which is gitignored.

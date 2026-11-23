@@ -62,6 +62,17 @@ def test_cli_model_choices_match_the_zoo() -> None:
     assert tuple(cli._NN_MODELS) == tuple(MODEL_NAMES)
 
 
+def test_nn_evaluate_accepts_clip_and_device() -> None:
+    from scalping import cli
+
+    parser = cli._build_parser()
+    args = parser.parse_args(
+        ["nn", "evaluate", "--checkpoint", "model.pt", "--clip", "3", "--device", "cpu"]
+    )
+
+    assert args.clip == 3.0 and args.device == "cpu"
+
+
 def test_nn_train_and_evaluate_roundtrip(tmp_path) -> None:
     seed_h1(tmp_path)
     checkpoint = tmp_path / "runs" / "gru.pt"
