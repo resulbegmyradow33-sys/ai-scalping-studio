@@ -17,9 +17,14 @@ itself is a single blocking call: it cannot be interrupted mid-fit, so a cancel
 during that window stays ``cancelling`` until the fit returns. The terminal
 ``cancelled`` is written by the worker, never by the control request.
 
-There are no dataset or feature caches in this slice. A run holds one feature
-frame (bounded by :data:`MAX_BARS`) and leaves it to the garbage collector when
-the worker ends.
+There are no dataset caches in this slice. A run holds one feature frame
+(bounded by :data:`MAX_BARS`) and leaves it to the garbage collector when the
+worker ends. The **feature matrix** is cached on disk under
+``<runs_root>/.feature-cache`` (see :mod:`scalping.features.cache`): repeated
+training and evaluation of the same store reuses the 59-column matrix instead of
+rebuilding it. The cache is on by default, scoped to this app's runs root, and a
+constructor flag or ``MLRunner(..., use_cache=False)`` disables it; a cache hit
+is bit-identical to a build, and any corrupt entry degrades to a rebuild.
 """
 
 from __future__ import annotations
@@ -36,13 +41,15 @@ from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
+import polars as pl
 
 from scalping.api.schemas import is_ml_run_id
 from scalping.config import Settings
 from scalping.data.registry import TIMEFRAMES
 from scalping.data.store import ParquetStore
 from scalping.datasets.builder import build_dataset
-from scalping.features.build import FeatureFrame, build_features
+from scalping.features.build import FeatureFrame
+from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
 from scalping.features.registry import columns_for
 from scalping.ml.evaluate import EvaluationResult, evaluate_model
 from scalping.ml.models import MODEL_NAMES
@@ -307,13 +314,32 @@ class MLRunner:
         store: ParquetStore,
         settings: Settings,
         runs_root: str | Path,
+        *,
+        cache: FeatureCache | None = None,
+        use_cache: bool = True,
     ) -> None:
         self.store = store
         self.settings = settings
         self.runs_root = Path(runs_root)
         self.slot = MLJobSlot()
+        self.cache: FeatureCache | None = None
+        if use_cache:
+            if cache is not None:
+                self.cache = cache
+            else:
+                self.cache = FeatureCache(self.runs_root / FEATURE_CACHE_DIRNAME)
         self._lock = threading.Lock()
         self._runs: dict[str, MLRunState] = {}
+
+    def _features(self, frame: pl.DataFrame, symbol: str, timeframe: str) -> FeatureFrame:
+        """The shared feature-matrix path: cache hit, else build and store."""
+        return cached_build_features(
+            self.cache,
+            symbol=symbol,
+            timeframe=timeframe,
+            frame=frame,
+            settings=self.settings,
+        )
 
     # -- start -----------------------------------------------------------
 
@@ -342,7 +368,7 @@ class MLRunner:
                     f"refusing {frame.height} bars: the API limit is {MAX_BARS}; "
                     "narrow the stored history"
                 )
-            features = build_features(frame, self.settings.costs)
+            features = self._features(frame, request.symbol, request.timeframe)
             if features.X.shape[1] > MAX_FEATURES:  # pragma: no cover - registry guard
                 raise MLError(
                     f"{features.X.shape[1]} feature columns exceeds the limit of {MAX_FEATURES}"
@@ -791,7 +817,7 @@ class MLRunner:
             raise MLError(f"no {result.symbol} {result.timeframe} bars in the store")
         if frame.height > MAX_BARS:
             raise MLError(f"refusing {frame.height} bars: the API limit is {MAX_BARS}")
-        features = build_features(frame, self.settings.costs)
+        features = self._features(frame, result.symbol, result.timeframe)
 
         spec = result.spec
         try:
