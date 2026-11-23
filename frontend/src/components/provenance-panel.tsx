@@ -34,7 +34,7 @@ export function ProvenancePanel({ provenance }: ProvenancePanelProps) {
 
       {provenance === null || provenance === undefined ? (
         <p data-testid="provenance-missing" className="text-sm text-slate-400">
-          Bu store için köken kaydı yok. Eski store'lar dataset kimliği, checksum
+          Bu store için köken kaydı yok. Eski store’lar dataset kimliği, checksum
           ve oluşturma zamanı taşımaz; bu değerler tahmin edilmez.
         </p>
       ) : (
