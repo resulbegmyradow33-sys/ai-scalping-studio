@@ -42,6 +42,7 @@ from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
 from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
 from scalping.serialize import metrics_payload
@@ -82,6 +83,8 @@ _NN_MODELS: Final[tuple[str, ...]] = (
     "tcn",
     "transformer",
     "causal_transformer",
+    "patchtst",
+    "itransformer",
 )
 
 #: Bars needed before the simulator has its first decision bar: the feature
@@ -464,6 +467,51 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     )
 
 
+def _cmd_ml_cv(args: argparse.Namespace) -> None:
+    """Run purged expanding-window CV without reading validation or test rows."""
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = build_features(frame, Settings().costs)
+    groups = (
+        DEFAULT_GROUPS
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
+    )
+    spec = TrainSpec(
+        model=args.model,
+        horizon=args.horizon,
+        groups=groups,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        seed=args.seed,
+        include_flat=args.include_flat,
+    )
+    config = CVConfig(
+        n_splits=args.folds,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        min_train_rows=args.min_train_rows,
+    )
+    result = cross_validate(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        spec=spec,
+        config=config,
+    )
+    payload = result.to_dict()
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
+
+
 def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
     """Trade a saved classifier on one chronological split."""
     result = load_result(Path(args.run))
@@ -682,6 +730,35 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
     ml_train.set_defaults(handler=_cmd_ml_train)
+
+    ml_cv = ml_commands.add_parser(
+        "cv", help="purged time-series cross-validation on the training split"
+    )
+    ml_cv.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    ml_cv.add_argument("--timeframe", default="H1")
+    ml_cv.add_argument("--model", default="logistic")
+    ml_cv.add_argument("--groups", default="all")
+    ml_cv.add_argument("--horizon", type=int, default=5)
+    ml_cv.add_argument("--folds", type=int, default=5)
+    ml_cv.add_argument("--purge", type=int, default=5)
+    ml_cv.add_argument(
+        "--embargo",
+        type=int,
+        default=5,
+        help="extra bars before each test block (matches ml train)",
+    )
+    ml_cv.add_argument("--min-train-rows", type=int, default=50)
+    ml_cv.add_argument("--train-fraction", type=float, default=0.70)
+    ml_cv.add_argument("--validation-fraction", type=float, default=0.15)
+    ml_cv.add_argument("--seed", type=int, default=0)
+    ml_cv.add_argument(
+        "--include-flat",
+        action="store_true",
+        help="keep exact-zero returns as a third class (usually harmful)",
+    )
+    ml_cv.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_cv.add_argument("--out", default=None, help="optional full report path")
+    ml_cv.set_defaults(handler=_cmd_ml_cv)
 
     ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
     ml_evaluate.add_argument("--run", required=True, help="runs/ml/<run> directory")

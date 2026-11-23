@@ -7,14 +7,17 @@ plain datetimes: providers treat a naive value as already-UTC.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Final, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, StringConstraints, model_validator
 
 from scalping.serialize import metrics_payload
 
 __all__ = [
+    "IMPORT_NAME_PATTERN",
+    "SYMBOL_PATTERN",
     "BacktestRequest",
     "BacktestResponse",
     "BanditWeight",
@@ -27,6 +30,7 @@ __all__ = [
     "EvaluateResponse",
     "FoldSummary",
     "HealthResponse",
+    "ImportFileName",
     "OkResponse",
     "ProviderName",
     "RegimeCount",
@@ -39,15 +43,64 @@ __all__ = [
     "StartRequest",
     "StartResponse",
     "StressSummary",
+    "SymbolId",
     "TimeframeSpec",
     "TrainRequest",
     "TrainResponse",
     "TrainingPoint",
+    "is_symbol_id",
     "metrics_payload",
 ]
 
 ProviderName = Literal["synthetic", "csv", "dukascopy"]
 ControlAction = Literal["pause", "resume", "stop", "reset"]
+
+#: A symbol becomes a directory name under the data root, so the HTTP boundary
+#: only admits a single path segment made of letters, digits, dot, dash and
+#: underscore. The first character is alphanumeric, which rules out ``.`` and
+#: ``..``; separators are never accepted, so no value can traverse upwards.
+#: Validating here means a bad id is a 422 from request parsing, before any
+#: store or provenance path is built.
+SYMBOL_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+_SYMBOL_RE: Final[re.Pattern[str]] = re.compile(SYMBOL_PATTERN)
+#: Upper bound keeps a hostile 10k-character id from reaching the filesystem,
+#: where it would surface as ``ENAMETOOLONG`` (a 500) instead of a 422.
+_MAX_SYMBOL_LENGTH: Final[int] = 32
+
+#: Constrained symbol for every request model and query parameter.
+SymbolId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=_MAX_SYMBOL_LENGTH,
+        pattern=SYMBOL_PATTERN,
+    ),
+]
+
+#: An HTTP CSV import names a file, never a path: one segment, no separators,
+#: no leading dot and no drive letter. The server looks the name up in
+#: ``<data_root>/imports`` and never joins it to anything.
+IMPORT_NAME_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+ImportFileName = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=255,
+        pattern=IMPORT_NAME_PATTERN,
+    ),
+]
+
+
+def is_symbol_id(value: str) -> bool:
+    """Whether ``value`` is a safe single-segment symbol id.
+
+    Query parameters are plain ``str`` to FastAPI, so routes call this before
+    touching the store. It applies exactly the constraint :data:`SymbolId`
+    puts on request bodies.
+    """
+    return len(value) <= _MAX_SYMBOL_LENGTH and _SYMBOL_RE.fullmatch(value) is not None
 
 
 class HealthResponse(BaseModel):
@@ -74,18 +127,28 @@ class DataStatusResponse(BaseModel):
 
 
 class DownloadRequest(BaseModel):
+    """One synchronous provider fetch.
+
+    With ``provider='csv'``, ``path`` is a bare file **name**, not a filesystem
+    path: the export must already sit directly in ``<data_root>/imports`` and
+    the request names it there. The server looks the name up in that directory,
+    so the opened path is never built from request data.
+    """
+
     provider: ProviderName
-    symbol: str = Field(min_length=1)
+    symbol: SymbolId
     start: datetime
     end: datetime
     seed: int | None = None
-    path: str | None = None
+    path: ImportFileName | None = None
     tz_offset: int | None = None
 
     @model_validator(mode="after")
     def _csv_needs_a_path(self) -> DownloadRequest:
         if self.provider == "csv" and not self.path:
-            raise ValueError("path is required when provider is 'csv'")
+            raise ValueError(
+                "path (a file name in <data_root>/imports) is required when provider is 'csv'"
+            )
         return self
 
 
@@ -161,7 +224,7 @@ class TrainRequest(BaseModel):
     total_steps: int = Field(default=200_000, ge=1)
     n_envs: int = Field(default=2, ge=1)
     seed: int = Field(default=0, ge=0)
-    symbol: str = Field(min_length=1)
+    symbol: SymbolId
     use_strategy: bool = True
     entry_penalty: float = Field(default=0.05, ge=0.0, le=1.0)
     gate_signals: bool = True
@@ -225,7 +288,7 @@ class RunControlRequest(BaseModel):
 
 class BacktestRequest(BaseModel):
     run_id: str = Field(min_length=1)
-    symbol: str = Field(min_length=1)
+    symbol: SymbolId
 
 
 class BacktestResponse(BaseModel):
@@ -235,7 +298,7 @@ class BacktestResponse(BaseModel):
 
 class EvaluateRequest(BaseModel):
     run_id: str = Field(min_length=1)
-    symbol: str = Field(min_length=1)
+    symbol: SymbolId
     folds: int = Field(default=3, ge=1, le=12)
 
 
@@ -273,7 +336,7 @@ class EvaluateResponse(BaseModel):
 class CalibrateRequest(BaseModel):
     """Parameters for a nightly rule recalibration."""
 
-    symbol: str = Field(default="XAUUSD", min_length=1)
+    symbol: SymbolId = "XAUUSD"
     timeframe: Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"] = "H1"
     holdout_fraction: float = Field(default=0.2, gt=0.0, lt=1.0)
     min_train_trades: int = Field(default=100, ge=10)

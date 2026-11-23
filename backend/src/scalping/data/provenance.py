@@ -110,8 +110,32 @@ def build_provenance(
     )
 
 
+def _segment(value: str, what: str) -> str:
+    """One path segment only: no separators, no dot-only names."""
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError(f"{what} must be a single path segment, got {value!r}")
+    return value
+
+
 def provenance_path(root: str | Path, symbol: str, timeframe: str) -> Path:
-    return Path(root) / "_meta" / symbol / f"{timeframe}.json"
+    """Sidecar path for one slice, refused when it would leave ``root``.
+
+    ``symbol`` and ``timeframe`` arrive from HTTP query parameters and end up as
+    path segments. Both are checked as single segments, and the joined path is
+    normalised and prefix-checked against the normalised root — the pattern
+    CodeQL recognises as a path sanitizer.
+    """
+    base = os.path.normpath(str(root))
+    target = os.path.normpath(
+        os.path.join(
+            base, "_meta", _segment(symbol, "symbol"), f"{_segment(timeframe, 'timeframe')}.json"
+        )
+    )
+    if target != base and not target.startswith(base + os.sep):
+        raise ValueError(
+            f"provenance path escapes {base}: symbol={symbol!r} timeframe={timeframe!r}"
+        )
+    return Path(target)
 
 
 def save_provenance(root: str | Path, provenance: DatasetProvenance) -> Path:

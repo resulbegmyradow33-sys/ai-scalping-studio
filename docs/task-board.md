@@ -37,7 +37,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Tick table layer for querying ticks without pre-aggregation.
 - [ ] Data-quality report in the dashboard.
 - [x] Per-symbol sessions enforced in the simulator.
-- [ ] Dataset import is chunked automatically for multi-GB files.
+- [x] Chunked CSV parse; frame still materialised (a 4 GB file still needs ~6 GB).
 
 ## Phase 3 — Features and datasets
 
@@ -82,7 +82,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Brier, log loss, balanced accuracy, per-class metrics, confusion, baseline.
 - [x] Flat-zero rows dropped by default with an audited count; `--include-flat` opt-in.
 - [ ] Return/volatility/regime/trade-outcome tasks.
-- [ ] Purged time-series CV with embargo.
+- [x] Purged time-series CV with embargo.
 - [x] Reliability curve, ECE and guarded MCE.
 - [ ] Calibration thresholds / probability rejection gate.
 - [ ] Feature importance and ablation.
@@ -109,8 +109,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 - [x] Transformer encoder.
 - [x] Causal temporal Transformer.
-- [ ] PatchTST-style patching.
-- [ ] iTransformer-style variate attention.
+- [x] PatchTST-style patching.
+- [x] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
 - [x] Config guard (d_model/layers/heads/sequence/batch).
 - [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.

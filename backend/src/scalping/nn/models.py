@@ -40,6 +40,8 @@ ModelName = Literal[
     "tcn",
     "transformer",
     "causal_transformer",
+    "patchtst",
+    "itransformer",
 ]
 
 MODEL_NAMES: Final[tuple[ModelName, ...]] = (
@@ -55,6 +57,8 @@ MODEL_NAMES: Final[tuple[ModelName, ...]] = (
     "tcn",
     "transformer",
     "causal_transformer",
+    "patchtst",
+    "itransformer",
 )
 
 
@@ -339,6 +343,26 @@ def build_model(
         return _CNN_LSTM(spec)
     if name == "tcn":
         return CausalTCN(spec)
+    if name == "patchtst":
+        from scalping.nn.transformers import build_patchtst
+
+        return build_patchtst(
+            n_features=spec.n_features,
+            window=spec.window,
+            n_classes=spec.n_classes,
+            hidden=spec.hidden,
+            dropout=spec.dropout,
+        )
+    if name == "itransformer":
+        from scalping.nn.transformers import build_itransformer
+
+        return build_itransformer(
+            n_features=spec.n_features,
+            window=spec.window,
+            n_classes=spec.n_classes,
+            hidden=spec.hidden,
+            dropout=spec.dropout,
+        )
     from scalping.nn.transformers import build_transformer
 
     return build_transformer(

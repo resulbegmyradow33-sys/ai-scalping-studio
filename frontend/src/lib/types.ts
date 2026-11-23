@@ -91,6 +91,7 @@ export interface DownloadRequest {
   start: string;
   end: string;
   seed?: number | null;
+  /** CSV only: a bare file name in the backend's `<data_root>/imports`. */
   path?: string | null;
   tz_offset?: number | null;
 }

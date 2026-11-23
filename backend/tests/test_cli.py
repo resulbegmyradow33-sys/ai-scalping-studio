@@ -740,6 +740,91 @@ def test_cli_ml_evaluate_trades_a_saved_model(tmp_path):
     assert "x2" in payload["stress"]
 
 
+def test_cli_ml_cv_prints_json_and_writes_report(tmp_path):
+    root = tmp_path / "store"
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-06",
+        "--root",
+        str(root),
+    )
+    assert synth.returncode == 0, synth.stderr
+    out = tmp_path / "cv.json"
+    completed = run(
+        "ml",
+        "cv",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--model",
+        "logistic",
+        "--groups",
+        "price,momentum",
+        "--horizon",
+        "5",
+        "--folds",
+        "4",
+        "--purge",
+        "5",
+        "--embargo",
+        "2",
+        "--min-train-rows",
+        "50",
+        "--root",
+        str(root),
+        "--out",
+        str(out),
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stderr == ""
+    assert completed.stdout.count("\n") == 1
+    payload = json.loads(completed.stdout)
+    assert payload["model"] == "logistic"
+    assert payload["spec"]["horizon"] == 5
+    assert payload["spec"]["include_flat"] is False
+    assert payload["spec"]["seed"] == 0
+    assert payload["columns"]
+    assert len(payload["folds"]) == 4
+    assert payload["split_counts"]["train"] > 0
+    assert set(payload["aggregate"]) == {
+        "accuracy",
+        "balanced_accuracy",
+        "log_loss",
+        "brier",
+        "ece",
+        "mce",
+    }
+    assert "out" in payload
+    report = json.loads(out.read_text())
+    assert "out" not in report
+    assert report["dataset_id"] == payload["dataset_id"]
+    assert report["spec"] == payload["spec"]
+
+
+def test_cli_ml_cv_without_data_exits_2(tmp_path):
+    completed = run(
+        "ml",
+        "cv",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--root",
+        str(tmp_path / "empty"),
+    )
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    error = json.loads(completed.stderr)
+    assert "XAUUSD" in error["error"] and "M1" in error["error"]
+
+
 def test_cli_import_does_not_load_boosting_libraries():
     code = (
         "import sys\n"

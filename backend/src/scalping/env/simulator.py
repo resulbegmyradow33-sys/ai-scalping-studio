@@ -38,6 +38,13 @@ bar the entry fills on (the arm the policy saw when it decided to act).
 for the context matrix's success columns; pass ``label_events(df, settings)`` so
 those labels are priced with the same account the episode runs, instead of the
 module's default :class:`~scalping.config.Settings`.
+
+Action masks
+------------
+:meth:`Simulator.action_masks` reports which of the four actions the loop can
+execute on the current bar: entries while flat, HOLD and CLOSE while in a
+position, and HOLD only once the episode is over. It is a pure read of the
+state, so a caller can ask before every decision without changing the episode.
 """
 
 from __future__ import annotations
@@ -58,7 +65,7 @@ from scalping.features.build import FeatureFrame
 from scalping.strategy.signals import ALL_STRATEGIES
 from scalping.types import AccountState, Bar, Position, Side, Trade
 
-__all__ = ["MAX_STEPS", "WINDOW", "ArmSelector", "Simulator", "StepResult"]
+__all__ = ["MAX_STEPS", "N_ACTIONS", "WINDOW", "ArmSelector", "Simulator", "StepResult"]
 
 
 @runtime_checkable
@@ -116,6 +123,9 @@ _BUY: Final[int] = 1
 _SELL: Final[int] = 2
 _CLOSE: Final[int] = 3
 _ACTIONS: Final[frozenset[int]] = frozenset({_HOLD, _BUY, _SELL, _CLOSE})
+
+#: Size of the discrete action space: HOLD, BUY, SELL and CLOSE.
+N_ACTIONS: Final[int] = len(_ACTIONS)
 
 
 class StepResult(NamedTuple):
@@ -310,6 +320,39 @@ class Simulator:
         """Index of the bar the current episode started from."""
         return self._episode_start
 
+    def action_masks(self) -> np.ndarray:
+        """Boolean availability of HOLD, BUY, SELL and CLOSE at this bar.
+
+        The mask mirrors the loop's own rejections:
+
+        * flat: HOLD, BUY and SELL are available; CLOSE would be rejected with
+          ``"no_position"``;
+        * long or short: HOLD and CLOSE are available; a second entry would be
+          rejected with ``"max_positions"``;
+        * flat under an active flow gate whose imbalance does not clear its
+          threshold: BUY and SELL are masked (``"no_flow"``), HOLD remains;
+        * done, or a frame with no usable bars: only HOLD is left, because
+          ``step`` ignores every action once the episode is over.
+
+        This is a pure read of the current state: it neither steps, marks nor
+        mutates the account, and calling it twice returns the same mask. Gates
+        that depend on the account rather than the position — daily loss,
+        session hours, the signal gate, a missing ATR or a lot below the
+        contract minimum — are not reflected, so the mask may allow an action
+        that ``step`` then blocks (``info["blocked"]``). It never hides an
+        action the loop would accept.
+        """
+        mask = np.zeros(N_ACTIONS, dtype=bool)
+        mask[_HOLD] = True
+        if self._done or self._no_bars:
+            return mask
+        if self.broker.position is not None:
+            mask[_CLOSE] = True
+        elif not self._flow_gate_blocked():
+            mask[_BUY] = True
+            mask[_SELL] = True
+        return mask
+
     # --- episode -----------------------------------------------------------
 
     def reset(self, seed: int | None = None) -> np.ndarray:
@@ -485,6 +528,20 @@ class Simulator:
             return 0
         return int(self._strategy_signals[self._i, int(self._arm)])
 
+    def _flow_gate_blocked(self) -> bool:
+        """True when the flow gate is active and this bar's imbalance is too weak.
+
+        Shared by :meth:`_gate_reason` and :meth:`action_masks`, so the mask and
+        the entry path can never disagree about what the flow gate allows. A
+        non-finite imbalance or threshold counts as blocked, matching the entry
+        path.
+        """
+        if self._flow is None or self._flow_thr is None:
+            return False
+        value = float(self._flow[self._i])
+        threshold = float(self._flow_thr[self._i])
+        return not (isfinite(value) and isfinite(threshold)) or abs(value) <= threshold
+
     def _gate_reason(self, action: int) -> str | None:
         """The reason this entry is blocked, or ``None`` when it may proceed."""
         if self.gate_signals and not self._signals_unknown():
@@ -493,11 +550,8 @@ class Simulator:
                 return "no_signal"
             if (action == _BUY and signal < 0) or (action == _SELL and signal > 0):
                 return "signal_conflict"
-        if self._flow is not None and self._flow_thr is not None:
-            value = float(self._flow[self._i])
-            threshold = float(self._flow_thr[self._i])
-            if not isfinite(value) or not isfinite(threshold) or abs(value) <= threshold:
-                return "no_flow"
+        if self._flow_gate_blocked():
+            return "no_flow"
         return None
 
     def _signals_unknown(self) -> bool:
