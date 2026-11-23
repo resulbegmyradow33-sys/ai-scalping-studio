@@ -33,7 +33,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       The store + `_meta` + dataset manifests exist; a raw/clean split does not.
 - [ ] Real providers for EURUSD, GBPUSD, USDJPY, AUDUSD, NAS100, US30, USOIL,
       BTCUSD. **BLOCKED on free sources/licences** (issue #15).
-- [ ] Statistical outlier detection and cross-source reconciliation.
+- [x] Statistical outlier detection and cross-source reconciliation.
 - [ ] Tick table layer for querying ticks without pre-aggregation.
 - [ ] Data-quality report in the dashboard.
 - [ ] Per-symbol sessions enforced in the simulator.
