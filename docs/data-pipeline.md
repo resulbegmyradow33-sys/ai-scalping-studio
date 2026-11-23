@@ -26,6 +26,32 @@ feature builder / labels / simulator
 The store is the only durable data layer. `runs/` is runtime state and is
 gitignored; data stores are local and gitignored too.
 
+### Feature availability
+
+`scalping/features/availability.py` stops a dataset from claiming features its
+source cannot support. `build_dataset(..., capabilities=Capabilities(...))`
+checks the selected columns before the split is built; without `capabilities`
+the historical behaviour is unchanged.
+
+| Capability | Default | Satisfied by |
+|---|---|---|
+| `bar_volume` | true | a non-zero bar `volume` field |
+| `real_quotes` | false | non-null `bid_close`/`ask_close`/`spread` rows |
+| `modeled_spread` | true | the feature preparer's spread model |
+| `tick_flow` | false | signed tick volumes; **never inferred from bars** |
+| `m1_source` | true | an M1 frame the higher timeframes are derived from |
+
+Rules: `volume_*` needs `bar_volume`; `spread_*` needs `spread`
+(`real_quotes` **or** `modeled_spread`); `m5_*`/`m15_*`/`htf_*` need an M1
+source; any `flow_*` column is reserved for the tick layer and needs
+`tick_flow`. An unavailable selection raises `FeatureUnavailableError` and
+names every missing input, so a manifest cannot quietly describe unsupported
+features.
+
+`capabilities_from_frame(frame)` infers volume/quote availability from a raw
+provider frame. CSV exports without quotes are correctly reported as
+`real_quotes=False`, while the allowed spread model keeps `spread_*` usable.
+
 ## Schema
 
 Every bar frame conforms to `scalping.data.base.BAR_SCHEMA`:
