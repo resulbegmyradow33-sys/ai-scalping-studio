@@ -51,7 +51,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Feature availability rules (e.g. signed flow only with tick volumes).
 - [ ] H4/M30 multi-timeframe alignment tests.
 - [ ] Dataset id wired into every trainer/run config.
-- [ ] Persisted array format for large datasets (memmap/parquet).
+- [x] Persisted array format for large datasets (memmap/parquet).
 - [ ] Feature ablation runner.
 - [ ] Consecutive-candle and log-return features explicitly named.
 - [ ] Cumulative volume delta and order-flow features from real ticks.
