@@ -178,6 +178,29 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 #: Order states a caller may write.
 _ORDER_STATUSES: Final[frozenset[str]] = frozenset({"pending", "filled", "rejected"})
 
+#: Paginated reads. The table and ordering are chosen here, never by a caller,
+#: so the only request-derived values that reach SQL are the bound parameters.
+_PAGE_SQL: Final[dict[str, str]] = {
+    "sessions": (
+        "SELECT * FROM sessions ORDER BY started_at DESC, session_id DESC LIMIT ? OFFSET ?"
+    ),
+    "positions": (
+        "SELECT * FROM positions WHERE session_id = ? ORDER BY position_id LIMIT ? OFFSET ?"
+    ),
+    "orders": "SELECT * FROM orders WHERE session_id = ? ORDER BY order_id LIMIT ? OFFSET ?",
+    "trades": "SELECT * FROM trades WHERE session_id = ? ORDER BY trade_id LIMIT ? OFFSET ?",
+    "equity": "SELECT * FROM equity_curve WHERE session_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+}
+
+#: The matching totals, so a page can say how many rows exist behind it.
+_COUNT_SQL: Final[dict[str, str]] = {
+    "sessions": "SELECT COUNT(*) FROM sessions",
+    "positions": "SELECT COUNT(*) FROM positions WHERE session_id = ?",
+    "orders": "SELECT COUNT(*) FROM orders WHERE session_id = ?",
+    "trades": "SELECT COUNT(*) FROM trades WHERE session_id = ?",
+    "equity": "SELECT COUNT(*) FROM equity_curve WHERE session_id = ?",
+}
+
 
 class LedgerError(Exception):
     """A ledger operation was rejected; the database is unchanged."""
@@ -381,6 +404,19 @@ def _normalize_side(value: object) -> str:
     return text
 
 
+def _page_args(limit: object, offset: object) -> tuple[int, int]:
+    """Validate a page request; the API bounds these too, this is the last gate."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError(f"limit must be an int, got {type(limit).__name__}")
+    if isinstance(offset, bool) or not isinstance(offset, int):
+        raise TypeError(f"offset must be an int, got {type(offset).__name__}")
+    if limit < 1:
+        raise ValueError(f"limit must be >= 1, got {limit!r}")
+    if offset < 0:
+        raise ValueError(f"offset must be >= 0, got {offset!r}")
+    return limit, offset
+
+
 def _session_from_row(row: sqlite3.Row) -> SessionRecord:
     ended = row["ended_at"]
     model_version = row["model_version"]
@@ -519,6 +555,38 @@ class PaperLedger:
 
     # ------------------------------------------------------------------ lifecycle
 
+    @classmethod
+    def open_reader(cls, path: str | Path) -> PaperLedger:
+        """Open an existing ledger for reading only.
+
+        The connection is a ``mode=ro`` URI: SQLite refuses to create the file,
+        cannot write through it and will not take a write lock. No schema
+        migration runs and the journal mode is left alone, so a reader never
+        changes the file and never blocks the session's writer (WAL readers see
+        the last committed snapshot). A missing file raises :class:`FileNotFoundError`
+        and an unreadable one raises :class:`LedgerError`; neither is a write.
+
+        The class is still not thread-safe; open one reader per thread/request
+        and close it when the read is done.
+        """
+        target = Path(path)
+        if not target.exists():
+            raise FileNotFoundError(f"no ledger at {str(target)!r}")
+        try:
+            conn = sqlite3.connect(
+                f"{target.resolve().as_uri()}?mode=ro",
+                uri=True,
+                isolation_level=None,
+            )
+        except sqlite3.Error as exc:
+            raise LedgerError(f"cannot open ledger {str(target)!r} for reading: {exc}") from exc
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout = 5000")
+        reader = cls.__new__(cls)
+        reader.path = str(target)
+        reader._conn = conn
+        return reader
+
     @property
     def connection(self) -> sqlite3.Connection:
         """The open connection; read-only use is expected outside the class."""
@@ -573,6 +641,20 @@ class PaperLedger:
     def schema_version(self) -> int:
         row = self._connection().execute("SELECT MAX(version) FROM schema_version").fetchone()
         return 0 if row is None or row[0] is None else int(row[0])
+
+    def has_schema(self) -> bool:
+        """Whether the sessions table exists; a reader sees ``False`` on a stray file.
+
+        A GET that lands while the first writer is still inside ``init_schema``
+        can see an empty database. The API treats that as "no ledger yet"
+        instead of turning a race into a 500.
+        """
+        row = (
+            self._connection()
+            .execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'")
+            .fetchone()
+        )
+        return row is not None
 
     def close(self) -> None:
         """Close the connection; safe to call twice."""
@@ -670,6 +752,11 @@ class PaperLedger:
             .fetchone()
         )
         return None if row is None else _session_from_row(row)
+
+    def session_page(self, *, limit: int, offset: int = 0) -> tuple[list[SessionRecord], int]:
+        """One page of sessions, newest start first, with the total count."""
+        rows, total = self._page("sessions", None, limit, offset)
+        return [_session_from_row(row) for row in rows], total
 
     # -------------------------------------------------------------------- signals
 
@@ -792,6 +879,13 @@ class PaperLedger:
             .fetchall()
         )
         return [_order_from_row(row) for row in rows]
+
+    def order_page(
+        self, session_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[list[OrderRecord], int]:
+        """One page of orders, oldest first, with the session's order count."""
+        rows, total = self._page("orders", session_id, limit, offset)
+        return [_order_from_row(row) for row in rows], total
 
     # ---------------------------------------------------------------------- fills
 
@@ -922,6 +1016,13 @@ class PaperLedger:
         )
         return [_position_from_row(row) for row in rows]
 
+    def position_page(
+        self, session_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[list[PositionRecord], int]:
+        """One page of positions, oldest first, with the session's position count."""
+        rows, total = self._page("positions", session_id, limit, offset)
+        return [_position_from_row(row) for row in rows], total
+
     # --------------------------------------------------------------------- trades
 
     def record_trade(
@@ -1011,6 +1112,23 @@ class PaperLedger:
         )
         return [_trade_from_row(row) for row in rows]
 
+    def trade_page(
+        self, session_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[list[TradeRecord], int]:
+        """One page of closed trades, oldest first, with the session's trade count."""
+        rows, total = self._page("trades", session_id, limit, offset)
+        return [_trade_from_row(row) for row in rows], total
+
+    def count_trades(self, session_id: str) -> int:
+        """How many trades the session closed; cheaper than reading them all."""
+        _require_text(session_id, "session_id")
+        row = (
+            self._connection()
+            .execute("SELECT COUNT(*) FROM trades WHERE session_id = ?", (session_id,))
+            .fetchone()
+        )
+        return 0 if row is None else int(row[0])
+
     # --------------------------------------------------------------------- equity
 
     def record_equity(self, session_id: str, ts: datetime, balance: float, equity: float) -> int:
@@ -1045,6 +1163,18 @@ class PaperLedger:
             .fetchall()
         )
         return [_equity_from_row(row) for row in rows]
+
+    def equity_page(
+        self, session_id: str, *, limit: int, offset: int = 0
+    ) -> tuple[list[EquityPoint], int]:
+        """The most recent equity window, in chronological order, and the total.
+
+        ``offset`` pages backwards from the newest mark: ``offset=0`` is the
+        tail of the curve, which is what a live chart draws. The rows inside the
+        window are oldest-first so a caller can plot them without reversing.
+        """
+        rows, total = self._page("equity", session_id, limit, offset)
+        return [_equity_from_row(row) for row in reversed(rows)], total
 
     # --------------------------------------------------------------------- resume
 
@@ -1104,6 +1234,26 @@ class PaperLedger:
         )
 
     # -------------------------------------------------------------------- internal
+
+    def _page(
+        self,
+        key: str,
+        session_id: str | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[list[sqlite3.Row], int]:
+        """Run one whitelisted page query and its total; no caller SQL."""
+        size, start = _page_args(limit, offset)
+        conn = self._connection()
+        if session_id is None:
+            rows = conn.execute(_PAGE_SQL[key], (size, start)).fetchall()
+            total_row = conn.execute(_COUNT_SQL[key]).fetchone()
+        else:
+            _require_text(session_id, "session_id")
+            rows = conn.execute(_PAGE_SQL[key], (session_id, size, start)).fetchall()
+            total_row = conn.execute(_COUNT_SQL[key], (session_id,)).fetchone()
+        total = 0 if total_row is None else int(total_row[0])
+        return rows, total
 
     @staticmethod
     def _require_session(tx: sqlite3.Connection, session_id: str) -> None:
