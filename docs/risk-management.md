@@ -80,5 +80,6 @@ Phase 11 slices:
   ATR slippage; there is no order latency or next-bar fill delay.
 - **Slippage limit and data-quality block:** listed in the Phase 11 roadmap,
   not in this slice.
-- **Slippage stress:** costs are configurable but there is no per-run slippage
-  multiplier or Monte Carlo trade resampling yet.
+- **Slippage stress:** one-axis cost sensitivity and Monte Carlo trade
+  resampling exist (see `docs/backtesting-methodology.md`); the risk engine has
+  no per-run slippage multiplier of its own.

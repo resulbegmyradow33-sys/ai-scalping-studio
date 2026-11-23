@@ -16,9 +16,10 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import socket
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time
 from enum import Enum
@@ -29,6 +30,14 @@ import numpy as np
 import polars as pl
 
 from scalping.backtest.engine import BacktestResult, run_backtest
+from scalping.backtest.montecarlo import MonteCarloConfig, run_montecarlo
+from scalping.backtest.sensitivity import (
+    COMMISSION_AXIS,
+    SLIPPAGE_AXIS,
+    SPREAD_AXIS,
+    SensitivityRow,
+    parameter_sensitivity,
+)
 from scalping.config import Settings
 from scalping.data.csv_provider import CsvProvider, DataError
 from scalping.data.json_provider import JsonProvider
@@ -40,7 +49,7 @@ from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
-from scalping.features.build import FEATURE_COLUMNS, WARMUP, build_features
+from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame, build_features
 from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
@@ -580,8 +589,15 @@ def _report(result: BacktestResult) -> dict[str, Any]:
     }
 
 
-def _cmd_backtest(args: argparse.Namespace) -> None:
-    """Run a stored symbol through the simulator and write a JSON report."""
+def _select_policy(name: str) -> tuple[Callable[[np.ndarray], int], str]:
+    """Map the CLI policy name to its callable and explicit run label."""
+    if name == _POLICY_RULE:
+        return _rule_baseline, RULE_LABEL
+    return _hold, _POLICY_HOLD
+
+
+def _backtest_inputs(args: argparse.Namespace) -> tuple[Settings, FeatureFrame]:
+    """Load the stored M1 frame and build the features every backtest shares."""
     store = ParquetStore(args.root)
     frame = store.read(args.symbol, TIMEFRAME)
     if frame.is_empty():
@@ -594,20 +610,131 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
             f"need {_MIN_BARS} bars, have {frame.height}"
         )
     settings = Settings()
-    features = build_features(frame, settings.costs)
-    if args.policy == _POLICY_RULE:
-        result = run_backtest(
-            _rule_baseline, features, settings, policy_name=RULE_LABEL, symbol=args.symbol
-        )
-    else:
-        result = run_backtest(
-            _hold, features, settings, policy_name=_POLICY_HOLD, symbol=args.symbol
-        )
+    return settings, build_features(frame, settings.costs)
+
+
+def _cmd_backtest(args: argparse.Namespace) -> None:
+    """Run a stored symbol through the simulator and write a JSON report."""
+    if args.out is None:
+        raise CliError("backtest requires --out (or use 'backtest montecarlo'/'sensitivity')")
+    settings, features = _backtest_inputs(args)
+    policy, label = _select_policy(args.policy)
+    result = run_backtest(policy, features, settings, policy_name=label, symbol=args.symbol)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(_report(result), indent=2, default=_json_default) + "\n")
     _print_json({"run_id": result.run_id, "config_hash": result.config_hash, "out": str(out)})
+
+
+def _floats(text: str, *, flag: str) -> tuple[float, ...]:
+    """Parse a comma-separated number list, failing with a CLI error."""
+    try:
+        values = tuple(float(part) for part in text.split(",") if part.strip())
+    except ValueError:
+        raise CliError(f"{flag} expects comma-separated numbers, got {text!r}") from None
+    if not values:
+        raise CliError(f"{flag} expects at least one number")
+    return values
+
+
+def _finite(value: float) -> float | None:
+    """JSON has no infinity; a non-finite metric becomes ``null``."""
+    return float(value) if math.isfinite(value) else None
+
+
+def _sensitivity_row(row: SensitivityRow) -> dict[str, Any]:
+    payload = asdict(row)
+    payload["profit_factor"] = _finite(row.profit_factor)
+    return payload
+
+
+def _cmd_backtest_montecarlo(args: argparse.Namespace) -> None:
+    """Resample one backtest's trades and report the path distribution."""
+    settings, features = _backtest_inputs(args)
+    policy, label = _select_policy(args.policy)
+    result = run_backtest(policy, features, settings, policy_name=label, symbol=args.symbol)
+    levels = _floats(args.confidence, flag="--confidence")
+    try:
+        config = MonteCarloConfig(
+            n_paths=args.n_paths,
+            seed=args.seed,
+            mode=args.mode,
+            block_size=args.block_size,
+            confidence_levels=levels,
+            starting_balance=float(settings.contract.initial_balance),
+            ruin_fraction=args.ruin_fraction,
+        )
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    montecarlo = run_montecarlo(result, config)
+    summary: dict[str, Any] = {
+        "run_id": result.run_id,
+        "trades": montecarlo.trades,
+        "paths": montecarlo.paths,
+        "mode": montecarlo.mode,
+        "seed": montecarlo.seed,
+        "block_size": montecarlo.block_size,
+        "starting_balance": montecarlo.starting_balance,
+        "ruin_threshold": montecarlo.ruin_threshold,
+        "degenerate": montecarlo.degenerate,
+        "probability_of_ruin": montecarlo.probability_of_ruin,
+        "final_pnl": montecarlo.final_pnl_percentiles,
+        "max_drawdown": montecarlo.max_drawdown_percentiles,
+        "ending_balance": montecarlo.ending_balance_percentiles,
+        "worst_path": (None if montecarlo.worst_path is None else asdict(montecarlo.worst_path)),
+    }
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        full = {
+            **summary,
+            "confidence_levels": list(montecarlo.confidence_levels),
+            "outcomes": [asdict(outcome) for outcome in montecarlo.outcomes],
+        }
+        out.write_text(json.dumps(full, indent=2, default=_json_default) + "\n")
+        summary["out"] = str(out)
+    _print_json(summary)
+
+
+def _cmd_backtest_sensitivity(args: argparse.Namespace) -> None:
+    """Rerun one backtest across execution-cost grids."""
+    settings, features = _backtest_inputs(args)
+    policy, _ = _select_policy(args.policy)
+    grids: dict[str, tuple[float, ...]] = {}
+    if args.spread:
+        grids[SPREAD_AXIS] = _floats(args.spread, flag="--spread")
+    if args.slippage:
+        grids[SLIPPAGE_AXIS] = _floats(args.slippage, flag="--slippage")
+    if args.commission:
+        grids[COMMISSION_AXIS] = _floats(args.commission, flag="--commission")
+    try:
+        report = parameter_sensitivity(
+            policy,
+            features,
+            settings,
+            axes=grids or None,
+            symbol=args.symbol,
+        )
+    except ValueError as exc:
+        raise CliError(str(exc)) from exc
+    payload: dict[str, Any] = {
+        "base": _sensitivity_row(report.base),
+        "axes": [
+            {
+                "parameter": axis.parameter,
+                "breakeven_multiplier": axis.breakeven_multiplier,
+                "rows": [_sensitivity_row(row) for row in axis.rows],
+            }
+            for axis in report.axes
+        ],
+    }
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
 
 
 # --- serve ---------------------------------------------------------------------
@@ -853,8 +980,70 @@ def _build_parser() -> argparse.ArgumentParser:
         "--policy", choices=sorted((_POLICY_HOLD, _POLICY_RULE)), default=_POLICY_HOLD
     )
     backtest.add_argument("--root", default=str(DEFAULT_ROOT))
-    backtest.add_argument("--out", required=True, help="path of the JSON report")
+    backtest.add_argument("--out", default=None, help="path of the JSON report")
     backtest.set_defaults(handler=_cmd_backtest)
+
+    backtest_commands = backtest.add_subparsers(dest="backtest_command", required=False)
+
+    mc = backtest_commands.add_parser(
+        "montecarlo", help="resample the run's trades and report path outcomes"
+    )
+    mc.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    mc.add_argument("--policy", choices=sorted((_POLICY_HOLD, _POLICY_RULE)), default=_POLICY_RULE)
+    mc.add_argument("--n-paths", type=int, default=1_000)
+    mc.add_argument("--seed", type=int, default=0)
+    mc.add_argument(
+        "--mode",
+        choices=("shuffle", "bootstrap"),
+        default="bootstrap",
+        help="resampling mode (library default is shuffle)",
+    )
+    mc.add_argument(
+        "--block-size",
+        type=int,
+        default=5,
+        help="block length for bootstrap mode (1 = IID bootstrap)",
+    )
+    mc.add_argument(
+        "--confidence",
+        default="0.05,0.5,0.95",
+        help="comma-separated quantiles in (0, 1)",
+    )
+    mc.add_argument(
+        "--ruin-fraction",
+        type=float,
+        default=0.0,
+        help="ruin floor as a fraction of the starting balance, in [0, 1)",
+    )
+    mc.add_argument("--root", default=str(DEFAULT_ROOT))
+    mc.add_argument("--out", default=None, help="optional full report path")
+    mc.set_defaults(handler=_cmd_backtest_montecarlo)
+
+    sensitivity = backtest_commands.add_parser(
+        "sensitivity", help="rerun the strategy across execution-cost grids"
+    )
+    sensitivity.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    sensitivity.add_argument(
+        "--policy", choices=sorted((_POLICY_HOLD, _POLICY_RULE)), default=_POLICY_RULE
+    )
+    sensitivity.add_argument(
+        "--spread",
+        default="",
+        help="comma-separated spread multipliers (default: 0.5,1,2,3)",
+    )
+    sensitivity.add_argument(
+        "--slippage",
+        default="",
+        help="comma-separated absolute slippage_atr_frac values (default: from settings)",
+    )
+    sensitivity.add_argument(
+        "--commission",
+        default="",
+        help="comma-separated absolute commission_per_lot values (default: from settings)",
+    )
+    sensitivity.add_argument("--root", default=str(DEFAULT_ROOT))
+    sensitivity.add_argument("--out", default=None, help="optional full report path")
+    sensitivity.set_defaults(handler=_cmd_backtest_sensitivity)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")

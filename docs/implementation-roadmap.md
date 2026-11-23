@@ -423,3 +423,77 @@ Phase 2, in this order:
 4. API status extension and documentation.
 
 No model work starts until Phase 2 and Phase 3 exit criteria are met.
+
+
+---
+
+# Autonomous self-learning implementation track (required)
+
+This track extends the existing 15 engineering phases. It does not mark any
+unfinished task as complete. The task board is the implementation checklist;
+all items remain open until code, tests and reproducible evidence exist.
+
+## Phase 16 — Autonomous strategy discovery
+
+Build the safe strategy DSL/AST and bounded candidate search from causal market
+primitives. The owner does not supply entry/exit rules. Start with one
+resource-efficient search method (for example, grammar/evolutionary search)
+and compare it with simple baselines. Add mutation/crossover or additional
+optimisers only when measurable. Every candidate must be reproducible and
+evaluated with realistic costs, walk-forward splits, untouched OOS data,
+parameter sensitivity, complexity penalties and multiple-testing awareness.
+No arbitrary generated code execution. The engine must be able to reject all
+candidates and choose NO TRADE.
+
+Exit criteria: an end-to-end run creates strategy candidates without
+owner-authored rules, reproduces them from saved lineage, rejects an
+intentionally overfit candidate, and records a champion/no-change decision.
+
+## Phase 17 — Knowledge ingestion and hypothesis research
+
+Add local document ingestion for supported PDF/TXT/Markdown/HTML/DOCX files,
+with original-file preservation, checksums, parser metadata, page/section
+references, searchable extracted text and honest OCR limitations. Convert
+claims and ideas into traceable, falsifiable hypotheses; route those hypotheses
+to quantitative strategy experiments. Document text must never directly
+become a trusted strategy or order. This is structured knowledge extraction,
+not a claim that the trading model has been trained on a book or that it has
+human-level comprehension.
+
+Exit criteria: import a sample document, trace a generated hypothesis back to
+source passages, run its test, and record the outcome.
+
+## Phase 18 — Autonomous Learning Orchestrator
+
+Connect new-data detection, document ingestion, hypothesis generation,
+dataset preparation, candidate search, ML/DL/RL jobs, evaluation, champion
+governance, drift monitoring and paper feedback into one persistent workflow.
+Enforce job dependencies, pause/resume/cancel, crash recovery, one heavy job,
+RAM/disk limits and paper/training isolation. Log why each task was started,
+skipped, promoted or rejected.
+
+Exit criteria: a new dataset/document or matured paper outcome automatically
+queues the appropriate eligible workflow; interrupted jobs recover safely;
+the full chain is queryable and auditable.
+
+## Phase 19 — Autonomous paper-trading acceptance
+
+Run the system without owner-authored entry/exit rules. Require historical,
+walk-forward, untouched OOS and cost-stress gates before paper trials. Attribute
+every paper trade to immutable data/model/strategy versions and learn only
+after outcomes mature. Demonstrate champion protection, rejection, rollback,
+NO TRADE and risk-control invariants. Real-money execution remains disabled.
+
+Exit criteria: reproducible end-to-end demonstration of
+import → validate → research → discover → backtest → independently validate →
+paper trade → analyse outcomes → train candidate → champion decision →
+monitor/rollback. This demonstrates system autonomy, not guaranteed
+profitability.
+
+## Revised priority guidance
+
+Do not spend scarce M2 resources implementing every model architecture before
+the autonomous loop works. Prioritise data integrity and leakage-safe datasets,
+then registry/champion governance, a minimal but genuine strategy discovery
+engine, knowledge ingestion, orchestration, robust evaluation and autonomous
+paper trading. Expand model families only when experiments justify them.
