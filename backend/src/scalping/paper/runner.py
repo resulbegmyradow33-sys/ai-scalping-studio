@@ -56,10 +56,16 @@ __all__ = [
     "PaperRunResult",
     "PaperSession",
     "ResumeError",
+    "SignalReason",
 ]
 
 #: Policy: an observation from the simulator, one action code back.
 Policy = Callable[[np.ndarray], int]
+
+#: Optional label for the policy's own decision, keyed by the action code.
+#: The DSL runner uses it to store the interpreter's reason next to the action;
+#: a caller that supplies nothing keeps the historical ``reason=None`` row.
+SignalReason = Callable[[int], str | None]
 
 #: Action code -> stored name. The simulator's contract is 0/1/2/3.
 ACTION_NAMES: Final[dict[int, str]] = {0: "hold", 1: "buy", 2: "sell", 3: "close"}
@@ -100,6 +106,12 @@ class PaperSession:
 
     ``started_at`` is injectable so two replays can produce byte-identical
     ledgers; production callers leave it out and the ledger stamps ``now``.
+
+    ``signal_reason`` is an optional hook ``action code -> reason``. When it is
+    set, the signal row carries the policy's own decision label; a gate that
+    blocked the action is appended, never substituted, so an audit can tell an
+    intended entry from a refused one. Without the hook the historical
+    ``reason=None``/gate-only behaviour is unchanged.
     """
 
     def __init__(
@@ -119,9 +131,14 @@ class PaperSession:
         seed: int = 0,
         max_steps: int | None = None,
         window: int = WINDOW,
+        signal_reason: SignalReason | None = None,
     ) -> None:
         if not callable(policy):
             raise TypeError(f"policy must be callable, got {type(policy).__name__}")
+        if signal_reason is not None and not callable(signal_reason):
+            raise TypeError(
+                f"signal_reason must be callable or None, got {type(signal_reason).__name__}"
+            )
         if isinstance(seed, bool) or not isinstance(seed, int):
             raise TypeError(f"seed must be an int, got {type(seed).__name__}")
         self.ledger = ledger
@@ -135,6 +152,7 @@ class PaperSession:
         self.model_version = model_version
         self.started_at = started_at
         self.seed = seed
+        self._signal_reason = signal_reason
         self._config = self._build_config(config, window, max_steps)
         self.sim = Simulator(
             features,
@@ -313,11 +331,19 @@ class PaperSession:
 
         result = self.sim.step(action)
         blocked = result.info["blocked"]
+        own_reason = None if self._signal_reason is None else self._signal_reason(action)
+        if blocked is None:
+            reason = own_reason
+        elif own_reason is None:
+            reason = str(blocked)
+        else:
+            # Keep both: the policy's intent and the gate that refused it.
+            reason = f"{own_reason}; blocked={blocked}"
         signal_id = self.ledger.record_signal(
             self.session_id,
             ts,
             ACTION_NAMES[action],
-            reason=None if blocked is None else str(blocked),
+            reason=reason,
             model_version=self.model_version,
         )
 
