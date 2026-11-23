@@ -138,6 +138,16 @@ def test_train_returns_202_and_writes_a_full_report(client, tmp_path):
     assert meta["finished_at"] is not None
 
 
+def test_models_lists_the_factory_names(client):
+    """The panel reads the model list; it must match what /train accepts."""
+    from scalping.ml.models import MODEL_NAMES
+
+    response = client.get("/api/ml/models")
+    assert response.status_code == 200
+    assert response.json() == list(MODEL_NAMES)
+    assert "logistic" in response.json()
+
+
 def test_evaluate_shares_the_one_job_slot(client, monkeypatch, real_train):
     """The slot is shared by every ML entry point, not only by /train."""
     finished = client.post("/api/ml/train", json=BODY).json()["run_id"]

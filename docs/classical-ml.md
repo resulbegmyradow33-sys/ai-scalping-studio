@@ -209,6 +209,7 @@ request field names a path.
 
 | Method | Path | Purpose |
 |---|---|---|
+| `GET` | `/api/ml/models` | Model names `POST /train` accepts, from `scalping.ml.models.MODEL_NAMES` |
 | `POST` | `/api/ml/train` | Validate, prepare and start a run; `202 {run_id}` |
 | `GET` | `/api/ml/runs` | `{run_id, status, created_at, model, symbol, timeframe, dataset_id}` rows, newest first |
 | `GET` | `/api/ml/runs/{run_id}` | Status, config, validation/test prediction metrics, calibration, split counts, columns, spec, dataset id |
@@ -272,6 +273,25 @@ decision: the API reports what happened on the chosen split and never writes a
 strategy card, changes the registry champion or claims an edge. A good Brier
 score with negative expectancy is still a rejection, and a positive regime
 bucket can be one trade.
+
+### Panel: `/labs/ml`
+
+The web panel at `/labs/ml` is a client of these endpoints only. It reads the
+symbol, timeframe and model lists from `/api/symbols`, `/api/timeframes` and
+`/api/ml/models`; it never hard-codes a model name. A start posts `/train`, then
+polls `/runs/{id}` every 2 s while the status is non-terminal (`running`, then
+`cancelling`; `preparing` is polled defensively) and stops on the terminal
+status; the timer is cleared on unmount. A `409` is shown
+as the one-job busy state, not retried. Cancel posts `/control` and the button
+shows `cancelling` until the worker writes the terminal state.
+
+Results show validation/test prediction metrics (with an explicit "not a
+trading result" note), split counts, dataset id, feature-column count and the
+spec summary. The evaluate panel sends the split, cost multipliers and regime
+flag to `/evaluate` and renders the headline metrics against the hold baseline,
+one row per stress multiplier and the per-regime table — or an explicit empty
+state. A missing test split, an empty run list and an unknown run (`404`) each
+get their own message; the panel never fills a gap with a plausible number.
 
 ## Artifacts
 

@@ -5,6 +5,12 @@ import type {
   DownloadRequest,
   DownloadResponse,
   Health,
+  MLEvaluateRequest,
+  MLEvaluateResponse,
+  MLRunDetail,
+  MLRunSummary,
+  MLTrainRequest,
+  MLTrainResponse,
   OkResponse,
   RegimeResponse,
   RunControlAction,
@@ -15,6 +21,7 @@ import type {
   SimStartRequest,
   StartResponse,
   StrategyCard,
+  SymbolSpec,
   TimeframeSpec,
 } from "./types";
 
@@ -28,6 +35,12 @@ const DOWNLOAD_TIMEOUT_MS = 30_000;
 
 /** Recalibration labels years of bars; a 5-year H1 grid takes minutes. */
 const CALIBRATE_TIMEOUT_MS = 600_000;
+
+/** `/api/ml/train` reads the store and builds features before its 202. */
+const ML_PREPARE_TIMEOUT_MS = 60_000;
+
+/** `/api/ml/evaluate` runs the simulator once per stress multiplier. */
+const ML_EVALUATE_TIMEOUT_MS = 300_000;
 
 /**
  * A failed API call. `status` is the HTTP status, or `0` when the request never
@@ -136,6 +149,10 @@ export const api = {
     return request<TimeframeSpec[]>("/api/timeframes");
   },
 
+  getSymbols(): Promise<SymbolSpec[]> {
+    return request<SymbolSpec[]>("/api/symbols");
+  },
+
   getRegime(symbol: string, timeframe: string, limit = 500): Promise<RegimeResponse> {
     const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
     return request<RegimeResponse>(`/api/regime?${params.toString()}`);
@@ -172,6 +189,36 @@ export const api = {
   calibrateStrategy(body: CalibrateRequest = {}): Promise<CalibrateResponse> {
     // The grid labels years of bars on the backend, so this outlasts the rest.
     return post<CalibrateResponse>("/api/strategy/calibrate", body, CALIBRATE_TIMEOUT_MS);
+  },
+
+  // --- classical ML ---------------------------------------------------------
+
+  mlModels(): Promise<string[]> {
+    return request<string[]>("/api/ml/models");
+  },
+
+  mlTrain(body: MLTrainRequest): Promise<MLTrainResponse> {
+    // Preparation (validation, store read, feature build) runs before the 202.
+    return post<MLTrainResponse>("/api/ml/train", body, ML_PREPARE_TIMEOUT_MS);
+  },
+
+  getMLRuns(): Promise<MLRunSummary[]> {
+    return request<MLRunSummary[]>("/api/ml/runs");
+  },
+
+  getMLRun(runId: string): Promise<MLRunDetail> {
+    return request<MLRunDetail>(`/api/ml/runs/${encodeURIComponent(runId)}`);
+  },
+
+  cancelMLRun(runId: string): Promise<OkResponse> {
+    return post<OkResponse>(`/api/ml/runs/${encodeURIComponent(runId)}/control`, {
+      action: "cancel",
+    });
+  },
+
+  mlEvaluate(body: MLEvaluateRequest): Promise<MLEvaluateResponse> {
+    // A split plus one simulator pass per stress multiplier; not a 5 s call.
+    return post<MLEvaluateResponse>("/api/ml/evaluate", body, ML_EVALUATE_TIMEOUT_MS);
   },
 };
 
