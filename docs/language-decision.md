@@ -114,6 +114,23 @@ These are the fixes the language question was masking:
    `bandit_training_data`/`_outcomes_from_table` with a Polars join; keep
    `PaperBroker` as the single source of fill semantics.
 
+## Follow-up benchmark: one function, not the pipeline
+
+A second independent benchmark pinpointed the M1 feature build: **96.6% of the
+168–173 s is `features/liquidity.py::fvg`** (three calls: base, M5, M15), a
+pure-Python row loop whose cost grows with the number of open gaps (1,567 open
+up-gaps at 1.77M rows). A bit-identical C port runs the same loop in **1.69 s**
+(87x), and the whole build would fall to ~7.5 s. `order_block_distance` is 2.1%
+(3.6 s); everything else is ~1.3%.
+
+That does **not** justify a native rewrite yet. The 87x is a language constant on
+top of an O(n·k) algorithm. The correct next step is a Python algorithmic fix
+(predecessor/successor query plus a next-smaller-element death pass), expected
+to land in the 2–5 s range with no toolchain, wheel or FFI. The benchmarker's
+naive heap variant reached 2.02 s but was not output-equivalent, so it is a lower
+bound, not a drop-in. Extract only `fvg` to Rust/PyO3 if the corrected Python
+implementation still misses the wall-clock budget on the 5.89M-row store.
+
 ## Honest limitations
 
 - Single-run, warm-cache timings; no repetitions or confidence intervals.
