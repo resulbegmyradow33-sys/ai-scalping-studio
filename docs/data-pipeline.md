@@ -68,6 +68,28 @@ Current market-data coverage is still gold/silver for Dukascopy. The other
 eight specs are registered but have **no real provider yet**; synthetic bars
 can be generated for any symbol.
 
+### Trading sessions
+
+`session_for(symbol)` parses the registry's weekly UTC window
+(`sun22:00-fri21:00 UTC` for metals/FX/indices, `24x7 UTC` for BTCUSD) into a
+`SessionSpec`. `SessionSpec.is_open(ts)` treats naive timestamps as UTC and
+handles the wrap from Sunday to Friday.
+
+The simulator enforces it when a symbol is supplied: entries outside the window
+are blocked with `info["blocked"] == "session_closed"`, while exits, stops and
+targets always work. `run_backtest(..., symbol="XAUUSD")` resolves the session
+and includes its label in the run id, so the same prices on a 24x7 and a
+weekday symbol can never share an id. Without a symbol the simulator stays
+session-free for custom frames.
+
+```python
+from datetime import UTC, datetime
+from scalping.data.registry import session_for
+
+session = session_for("XAUUSD")
+session.is_open(datetime(2026, 1, 3, 12, tzinfo=UTC))  # Saturday -> False
+```
+
 ## Timeframes
 
 `TIMEFRAMES` maps M1, M5, M15, M30, H1, H4, D1 to Polars rules. `resample`

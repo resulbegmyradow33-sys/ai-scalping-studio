@@ -36,6 +36,7 @@ import polars as pl
 
 from scalping.backtest.metrics import Metrics, compute
 from scalping.config import Settings
+from scalping.data.registry import session_for
 from scalping.env.simulator import WINDOW, ArmSelector, Simulator
 from scalping.features.build import FeatureFrame
 from scalping.types import Trade
@@ -77,6 +78,7 @@ def run_id(
     data_hash: str,
     *,
     policy_name: str = "",
+    session: str = "",
 ) -> str:
     """First 12 hex chars of the run's sha256; identical inputs give identical ids.
 
@@ -90,6 +92,7 @@ def run_id(
         "seed": int(seed),
         "data_hash": str(data_hash),
         "policy": str(policy_name),
+        "session": str(session),
     }
     return hashlib.sha256(_canonical(payload)).hexdigest()[:12]
 
@@ -143,6 +146,7 @@ def run_backtest(
     flow: np.ndarray | None = None,
     flow_thr: np.ndarray | None = None,
     flow_obs: bool = False,
+    symbol: str | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -153,13 +157,17 @@ def run_backtest(
     evaluate a window longer than :data:`~scalping.env.simulator.MAX_STEPS`
     without truncating its tail. ``strategy_selector`` and ``labels`` give the
     simulator the +6 strategy context, so a policy trained with a frozen bandit
-    receives the observation width it expects.
+    receives the observation width it expects. ``symbol`` enables the
+    registry's weekly session: entries outside the window are blocked with
+    reason ``"session_closed"``. Without it the simulator stays session-free,
+    matching older callers and custom frames.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
 
     label = _policy_label(policy, policy_name)
     identity = _policy_identity(policy, policy_name)
+    session = session_for(symbol) if symbol is not None else None
     sim = Simulator(
         features,
         settings,
@@ -171,6 +179,7 @@ def run_backtest(
         flow=flow,
         flow_thr=flow_thr,
         flow_obs=flow_obs,
+        session=session,
     )
     obs = sim.reset(_SEED)
 
@@ -188,9 +197,12 @@ def run_backtest(
 
     values = np.asarray(equity, dtype=np.float64)
     digest = data_hash(features)
-    config_hash = run_id(settings, _SEED, digest)
+    session_label = "" if session is None else session.label
+    config_hash = run_id(settings, _SEED, digest, session=session_label)
     return BacktestResult(
-        run_id=run_id(settings, _SEED, digest, policy_name=identity),
+        run_id=run_id(
+            settings, _SEED, digest, policy_name=identity, session=session_label
+        ),
         metrics=compute(
             trades,
             values,

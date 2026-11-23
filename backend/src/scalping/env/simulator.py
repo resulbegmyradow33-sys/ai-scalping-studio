@@ -51,6 +51,7 @@ import numpy as np
 import polars as pl
 
 from scalping.config import Settings
+from scalping.data.registry import SessionSpec
 from scalping.env.broker import PaperBroker
 from scalping.env.risk import RiskEngine
 from scalping.features.build import FeatureFrame
@@ -182,8 +183,10 @@ class Simulator:
         flow: np.ndarray | None = None,
         flow_thr: np.ndarray | None = None,
         flow_obs: bool = False,
+        session: SessionSpec | None = None,
     ) -> None:
         self.features = features
+        self.session_spec = session
         self.settings = settings
         self.max_steps = MAX_STEPS if max_steps is None else int(max_steps)
         if self.max_steps < 1:
@@ -512,40 +515,45 @@ class Simulator:
         opened: Position | None = None
 
         if action in (_BUY, _SELL):
-            account = self.broker.state(self.balance, self.day_start_equity)
-            allowed, reason = self.risk.allow_new(account, bar.ts)
-            if not allowed:
-                blocked = reason
-            elif self.broker.position is not None:  # only reachable with max_positions > 1
-                blocked = "position_open"
-            elif (gate_reason := self._gate_reason(action)) is not None:
-                blocked = gate_reason
+            if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
+                blocked = "session_closed"
             else:
-                atr = self._atr(self._i)
-                if atr <= 0:
-                    blocked = "no_atr"
+                account = self.broker.state(self.balance, self.day_start_equity)
+                allowed, reason = self.risk.allow_new(account, bar.ts)
+                if not allowed:
+                    blocked = reason
+                elif self.broker.position is not None:  # only reachable with max_positions > 1
+                    blocked = "position_open"
+                elif (gate_reason := self._gate_reason(action)) is not None:
+                    blocked = gate_reason
                 else:
-                    side = Side.LONG if action == _BUY else Side.SHORT
-                    slippage = self.settings.costs.slippage_atr_frac * atr
-                    entry = (
-                        bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
-                    )
-                    sl, tp = self.risk.sl_tp(entry, side, atr)
-                    sizing = self.risk.size(account.equity, entry, sl)
-                    if sizing.lot <= 0:
-                        blocked = sizing.reason or "lot_too_small"
+                    atr = self._atr(self._i)
+                    if atr <= 0:
+                        blocked = "no_atr"
                     else:
-                        self.broker.open(
-                            side,
-                            sizing.lot,
-                            bar.ts,
-                            bar.bid_close,
-                            bar.ask_close,
-                            sl,
-                            tp,
-                            self.strategy,
+                        side = Side.LONG if action == _BUY else Side.SHORT
+                        slippage = self.settings.costs.slippage_atr_frac * atr
+                        entry = (
+                            bar.ask_close + slippage
+                            if side is Side.LONG
+                            else bar.bid_close - slippage
                         )
-                        opened = self.broker.position
+                        sl, tp = self.risk.sl_tp(entry, side, atr)
+                        sizing = self.risk.size(account.equity, entry, sl)
+                        if sizing.lot <= 0:
+                            blocked = sizing.reason or "lot_too_small"
+                        else:
+                            self.broker.open(
+                                side,
+                                sizing.lot,
+                                bar.ts,
+                                bar.bid_close,
+                                bar.ask_close,
+                                sl,
+                                tp,
+                                self.strategy,
+                            )
+                            opened = self.broker.position
         elif action == _CLOSE:
             if self.broker.position is None:
                 blocked = "no_position"

@@ -11,7 +11,9 @@ A production adapter must replace them from the broker's contract details.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Final
 
 from scalping.types import ContractSpec
@@ -19,10 +21,13 @@ from scalping.types import ContractSpec
 __all__ = [
     "SYMBOLS",
     "TIMEFRAMES",
+    "SessionSpec",
     "SymbolSpec",
     "contract_for",
     "get_symbol",
+    "parse_session",
     "resample_rule",
+    "session_for",
     "symbols",
     "timeframe_rule",
 ]
@@ -252,6 +257,86 @@ SYMBOLS: Final[dict[str, SymbolSpec]] = {
         leverage=2.0,
     ),
 }
+
+
+#: Minutes in one ISO week (Monday 00:00 UTC to the next Monday).
+_WEEK_MINUTES: Final[int] = 7 * 24 * 60
+_WEEKDAY_INDEX: Final[dict[str, int]] = {
+    "mon": 0,
+    "tue": 1,
+    "wed": 2,
+    "thu": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
+}
+_SESSION_PATTERN: Final[re.Pattern[str]] = re.compile(
+    r"(mon|tue|wed|thu|fri|sat|sun)(\d{2}):(\d{2})"
+    r"-(mon|tue|wed|thu|fri|sat|sun)(\d{2}):(\d{2}) UTC"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSpec:
+    """A weekly UTC trading window; ``always_open`` covers 24x7 instruments."""
+
+    label: str
+    open_weekday: int = 0
+    open_minute: int = 0
+    close_weekday: int = 4
+    close_minute: int = 0
+    always_open: bool = False
+
+    def is_open(self, ts: datetime) -> bool:
+        """True when ``ts`` (naive means UTC) falls inside the weekly window."""
+        if self.always_open:
+            return True
+        moment = ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+        minute = moment.weekday() * 24 * 60 + moment.hour * 60 + moment.minute
+        start = self.open_weekday * 24 * 60 + self.open_minute
+        end = self.close_weekday * 24 * 60 + self.close_minute
+        if end <= start:
+            end += _WEEK_MINUTES
+        return ((minute - start) % _WEEK_MINUTES) < (end - start)
+
+
+def parse_session(text: str) -> SessionSpec:
+    """Parse the registry's session strings (``sun22:00-fri21:00 UTC``)."""
+    cleaned = text.strip()
+    if cleaned.lower() in {"24x7 utc", "24x7"}:
+        return SessionSpec(label=cleaned, always_open=True)
+    match = _SESSION_PATTERN.fullmatch(cleaned)
+    if match is None:
+        raise ValueError(f"unsupported session window {text!r}")
+    open_day, open_hour, open_minute, close_day, close_hour, close_minute = match.groups()
+    open_h, open_m, close_h, close_m = (
+        int(open_hour),
+        int(open_minute),
+        int(close_hour),
+        int(close_minute),
+    )
+    if open_h > 23 or close_h > 23 or open_m > 59 or close_m > 59:
+        raise ValueError(f"invalid session window {text!r}")
+    return SessionSpec(
+        label=cleaned,
+        open_weekday=_WEEKDAY_INDEX[open_day],
+        open_minute=open_h * 60 + open_m,
+        close_weekday=_WEEKDAY_INDEX[close_day],
+        close_minute=close_h * 60 + close_m,
+    )
+
+
+_SESSION_CACHE: dict[str, SessionSpec] = {}
+
+
+def session_for(symbol: str) -> SessionSpec:
+    """Weekly session for a registered symbol, parsed once and cached."""
+    raw = get_symbol(symbol).sessions
+    cached = _SESSION_CACHE.get(raw)
+    if cached is None:
+        cached = parse_session(raw)
+        _SESSION_CACHE[raw] = cached
+    return cached
 
 
 def symbols() -> tuple[str, ...]:
