@@ -17,6 +17,11 @@ Layout::
 ``artifact.json`` is the commit marker: arrays written before a crash without
 it are not a dataset. Checksums are file digests checked on load by default;
 pass ``verify=False`` to skip the read on a trusted artifact.
+
+The manifest is untrusted input. Every ``file`` entry must be a plain file name
+and its resolved path must stay inside the artifact directory, so a crafted
+manifest cannot make the loader read arbitrary files. A manifest missing a
+required field raises :class:`ArtifactError` at parse time, never ``KeyError``.
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, BinaryIO, Final
 
 import numpy as np
 
@@ -50,6 +57,7 @@ _ATTRIBUTE: Final[dict[str, str]] = {
     "ts": "ts",
     "split": "split",
 }
+_REQUIRED_FIELDS: Final[tuple[str, ...]] = ("file", "dtype", "shape", "checksum")
 _CHUNK: Final[int] = 1024 * 1024
 
 
@@ -59,16 +67,23 @@ class ArtifactError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class ArrayArtifact:
-    """Lightweight view of an artifact on disk."""
+    """Lightweight, validated view of an artifact on disk.
+
+    ``arrays`` maps array names to normalised entries: ``file`` and ``checksum``
+    are strings, ``dtype`` is a canonical dtype name and ``shape`` is a tuple of
+    non-negative ints.
+    """
 
     directory: Path
     dataset_id: str
+    manifest: dict[str, Any]
     arrays: dict[str, dict[str, Any]]
 
     def path_for(self, name: str) -> Path:
+        """Return the on-disk path of array ``name``, confined to the artifact."""
         if name not in self.arrays:
             raise ArtifactError(f"artifact has no array {name!r}")
-        return self.directory / self.arrays[name]["file"]
+        return _member_path(self.directory, self.arrays[name]["file"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +109,75 @@ class LoadedArrays:
         return int(self.mask(name).sum())
 
 
+def _check_member_name(name: str) -> None:
+    """Reject anything that is not a plain file name inside the directory."""
+    if (
+        not name
+        or name in {".", ".."}
+        or "/" in name
+        or "\\" in name
+        or "\x00" in name
+        or Path(name).is_absolute()
+    ):
+        raise ArtifactError(f"artifact file name {name!r} must be a plain file name")
+
+
+def _member_path(directory: Path, name: str) -> Path:
+    """Resolve a manifest ``file`` value to a path inside ``directory``.
+
+    The name check rejects traversal syntax outright; the resolve check then
+    catches a symlink inside the directory that points elsewhere.
+    """
+    _check_member_name(name)
+    root = directory.resolve()
+    path = (root / name).resolve()
+    if path == root or not path.is_relative_to(root):
+        raise ArtifactError(f"artifact file name {name!r} escapes {root}")
+    return path
+
+
+def _parse_dtype(name: str, dtype: Any) -> str:
+    if not isinstance(dtype, str):
+        raise ArtifactError(f"artifact entry {name!r} has a non-string dtype")
+    try:
+        return str(np.dtype(dtype))
+    except (TypeError, ValueError) as exc:
+        raise ArtifactError(f"artifact entry {name!r} has an unknown dtype {dtype!r}") from exc
+
+
+def _parse_shape(name: str, shape: Any) -> tuple[int, ...]:
+    if not isinstance(shape, (list, tuple)):
+        raise ArtifactError(f"artifact entry {name!r} has a non-list shape")
+    dimensions: list[int] = []
+    for value in shape:
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ArtifactError(f"artifact entry {name!r} has an invalid shape {shape!r}")
+        dimensions.append(value)
+    return tuple(dimensions)
+
+
+def _parse_entry(name: str, entry: Any) -> dict[str, Any]:
+    """Validate one ``arrays`` entry; normalise its types."""
+    if not isinstance(entry, dict):
+        raise ArtifactError(f"artifact entry {name!r} is not an object")
+    missing = [field for field in _REQUIRED_FIELDS if field not in entry]
+    if missing:
+        raise ArtifactError(f"artifact entry {name!r} is missing {', '.join(missing)}")
+    file_name = entry["file"]
+    if not isinstance(file_name, str):
+        raise ArtifactError(f"artifact entry {name!r} has a non-string file")
+    _check_member_name(file_name)
+    checksum = entry["checksum"]
+    if not isinstance(checksum, str) or not checksum:
+        raise ArtifactError(f"artifact entry {name!r} has an invalid checksum")
+    return {
+        "file": file_name,
+        "dtype": _parse_dtype(name, entry["dtype"]),
+        "shape": _parse_shape(name, entry["shape"]),
+        "checksum": checksum,
+    }
+
+
 def _digest(path: Path) -> str:
     hasher = hashlib.blake2b(digest_size=16)
     with path.open("rb") as handle:
@@ -102,20 +186,47 @@ def _digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def _write_array(path: Path, array: np.ndarray) -> None:
-    # np.save appends ``.npy`` when the target does not end with it, so write
-    # through a handle instead of trusting the temp file name.
-    tmp = path.with_name(path.name + ".tmp.npy")
+def _write_atomic_bytes(path: Path, writer: Callable[[BinaryIO], object]) -> None:
+    """Write through a unique sibling temp file, then move it onto ``path``.
+
+    ``tempfile.mkstemp`` gives every save its own scratch file: two concurrent
+    saves into one directory must not replace or unlink each other's temp file.
+    """
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    tmp = Path(tmp_name)
     try:
-        with tmp.open("wb") as handle:
-            np.save(handle, np.ascontiguousarray(array), allow_pickle=False)
+        with os.fdopen(fd, "wb") as handle:
+            writer(handle)
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
 
 
+def _write_array(path: Path, array: np.ndarray) -> None:
+    # np.save appends ``.npy`` when given a path, so write through the handle.
+    _write_atomic_bytes(
+        path,
+        lambda handle: np.save(handle, np.ascontiguousarray(array), allow_pickle=False),
+    )
+
+
+def _write_manifest(root: Path, payload: dict[str, Any]) -> Path:
+    target = root / ARTIFACT_FILE
+    _write_atomic_bytes(
+        target,
+        lambda handle: handle.write((json.dumps(payload, indent=2) + "\n").encode("utf-8")),
+    )
+    return target
+
+
 def save_dataset_arrays(directory: str | Path, bundle: DatasetBundle) -> Path:
-    """Write ``bundle`` to ``directory``; return the manifest path."""
+    """Write ``bundle`` to ``directory``; return the manifest path.
+
+    Each array is written to a unique temp file and moved into place; the
+    manifest is written last and is the commit marker. Concurrent saves into the
+    same directory are safe: the last manifest to land wins and every array file
+    is a complete ``.npy``.
+    """
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
     arrays: dict[str, dict[str, Any]] = {}
@@ -136,18 +247,10 @@ def save_dataset_arrays(directory: str | Path, bundle: DatasetBundle) -> Path:
         "manifest": bundle.manifest.to_dict(),
         "arrays": arrays,
     }
-    target = root / ARTIFACT_FILE
-    tmp = target.with_suffix(".json.tmp")
-    try:
-        tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        os.replace(tmp, target)
-    finally:
-        tmp.unlink(missing_ok=True)
-    return target
+    return _write_manifest(root, payload)
 
 
-def _read_artifact(directory: str | Path) -> ArrayArtifact:
-    root = Path(directory)
+def _load_payload(root: Path) -> dict[str, Any]:
     meta = root / ARTIFACT_FILE
     if not meta.is_file():
         raise ArtifactError(f"no {ARTIFACT_FILE} under {root}; not a saved dataset")
@@ -155,17 +258,28 @@ def _read_artifact(directory: str | Path) -> ArrayArtifact:
         payload = json.loads(meta.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise ArtifactError(f"artifact manifest is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ArtifactError("artifact manifest must be a JSON object")
     if payload.get("version") != 1:
         raise ArtifactError(f"unsupported artifact version {payload.get('version')!r}")
+    return payload
+
+
+def _read_artifact(directory: str | Path) -> ArrayArtifact:
+    root = Path(directory)
+    payload = _load_payload(root)
+    manifest = payload.get("manifest")
+    if not isinstance(manifest, dict):
+        raise ArtifactError("artifact manifest has no dataset manifest")
     arrays = payload.get("arrays")
-    if not isinstance(arrays, dict) or not all(
-        isinstance(entry, dict) and "file" in entry for entry in arrays.values()
-    ):
+    if not isinstance(arrays, dict) or not arrays:
         raise ArtifactError("artifact manifest has no usable array table")
+    parsed = {name: _parse_entry(name, entry) for name, entry in arrays.items()}
     return ArrayArtifact(
         directory=root,
         dataset_id=str(payload.get("dataset_id", "")),
-        arrays=arrays,
+        manifest=manifest,
+        arrays=parsed,
     )
 
 
@@ -179,19 +293,19 @@ def load_dataset_arrays(
     artifact = _read_artifact(directory)
     loaded: dict[str, np.ndarray] = {}
     for name in ARRAY_NAMES:
-        entry = artifact.arrays.get(name)
-        if entry is None:
+        if name not in artifact.arrays:
             raise ArtifactError(f"artifact is missing the {name!r} array")
-        path = artifact.directory / str(entry["file"])
+        entry = artifact.arrays[name]
+        path = artifact.path_for(name)
         if not path.is_file():
             raise ArtifactError(f"artifact array file is missing: {path}")
-        if verify and _digest(path) != entry.get("checksum"):
+        if verify and _digest(path) != entry["checksum"]:
             raise ArtifactError(f"checksum mismatch for {path.name}")
         if name == "X" and mmap:
             values = np.load(path, mmap_mode="r", allow_pickle=False)
         else:
             values = np.load(path, allow_pickle=False)
-        expected_dtype = np.dtype(str(entry["dtype"]))
+        expected_dtype = np.dtype(entry["dtype"])
         expected_shape = tuple(int(value) for value in entry["shape"])
         if values.dtype != expected_dtype or values.shape != expected_shape:
             raise ArtifactError(
@@ -208,14 +322,6 @@ def load_dataset_arrays(
         y_return=loaded["y_return"],
         ts=loaded["ts"],
         split=loaded["split"],
-        manifest=_read_manifest(artifact.directory),
+        manifest=artifact.manifest,
         memmapped=bool(mmap),
     )
-
-
-def _read_manifest(directory: Path) -> dict[str, Any]:
-    payload = json.loads((directory / ARTIFACT_FILE).read_text(encoding="utf-8"))
-    manifest = payload.get("manifest")
-    if not isinstance(manifest, dict):
-        raise ArtifactError("artifact manifest has no dataset manifest")
-    return manifest
