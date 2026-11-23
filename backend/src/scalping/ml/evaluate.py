@@ -9,20 +9,30 @@ The policy is deliberately simple: when flat, enter in the direction whose
 probability clears ``threshold``; when in a position, close if the opposite
 probability clears ``exit_threshold``. The simulator still owns sizing, stops,
 targets, the time stop and every risk block. A classifier cannot bypass them.
+
+The optional regime breakdown describes the *base* run only: it groups the same
+closed trades the headline metrics were computed from by the regime label that
+was current at each trade's entry. It is a descriptive table, not a second
+evaluation and not a promotion gate. Cost-stress runs are headline-only.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Sequence
+from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
 import numpy as np
+import polars as pl
 
-from scalping.backtest.engine import run_backtest
+from scalping.backtest.engine import BacktestResult, run_backtest
 from scalping.config import Settings
 from scalping.datasets.builder import build_dataset
 from scalping.features.build import FeatureFrame
 from scalping.ml.train import MLResult
+from scalping.regime.rules import classify
+from scalping.regime.strategy import UNKNOWN_REGIME, strategy_regime_table
+from scalping.types import Trade
 
 __all__ = ["EvaluationResult", "evaluate_model"]
 
@@ -41,6 +51,9 @@ class EvaluationResult:
     metrics: dict[str, Any]
     hold: dict[str, Any]
     stress: dict[str, dict[str, Any]]
+    #: Base-run regime table: ``{"rows": [...], "unmatched_trades": n}``.
+    #: Empty when no labels were supplied and rule labels were not requested.
+    regime: dict[str, Any] = field(default_factory=dict)
 
 
 def _slice_features(features: FeatureFrame, start: int) -> FeatureFrame:
@@ -53,6 +66,113 @@ def _slice_features(features: FeatureFrame, start: int) -> FeatureFrame:
         valid_from=0,
         columns=features.columns,
     )
+
+
+def _bars_frame(features: FeatureFrame) -> pl.DataFrame:
+    """Minimal bar frame for the rule engine.
+
+    ``volume`` and the bid/ask closes are placeholders: :func:`classify` reads
+    only ``ts`` and OHLC, and :func:`~scalping.data.base.conform_bars` requires
+    the full schema. Filling them here keeps the call on the public rule engine
+    instead of a private copy of its window math.
+    """
+    ohlc = np.asarray(features.ohlc, dtype=np.float64)
+    close = ohlc[:, 3]
+    spread = np.nan_to_num(
+        np.asarray(features.spread, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0
+    )
+    spread = np.clip(spread, 0.0, None)
+    return pl.DataFrame(
+        {
+            "ts": np.asarray(features.ts, dtype="datetime64[us]"),
+            "open": ohlc[:, 0],
+            "high": ohlc[:, 1],
+            "low": ohlc[:, 2],
+            "close": close,
+            "bid_close": close - spread / 2.0,
+            "ask_close": close + spread / 2.0,
+            "spread": spread,
+            "volume": np.zeros(len(close), dtype=np.int64),
+        }
+    )
+
+
+def _rule_labels(features: FeatureFrame) -> pl.DataFrame:
+    """Causal rule labels for the evaluated window, one row per bar.
+
+    The labels are computed from the sliced frame, so a bar's label uses only
+    bars at or before it. The cost is that the rule windows warm up inside the
+    split: the first bars fall back to ``normal`` volatility and ``sideways``
+    trend rather than borrowing history from before the split.
+    """
+    return classify(_bars_frame(features)).select("ts", "regime")
+
+
+def _normalise_labels(labels: pl.DataFrame) -> pl.DataFrame:
+    """Reduce external labels to ``ts`` + a non-null string regime.
+
+    Nulls, ``NaN`` and the usual string spellings of "missing" collapse to
+    :data:`UNKNOWN_REGIME`, so a broken label becomes an explicit unmatched
+    bucket instead of a regime named ``"NaN"``.
+    """
+    missing = [name for name in ("ts", "regime") if name not in labels.columns]
+    if missing:
+        raise ValueError(f"regime labels are missing columns: {missing}")
+    frame = labels.select("ts", "regime")
+    dtype = frame.schema["ts"]
+    if not isinstance(dtype, pl.Datetime):
+        raise TypeError(f"regime labels 'ts' must be a datetime, got {dtype}")
+    if dtype.time_zone is None:
+        frame = frame.with_columns(pl.col("ts").dt.replace_time_zone("UTC"))
+    else:
+        frame = frame.with_columns(pl.col("ts").dt.convert_time_zone("UTC"))
+    text = pl.col("regime").cast(pl.String)
+    missing_value = text.is_null() | text.is_in(["", "nan", "NaN", "null", "None"])
+    return frame.with_columns(
+        pl.when(missing_value).then(pl.lit(UNKNOWN_REGIME)).otherwise(text).alias("regime")
+    )
+
+
+def _regime_breakdown(trades: Sequence[Trade], labels: pl.DataFrame) -> dict[str, Any]:
+    """Per-regime table over the closed trades of one run.
+
+    ``rows`` excludes the ``unknown`` bucket; those trades are counted in
+    ``unmatched_trades`` instead, so ``sum(rows.trades) + unmatched_trades``
+    always equals the headline trade count.
+    """
+    table = strategy_regime_table(trades, labels)
+    if table.is_empty():
+        return {"rows": [], "unmatched_trades": 0}
+
+    unknown = table.filter(pl.col("regime") == UNKNOWN_REGIME)
+    unmatched = int(unknown["trades"].sum()) if unknown.height else 0
+    records: list[dict[str, Any]] = (
+        table.filter(pl.col("regime") != UNKNOWN_REGIME).sort("regime").to_dicts()
+    )
+    rows: list[dict[str, Any]] = []
+    assigned = 0
+    for row in records:
+        count = int(row["trades"])
+        assigned += count
+        rows.append(
+            {
+                "regime": str(row["regime"]),
+                "trades": count,
+                "win_rate": float(row["win_rate"]),
+                "expectancy_r": float(row["expectancy_r"]),
+                "total_r": float(row["total_r"]),
+                "pnl": float(row["total_pnl"]),
+                "profit_factor": (
+                    None if row["profit_factor"] is None else float(row["profit_factor"])
+                ),
+            }
+        )
+    if assigned + unmatched != len(trades):
+        raise RuntimeError(
+            "regime breakdown does not cover the headline trades: "
+            f"{assigned} assigned + {unmatched} unmatched != {len(trades)}"
+        )
+    return {"rows": rows, "unmatched_trades": unmatched}
 
 
 def _metrics(result: Any) -> dict[str, Any]:
@@ -123,8 +243,23 @@ def evaluate_model(
     exit_threshold: float = 0.55,
     window: int = 60,
     stress: tuple[float, ...] = (),
+    regime_labels: pl.DataFrame | None = None,
+    compute_regime: bool = True,
 ) -> EvaluationResult:
-    """Run the fitted classifier on one chronological split."""
+    """Run the fitted classifier on one chronological split.
+
+    ``regime_labels`` is an optional frame with ``ts`` and ``regime`` columns,
+    joined as-of each trade's entry. When it is omitted and ``compute_regime``
+    is true, the rule engine labels the same sliced bars the policy trades, so
+    no label can use data after its bar. With ``compute_regime=False`` and no
+    labels, ``EvaluationResult.regime`` stays empty; the CLI opts out that way
+    to keep its default JSON output unchanged.
+
+    The breakdown covers the base run only. Cost-stress runs repeat the same
+    policy at higher costs and remain headline-only, because a regime bucket
+    computed from stressed PnL would mix two different cost assumptions in one
+    table.
+    """
     if split not in _SPLITS:
         raise ValueError(f"unknown split {split!r}; choose train/validation/test")
     if not 0.5 <= threshold < 1.0 or not 0.5 <= exit_threshold <= 1.0:
@@ -154,7 +289,7 @@ def evaluate_model(
     p_up = p_up[first:]
     p_down = p_down[first:]
 
-    def run(multiplier: float) -> dict[str, Any]:
+    def run(multiplier: float) -> BacktestResult:
         active = sliced
         costs = settings.costs
         if multiplier != 1.0:
@@ -173,17 +308,16 @@ def evaluate_model(
             exit_threshold=exit_threshold,
             window=window,
         )
-        return _metrics(
-            run_backtest(
-                policy,
-                active,
-                config,
-                policy_name=f"ml-{result.spec.model}-{split}",
-                window=window,
-                max_steps=len(active.ts) + 1,
-            )
+        return run_backtest(
+            policy,
+            active,
+            config,
+            policy_name=f"ml-{result.spec.model}-{split}",
+            window=window,
+            max_steps=len(active.ts) + 1,
         )
 
+    base = run(1.0)
     hold = _metrics(
         run_backtest(
             lambda obs: 0,
@@ -194,11 +328,19 @@ def evaluate_model(
             max_steps=len(sliced.ts) + 1,
         )
     )
+
+    breakdown: dict[str, Any] = {}
+    if regime_labels is not None:
+        breakdown = _regime_breakdown(base.trades, _normalise_labels(regime_labels))
+    elif compute_regime:
+        breakdown = _regime_breakdown(base.trades, _rule_labels(sliced))
+
     return EvaluationResult(
         split=split,
         threshold=threshold,
         exit_threshold=exit_threshold,
-        metrics=run(1.0),
+        metrics=_metrics(base),
         hold=hold,
-        stress={f"x{value:g}": run(value) for value in stress},
+        stress={f"x{value:g}": _metrics(run(value)) for value in stress},
+        regime=breakdown,
     )
