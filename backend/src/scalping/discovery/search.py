@@ -154,6 +154,11 @@ class SearchResult:
     the archive-wide best; comparing against a champion is a separate step.
     ``lineage_depth`` is the deepest ancestor chain among this run's recorded
     candidates.
+
+    ``skipped_reasons`` splits ``skipped`` into its stable categories
+    (``invalid``, ``complexity``, ``duplicate``). A rerun on a saturated archive
+    reports its duplicates there, so a caller can say "deduped" with a number
+    instead of inferring it from a zero trial count.
     """
 
     dataset_id: str
@@ -163,6 +168,7 @@ class SearchResult:
     skipped: int
     accepted: int
     rejections: dict[str, int] = field(default_factory=dict)
+    skipped_reasons: dict[str, int] = field(default_factory=dict)
     stop_reason: str = "exhausted"
     generations: int = 0
     best: Candidate | None = None
@@ -187,6 +193,17 @@ class SearchResult:
             raise ValueError("best_id and best_metrics require a best candidate")
         if self.best is not None and self.best_id is None:
             raise ValueError("a best candidate requires its id")
+        total_skips = 0
+        for reason, count in self.skipped_reasons.items():
+            if reason not in (_DUPLICATE, _INVALID, _COMPLEXITY):
+                raise ValueError(f"unknown skip reason {reason!r}")
+            if isinstance(count, bool) or not isinstance(count, int):
+                raise TypeError(f"skip count for {reason!r} must be an int")
+            if count < 0:
+                raise ValueError(f"skip count for {reason!r} must be >= 0")
+            total_skips += count
+        if total_skips > self.skipped:
+            raise ValueError("skipped_reasons cannot exceed the skipped total")
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe summary; the candidate is rendered by its canonical dict."""
@@ -198,6 +215,7 @@ class SearchResult:
             "skipped": self.skipped,
             "accepted": self.accepted,
             "rejections": dict(sorted(self.rejections.items())),
+            "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "stop_reason": self.stop_reason,
             "generations": self.generations,
             "lineage_depth": self.lineage_depth,
@@ -443,6 +461,7 @@ def evolve(
         skipped=sum(skipped.values()),
         accepted=accepted,
         rejections=dict(sorted(rejections.items())),
+        skipped_reasons=dict(sorted(skipped.items())),
         stop_reason=stop_reason,
         generations=generations_done,
         best=best_candidate,
