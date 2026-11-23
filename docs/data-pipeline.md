@@ -52,6 +52,32 @@ features.
 provider frame. CSV exports without quotes are correctly reported as
 `real_quotes=False`, while the allowed spread model keeps `spread_*` usable.
 
+### Persisted dataset arrays
+
+`scalping/datasets/artifact.py` saves a built dataset once and reloads it
+without rebuilding from Parquet:
+
+```python
+from scalping.datasets.artifact import load_dataset_arrays, save_dataset_arrays
+
+save_dataset_arrays("../runs/datasets/xauusd-m1-h1", bundle)
+data = load_dataset_arrays("../runs/datasets/xauusd-m1-h1")   # X is a memmap
+```
+
+- Layout: `artifact.json` plus one `.npy` per array (`X`, `y_direction`,
+  `y_return`, `ts`, `split`). `artifact.json` is written last and acts as the
+  commit marker; arrays without it are not a dataset.
+- `X` loads as a read-only `np.memmap`, so a large matrix is not copied into
+  RAM. `mmap=False` returns ordinary arrays.
+- Each file has a blake2b checksum in the manifest, verified on load by
+  default. `verify=False` skips the read for a trusted artifact.
+- The manifest keeps the dataset id and the builder manifest, so a model run
+  can name the exact dataset it trained on. Shape/dtype mismatches and missing
+  files are errors, not silent gaps.
+
+This is the storage format; CLI/API wiring for "train from an artifact" lands
+with the model registry (Phase 10).
+
 ## Schema
 
 Every bar frame conforms to `scalping.data.base.BAR_SCHEMA`:
