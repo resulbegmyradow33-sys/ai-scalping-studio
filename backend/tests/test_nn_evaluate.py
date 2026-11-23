@@ -67,9 +67,7 @@ def tiny_checkpoint(tmp_path):
 
 
 def test_metrics_match_hand_calculation() -> None:
-    metrics = classification_metrics(
-        np.array([0, 0, 1, 1]), np.array([0, 1, 1, 1]), classes=(0, 1)
-    )
+    metrics = classification_metrics(np.array([0, 0, 1, 1]), np.array([0, 1, 1, 1]), classes=(0, 1))
 
     assert metrics.rows == 4
     assert metrics.accuracy == pytest.approx(0.75)
@@ -124,9 +122,6 @@ def test_checkpoint_evaluation_reports_metrics_not_profit(tmp_path) -> None:
     assert metrics["classes"] == [-1, 1]
     assert 0.0 <= metrics["accuracy"] <= 1.0
     assert metrics["log_loss"] is not None and metrics["brier"] is not None
-
-    with pytest.raises(ValueError, match="no windows"):
-        evaluate_checkpoint(checkpoint, data, split="validation", device="cpu") if data.X_validation.size == 0 else (_ for _ in ()).throw(ValueError("no windows"))
 
 
 def test_empty_split_is_rejected(tmp_path) -> None:
