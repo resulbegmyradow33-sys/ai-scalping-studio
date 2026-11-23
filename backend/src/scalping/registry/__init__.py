@@ -2,11 +2,14 @@
 
 Metadata lives in one SQLite file; Parquet datasets and model checkpoints stay
 on disk and the registry stores their paths and digests. The champion is the
-newest promotion, so promotion and rollback leave a queryable audit trail.
+newest promotion in a scope, so promotion and rollback leave a queryable audit
+trail and each scope keeps an independent champion.
 """
 
 from scalping.registry.db import (
+    JOB_STATUSES,
     SCHEMA_VERSION,
+    Champion,
     DatasetRecord,
     DuplicateError,
     JobRecord,
@@ -19,7 +22,9 @@ from scalping.registry.db import (
 )
 
 __all__ = [
+    "JOB_STATUSES",
     "SCHEMA_VERSION",
+    "Champion",
     "DatasetRecord",
     "DuplicateError",
     "JobRecord",
