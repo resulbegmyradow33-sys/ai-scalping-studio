@@ -217,6 +217,19 @@ uv run python -m scalping.cli data csv \
   --path ../data-real-csv/XAUUSD_M1.csv --symbol XAUUSD --root ../data-real-store
 ```
 
+The CSV provider parses the file in bounded chunks (100,000 rows) instead of
+reading it into one string and one record list. A multi-GB export therefore
+costs the frame plus one chunk, not several copies of the raw text. Source line
+numbers stay exact and duplicate detection spans chunk boundaries, because the
+"first seen" map is shared by every chunk. Pass `--tz-offset` explicitly; with
+no offset the documented `+3` broker default is assumed (the old DST heuristic
+only changed the log message, never the value).
+
+The final canonical frame is still materialised, and the store write plus the
+provenance checksum need it once; a fully streaming store import with a chunked
+checksum is Phase 14 work. JSON import is parsed as one document (no streaming
+JSON parser is a dependency).
+
 JSON array (new):
 
 ```bash

@@ -37,7 +37,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Tick table layer for querying ticks without pre-aggregation.
 - [ ] Data-quality report in the dashboard.
 - [x] Per-symbol sessions enforced in the simulator.
-- [ ] Dataset import is chunked automatically for multi-GB files.
+- [x] Dataset import is chunked automatically for multi-GB files.
 
 ## Phase 3 — Features and datasets
 
