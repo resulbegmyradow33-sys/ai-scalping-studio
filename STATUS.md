@@ -4,7 +4,7 @@ Bu dosya, `docs/requirements/master-prompt.md` hedeflerine göre deponun
 durumunu tek sayfada gösterir. Ayrıntılı kanıt: `docs/architecture-audit.md`.
 Plan: `docs/implementation-roadmap.md`. Görev listesi: `docs/task-board.md`.
 
-Son güncelleme: 2026-11-23 · Branch `main` @ `2fb33c3`
+Son güncelleme: 2026-11-23 · Branch `main` @ `93ef3c9`
 
 ## Bugün gerçekten çalışan şey
 
@@ -19,7 +19,7 @@ Son güncelleme: 2026-11-23 · Branch `main` @ `2fb33c3`
 - Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
 - **Purged expanding-window CV** (embargo dahil) ve kalibrasyon (Brier, log loss,
   ECE/MCE) var; hiçbir model promosyon kapısını geçmedi.
-- **Testler: 1001 backend (+2 store-gated skip), 194 frontend** (`main` @ `2fb33c3`);
+- **Testler: 1266 backend (+2 store-gated skip), 210 frontend** (`main` @ `93ef3c9`);
   ruff/mypy/eslint temiz; Next build geçiyor.
 - **Ölçülen performans:** M1 `build_features` 168–173 s → **8.65 s**; `fvg` taraması
   149.5 s → **1.93 s**, çıktı bit-identical. Dil kararı: Python + TypeScript kalıyor.
@@ -43,21 +43,21 @@ Son güncelleme: 2026-11-23 · Branch `main` @ `2fb33c3`
 | RL (PPO + taklit) | 🟡 | PPO/BC + action mask (flow) var; SAC/TD3/DQN/A2C ve risk maskesi yok |
 | Piyasa rejimi motoru | ✅ | Kural + KMeans/GMM/HMM/supervised + strateji×rejim tablosu + API/panel |
 | Strateji araştırma/seçimi | 🟡 | 5 aile + flow kuralı + LinUCB; rejim bağımlı seçim yok |
-| Ensemble / karar motoru | 🟡 | LinUCB kol seçimi; OOF stacking/oylama/NO TRADE dilimi geliştiriliyor |
+| Ensemble / karar motoru | ✅ | OOF stacking, soft/weighted/hard oylama, disagreement, NO TRADE karar motoru |
 | Güven/kalibrasyon | 🟡 | Brier/log loss/ECE/MCE var; temperature scaling ve OOD yok |
-| Otonom öğrenme | 🟡 | SQLite registry dilimi PR'da; candidate gate/drift/scheduler yok |
+| Otonom öğrenme | 🟡 | SQLite registry + scope'lu champion/rollback + gate + drift var; scheduler/otomatik promosyon yok |
 | Deney/HPO yönetimi | ❌ | Optuna/sweep yok |
 | Bağımsız risk motoru | 🟡 | Günlük + haftalık + DD + ardışık zarar + spread kill switch'leri var (varsayılan kapalı); slippage limiti yok |
 | Gerçekçi backtest | 🟡 | Walk-forward + maliyet stresi + purged CV; Monte Carlo/parametre duyarlılığı yok |
-| Paper trading defteri | 🟡 | Kalıcı SQLite ledger + restart-safe koşucu var; API dilimi geliştiriliyor; MT5 adapter iskelet |
-| Model registry / SQLite | 🟡 | datasets/models/promotions/jobs + champion/rollback + scope PR'da; artefakt doğrulaması yok |
-| Panel | 🟡 | Data, Intelligence, Performance, Training; ML/NN/RL/paper/monitoring sayfaları yok |
+| Paper trading defteri | 🟡 | Kalıcı SQLite ledger + restart-safe koşucu + `/api/paper` var; MT5 adapter iskelet, gerçek para kapalı |
+| Model registry / SQLite | 🟡 | datasets/models/promotions/jobs + scope'lu champion/rollback + gate + drift; artefakt doğrulaması yok |
+| Panel | 🟡 | Data, Intelligence, Performance, Training, `/labs/ml`; NN/RL/paper/monitoring sayfaları yok |
 | Scheduler | 🟡 | İki arka plan döngüsü; konfigüre edilebilir scheduler yok |
 | Testler | ✅ | 843 backend + 194 frontend; ruff/mypy/eslint/build temiz |
 | Dokümantasyon | 🟡 | Zorunlu 15 dokümanın bir kısmı hazır; `docs/task-board.md` gerçek durumu izliyor |
-| Otonom strateji keşfi (Phase 16) | ❌ | Güvenli DSL/AST ve arama motoru dilimleri geliştiriliyor; henüz merge yok |
-| Bilgi ingestion (Phase 17) | ❌ | Doküman ingestion/index dilimi geliştiriliyor |
-| Otonom orchestrator (Phase 18) | ❌ | Registry + jobs var; tetikleme/kuyruk/crash recovery yok |
+| Otonom strateji keşfi (Phase 16) | 🟡 | Güvenli DSL/AST + discovery arşivi/arama + candidate gate var; DSL→simulator evaluator dilimi geliştiriliyor |
+| Bilgi ingestion (Phase 17) | 🟡 | TXT/MD/HTML/DOCX ingestion + FTS index + hypothesis kaydı var; PDF/OCR ve otomatik çıkarım yok |
+| Otonom orchestrator (Phase 18) | 🟡 | Kalıcı job kuyruğu, dependency, retry, pause/safe-mode, crash recovery, audit log var; gerçek handler'lar ve zamanlayıcı yok |
 | Kabul kriterleri | ❌ | Uçtan uca promote/reject → paper → monitor → rollback zinciri henüz yok |
 
 Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
