@@ -15,6 +15,8 @@ more than a large one that swaps.
 |---|---|---|---|
 | `transformer` | bidirectional over the window | mean over steps | offline classification; the window ends at the prediction bar |
 | `causal_transformer` | upper-triangular mask | last token | streaming-safe representation; step `t` never reads `t + 1` |
+| `patchtst` | bidirectional over patches | mean over patches | PatchTST-style patching; attention sees a few tokens instead of every bar |
+| `itransformer` | bidirectional over variates | mean over variates | iTransformer-style; one token per feature, modelling cross-feature structure |
 
 Both prepend a learned positional embedding, use pre-norm encoder layers with
 GELU feed-forward blocks, and output logits. `forward_sequence` exposes the
@@ -35,6 +37,44 @@ per-step states so causality can be tested exactly like the TCN.
 count outside the range is a construction error. The default model at 59
 features, 60 bars and `hidden=32` stays under two million parameters
 (`test_default_model_stays_small`).
+
+### PatchTST-style patching
+
+`patchtst` splits the window into patches of `patch_len` bars with an optional
+`stride` (default: non-overlapping). Each patch is flattened to
+`patch_len * features`, projected to `hidden`, and becomes one encoder token:
+
+```
+n_patches = (window - patch_len) // stride + 1
+```
+
+A trailing partial patch is **dropped**, not zero-padded: `window=25` with
+`patch_len=8` gives 3 patches and bar 24 is unused, visible in `n_patches`.
+`max_sequence` caps the number of patches (the attention length), not the raw
+window. `window < patch_len`, a zero patch/stride or a head count that does not
+divide `hidden` raise at construction.
+
+```bash
+uv run python -m scalping.cli nn train ... --model patchtst --window 60 --hidden 32
+```
+
+With `window=60`, the default 8-bar patches give 7 tokens, which keeps the
+encoder tiny on the M2.
+
+### iTransformer-style variate attention
+
+`itransformer` transposes the input so every **feature** becomes one token: the
+token embedding is a linear projection of that feature's whole window. Attention
+then mixes features rather than bars. The model is deliberately **not** causal:
+the window already ends at the prediction bar, and the point of this variant is
+cross-feature structure.
+
+`max_sequence` caps the number of variate tokens (`n_features`), and the window
+is still fixed and checked on every call.
+
+```bash
+uv run python -m scalping.cli nn train ... --model itransformer --window 60 --hidden 32
+```
 
 ## 3. Causality
 
@@ -69,7 +109,6 @@ uv run python -m scalping.cli nn evaluate \
 Implemented: encoder, causal temporal encoder, config guard, causality tests,
 parameter-count smoke test, trainer/CLI/evaluator integration.
 
-Open in Phase 7: PatchTST-style patching, iTransformer-style variate attention,
-an optional TFT, and a measured benchmark table against GRU/TCN (latency and
-peak memory, not just parameters). No profitability claim is made from
+Open in Phase 7: an optional TFT and a measured benchmark table against
+GRU/TCN (latency and peak memory, not just parameters). No profitability claim is made from
 prediction accuracy; the simulator and cost stress remain the gate.
