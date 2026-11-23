@@ -23,6 +23,7 @@ from typing import Any, Final
 
 import numpy as np
 
+from scalping.features.availability import Capabilities, ensure_columns_available
 from scalping.features.build import FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS, columns_for, indices_for
 
@@ -135,11 +136,16 @@ def build_dataset(
     purge_bars: int = 0,
     embargo_bars: int = 0,
     notes: str = "",
+    capabilities: Capabilities | None = None,
 ) -> DatasetBundle:
     """Cut a causal feature frame into train/validation/test with purge/embargo.
 
     ``purge_bars`` is raised to at least ``horizon`` because two labels whose
     horizons overlap share future bars even if their rows do not.
+    ``capabilities``, when given, fails the build if a selected column needs an
+    input the source cannot provide (for example signed flow without tick
+    volumes). ``None`` keeps the historical behaviour for callers that only have
+    the feature matrix.
     """
     if horizon < 1:
         raise ValueError("horizon must be >= 1")
@@ -170,6 +176,8 @@ def build_dataset(
 
     indices = indices_for(groups)
     columns = columns_for(groups)
+    if capabilities is not None:
+        ensure_columns_available(columns, capabilities)
     X = np.ascontiguousarray(features.X[start:end][:, indices], dtype=np.float32)
     close = np.asarray(features.ohlc[start:end, 3], dtype=np.float64)
     future = np.asarray(features.ohlc[start + horizon : n, 3], dtype=np.float64)
