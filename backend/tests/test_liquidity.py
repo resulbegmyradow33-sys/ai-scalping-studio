@@ -179,6 +179,55 @@ def test_public_fvg_matches_reference_on_frame() -> None:
     assert out["fvg_dist"].dtype == pl.Float64
 
 
+def test_multi_block_random_frames_match_reference() -> None:
+    # Every size crosses at least one 512-bar block boundary; 4097 and 5000
+    # cross eight and nine. The coarse grids and forced repeats put gaps and
+    # zero restarts on both sides of the boundaries.
+    for n in (511, 512, 513, 1023, 1024, 1025, 4097, 5000):
+        rng = np.random.default_rng(1000 + n)
+        grid = 0.05 if n % 2 else 0.01
+        highs, lows = _random_ohlc(rng, n, grid)
+        atr_values = rng.uniform(0.1, 2.0, n)
+        _assert_equal(highs, lows, atr_values, f"multi-block n {n}")
+
+
+def test_gap_spans_multiple_blocks() -> None:
+    # The up gap created at bar 2 stays open for the whole 2,000-bar frame, so
+    # it is a static entry in blocks 1, 2 and 3.
+    n = 2000
+    highs = np.full(n, 101.4)
+    lows = np.full(n, 100.6)
+    highs[0], lows[0] = 100.0, 99.5
+    highs[1], lows[1] = 100.9, 99.8
+    highs[2], lows[2] = 101.5, 101.0
+    atr_values = np.ones(n)
+    _assert_equal(highs, lows, atr_values, "spanning gap")
+    up, _, distance = _fvg_scan(highs, lows, atr_values)
+    assert up[2]
+    assert np.any(distance[3:] != 0.0)
+
+
+def test_zero_restart_just_past_a_block_edge() -> None:
+    # Up gap at bar 500 (inside block 0). Bar 513, the first bar after the
+    # 512-boundary, revisits its top while a down gap is still open, so the
+    # restart must return the down candidate, not 0.0.
+    n = 1100
+    highs = np.full(n, 102.8)
+    lows = np.full(n, 102.6)
+    highs[:400] = 100.0
+    lows[:400] = 99.0
+    highs[400], lows[400] = 104.0, 103.0
+    highs[401], lows[401] = 102.8, 102.2
+    highs[402:500] = 102.5
+    lows[402:500] = 102.0
+    atr_values = np.ones(n)
+    _assert_equal(highs, lows, atr_values, "zero at block edge")
+    up, _, distance = _fvg_scan(highs, lows, atr_values)
+    assert up[500] and not up[513]
+    assert distance[513] == pytest.approx(0.3)
+    assert distance[513] != 0.0
+
+
 def test_old_up_edge_zero_restarts_scan() -> None:
     # Bar 11 revisits the top of an up gap created at bar 9, so the running
     # best restarts and the result comes from the gaps after that zero.

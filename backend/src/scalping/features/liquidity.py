@@ -28,8 +28,9 @@ from scalping.features.indicators import atr
 
 __all__ = ["fvg", "liquidity_sweep"]
 
-#: Bars per block in the nearest-open-gap index. The scan is O(n log n) in the
-#: number of gaps, independent of how many gaps are open at once.
+#: Bars per block in the nearest-open-gap index. The static index is built one
+#: block at a time, so memory is bounded by the gaps open at once rather than
+#: by every (gap, block) incidence. Time still scales with those incidences.
 _BLOCK: int = 512
 
 
@@ -93,10 +94,18 @@ def _nearest_active(
     deaths``. Returns ``(abs distance, edge value, creation index)``; ties go to
     the oldest gap, matching the insertion order of the row loop.
 
-    The bar axis is split into blocks. A gap that covers a whole block is put
-    in that block's sorted edge array, so all bars of the block are answered by
-    one ``searchsorted``. Gaps only partly inside a block are expanded over
-    their (short) slice and merged into the block result.
+    The bar axis is split into blocks of ``_BLOCK`` rows. The index is streamed
+    one block at a time: gaps that cover the whole block go into a sorted array
+    for that block, gaps that die inside it become short partial slices, and
+    gaps created inside it are short partial slices as well. Memory is
+    ``O(n + G + A + P)`` for ``G`` gaps, ``A`` gaps open at once and ``P``
+    partial elements of the current block. Time is
+    ``O(n log n + I + G * _BLOCK)`` for ``I`` whole-block incidences plus at
+    most two partial slices per gap. ``I`` is ``O(G * n / _BLOCK)`` in the
+    worst case (a gap that never dies spans every block), so an adversarial
+    monotonic multi-million-row series is still quadratic in time; the real
+    store is not. A segment tree over the time axis would bound both at
+    ``O(G log n)`` and is the follow-up if that input becomes real.
     """
     gaps = len(creations)
     abs_best = np.full(height, np.inf)
@@ -106,43 +115,58 @@ def _nearest_active(
         return abs_best, edge_best, creation_best
 
     blocks = (height + _BLOCK - 1) // _BLOCK
-    start_block = creations // _BLOCK
-    end_block = (deaths - 1) // _BLOCK
-    gap_index = np.arange(gaps)
+    created = creations.tolist()
+    dying = deaths.tolist()
+    far_edge = edges.tolist()
+    alive: list[int] = []
+    ptr = 0
 
-    # --- gaps that cover whole blocks -------------------------------------
-    full_counts = np.maximum(0, end_block - start_block - 1)
-    total_full = int(full_counts.sum())
-    if total_full:
-        rep = np.repeat(gap_index, full_counts)
-        offsets = np.repeat(np.cumsum(full_counts) - full_counts, full_counts)
-        block_ids = (
-            np.arange(total_full, dtype=np.int64)
-            - offsets
-            + np.repeat(start_block + 1, full_counts)
-        )
-        values = edges[rep]
-        origins = creations[rep]
-        order = np.lexsort((values, block_ids))
-        block_ids = block_ids[order]
-        values = values[order]
-        origins = origins[order]
-        counts = np.bincount(block_ids, minlength=blocks)
-        starts = np.r_[0, np.cumsum(counts)[:-1]]
-        for block in np.flatnonzero(counts):
-            lo = starts[block]
-            hi = lo + counts[block]
-            block_values = values[lo:hi]
-            block_origins = origins[lo:hi]
-            unique = np.r_[True, block_values[1:] != block_values[:-1]]
-            uniq_values = block_values[unique]
+    for block in range(blocks):
+        start = block * _BLOCK
+        end = min(start + _BLOCK, height)
+
+        if alive:
+            alive = [gap for gap in alive if dying[gap] > start]
+        # Add gaps created before this block; a gap that died before the block
+        # start never re-enters.
+        while ptr < gaps and created[ptr] < start:
+            if dying[ptr] > start:
+                alive.append(ptr)
+            ptr += 1
+        created_end = ptr
+        while created_end < gaps and created[created_end] < end:
+            created_end += 1
+
+        static_values: list[float] = []
+        static_origins: list[int] = []
+        part_lo: list[int] = []
+        part_hi: list[int] = []
+        part_gap: list[int] = []
+        for gap in alive:
+            if dying[gap] >= end:
+                static_values.append(far_edge[gap])
+                static_origins.append(created[gap])
+            else:
+                part_lo.append(start)
+                part_hi.append(dying[gap])
+                part_gap.append(gap)
+        for gap in range(ptr, created_end):
+            part_lo.append(created[gap])
+            part_hi.append(min(dying[gap], end))
+            part_gap.append(gap)
+
+        query = queries[start:end]
+        size = end - start
+        if static_values:
+            values = np.asarray(static_values)
+            origins = np.asarray(static_origins, dtype=np.int64)
+            order = np.argsort(values, kind="stable")
+            values = values[order]
+            origins = origins[order]
+            unique = np.r_[True, values[1:] != values[:-1]]
+            uniq_values = values[unique]
             uniq_starts = np.flatnonzero(unique)
-            uniq_origins = np.minimum.reduceat(block_origins, uniq_starts)
-
-            first = int(block) * _BLOCK
-            last = min(first + _BLOCK, height)
-            query = queries[first:last]
-            size = last - first
+            uniq_origins = np.minimum.reduceat(origins, uniq_starts)
             pos = np.searchsorted(uniq_values, query, side="left")
 
             left_dist = np.full(size, np.inf)
@@ -164,70 +188,48 @@ def _nearest_active(
             right = (right_dist < left_dist) | (
                 (right_dist == left_dist) & (right_origin < left_origin)
             )
-            abs_best[first:last] = np.where(right, right_dist, left_dist)
-            edge_best[first:last] = np.where(right, right_value, left_value)
-            creation_best[first:last] = np.where(right, right_origin, left_origin)
+            abs_best[start:end] = np.where(right, right_dist, left_dist)
+            edge_best[start:end] = np.where(right, right_value, left_value)
+            creation_best[start:end] = np.where(right, right_origin, left_origin)
 
-    # --- gaps that only partly cover a block ------------------------------
-    single = start_block == end_block
-    spanning = ~single
-    record_lo = np.concatenate(
-        [creations[single], creations[spanning], end_block[spanning] * _BLOCK]
-    )
-    record_hi = np.concatenate(
-        [deaths[single], (start_block[spanning] + 1) * _BLOCK, deaths[spanning]]
-    )
-    record_block = np.concatenate([start_block[single], start_block[spanning], end_block[spanning]])
-    record_gap = np.concatenate([gap_index[single], gap_index[spanning], gap_index[spanning]])
-    order = np.lexsort((record_gap, record_block))
-    record_lo = record_lo[order]
-    record_hi = record_hi[order]
-    record_block = record_block[order]
-    record_gap = record_gap[order]
-    counts = np.bincount(record_block, minlength=blocks)
-    starts = np.r_[0, np.cumsum(counts)[:-1]]
-    for block in np.flatnonzero(counts):
-        lo = starts[block]
-        hi = lo + counts[block]
-        slice_lo = record_lo[lo:hi]
-        slice_hi = record_hi[lo:hi]
-        slice_gap = record_gap[lo:hi]
-        lengths = slice_hi - slice_lo
-        total = int(lengths.sum())
-        if total == 0:  # pragma: no cover - gaps always cover their own bar
-            continue
-        offsets = np.cumsum(lengths) - lengths
-        rows = np.repeat(np.arange(len(slice_lo)), lengths)
-        positions = (
-            np.arange(total, dtype=np.int64)
-            - np.repeat(offsets, lengths)
-            + np.repeat(slice_lo, lengths)
-        )
-        block_lo = block * _BLOCK
-        query = queries[block_lo : min(block_lo + _BLOCK, height)]
-        dist = np.abs(edges[slice_gap][rows] - query[positions - block_lo])
+        if part_lo:
+            lo = np.asarray(part_lo)
+            hi = np.asarray(part_hi)
+            gap_ids = np.asarray(part_gap)
+            lengths = hi - lo
+            total = int(lengths.sum())
+            offsets = np.cumsum(lengths) - lengths
+            rows = np.repeat(np.arange(len(lo)), lengths)
+            positions = (
+                np.arange(total, dtype=np.int64)
+                - np.repeat(offsets, lengths)
+                + np.repeat(lo, lengths)
+            )
+            dist = np.abs(edges[gap_ids][rows] - query[positions - start])
 
-        order = np.argsort(positions, kind="stable")
-        positions = positions[order]
-        dist = dist[order]
-        gap = slice_gap[rows][order]
-        group_start = np.flatnonzero(np.r_[True, positions[1:] != positions[:-1]])
-        group_min = np.minimum.reduceat(dist, group_start)
-        group_id = np.repeat(
-            np.arange(len(group_start)), np.diff(np.r_[group_start, len(positions)])
-        )
-        first_min = np.flatnonzero(dist == group_min[group_id])
-        keep = np.r_[True, group_id[first_min][1:] != group_id[first_min][:-1]]
-        selected = first_min[keep]
-        bar = positions[selected]
-        new_dist = dist[selected]
-        new_origin = creations[gap[selected]]
-        old_dist = abs_best[bar]
-        old_origin = creation_best[bar]
-        take = (new_dist < old_dist) | ((new_dist == old_dist) & (new_origin < old_origin))
-        abs_best[bar[take]] = new_dist[take]
-        edge_best[bar[take]] = edges[gap[selected]][take]
-        creation_best[bar[take]] = new_origin[take]
+            order = np.argsort(positions, kind="stable")
+            positions = positions[order]
+            dist = dist[order]
+            gap_ids = gap_ids[rows][order]
+            group_start = np.flatnonzero(np.r_[True, positions[1:] != positions[:-1]])
+            group_min = np.minimum.reduceat(dist, group_start)
+            group_id = np.repeat(
+                np.arange(len(group_start)), np.diff(np.r_[group_start, len(positions)])
+            )
+            first_min = np.flatnonzero(dist == group_min[group_id])
+            keep = np.r_[True, group_id[first_min][1:] != group_id[first_min][:-1]]
+            selected = first_min[keep]
+            bar = positions[selected]
+            new_dist = dist[selected]
+            new_origin = creations[gap_ids[selected]]
+            old_dist = abs_best[bar]
+            old_origin = creation_best[bar]
+            take = (new_dist < old_dist) | (
+                (new_dist == old_dist) & (new_origin < old_origin)
+            )
+            abs_best[bar[take]] = new_dist[take]
+            edge_best[bar[take]] = edges[gap_ids[selected]][take]
+            creation_best[bar[take]] = new_origin[take]
 
     return abs_best, edge_best, creation_best
 
@@ -250,7 +252,8 @@ def _resolve_zero_restart(
     ``0.0``, so the answer is the nearest candidate *after* the last gap edge
     that coincides with the current price. Creation bars are handled by the
     caller; here the last zero is found with a per-price heap and only the gaps
-    created after it are scanned.
+    created after it are scanned. Worst case this is ``O(Z * G)`` for ``Z``
+    old-zero bars and ``G`` gaps; the real M1 store scans about 20 gaps per bar.
     """
     if len(bars) == 0:
         return

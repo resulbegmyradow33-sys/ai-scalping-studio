@@ -30,7 +30,8 @@ from scalping.features.build import build_features
 from scalping.features.indicators import atr
 from scalping.features.liquidity import _fvg_scan, fvg
 
-#: Like-for-like C port of the original loop, measured by the benchmark report.
+#: Externally recorded number from the performance benchmark report: the C port
+#: of the original loop on that host. This script does NOT reproduce it.
 C_PORT_SECONDS = 1.694
 
 
@@ -167,7 +168,10 @@ def main() -> int:
                 bad = int((np.asarray(a) != np.asarray(b)).sum())
                 print(f"    {name}: {bad} differing rows")
         print(f"  speedup             {old_wall / best_wall:8.1f}x")
-    print(f"  C port (reference)  {C_PORT_SECONDS:9.3f} s  (benchmark artifact)")
+    print(
+        f"  C port (external)   {C_PORT_SECONDS:9.3f} s  "
+        "(recorded by the benchmark report, not measured here)"
+    )
 
     if args.build:
         cpu = _cpu_seconds()
