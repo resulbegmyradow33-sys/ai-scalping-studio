@@ -94,28 +94,28 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 ## Phase 6 — Neural network framework
 
 - [x] Windowed tensor dataset with train-only normalisation.
-- [ ] PyTorch trainer: MPS when reliable, CPU fallback.
-- [ ] Gradient clipping, early stopping, checkpoints, resume, cancellation.
-- [ ] RAM guard and one-job policy.
+- [x] PyTorch trainer: MPS when reliable, CPU fallback.
+- [x] Gradient clipping, early stopping, checkpoints, resume, cancellation.
+- [x] RAM guard and one-job policy.
 - [x] MLP, deep MLP, residual MLP.
 - [x] Vanilla RNN, LSTM, GRU.
 - [x] 1D CNN, dilated CNN, CNN-LSTM.
 - [x] Causal TCN with configurable receptive field.
-- [ ] Shared evaluator against classical ML and the rule.
-- [ ] Checkpoint round-trip and causality tests.
-- [ ] `docs/neural-network-research.md`.
+- [ ] PARTIAL: shared evaluator + rule baseline done; classical ML comparison and simulator/cost gate still open.
+- [x] Checkpoint round-trip and causality tests.
+- [x] `docs/neural-network-research.md`.
 
 ## Phase 7 — Transformers
 
-- [ ] Transformer encoder.
-- [ ] Causal temporal Transformer.
+- [x] Transformer encoder.
+- [x] Causal temporal Transformer.
 - [ ] PatchTST-style patching.
 - [ ] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
-- [ ] Config guard (d_model/layers/heads/sequence/batch).
-- [ ] Memory smoke test and benchmark.
+- [x] Config guard (d_model/layers/heads/sequence/batch).
+- [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.
 - [ ] Same evaluator/registry.
-- [ ] `docs/transformer-models.md`.
+- [x] `docs/transformer-models.md`.
 
 ## Phase 8 — Reinforcement learning expansion
 

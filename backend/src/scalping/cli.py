@@ -66,6 +66,24 @@ _BUY: Final[int] = 1
 #: Explicit label so a baseline trade can never be mistaken for the agent's.
 RULE_LABEL: Final[str] = "rule:ret_5-baseline"
 
+#: Model names accepted by ``nn train``. Kept here (not imported from
+#: ``scalping.nn``) so data commands do not import torch; a test asserts it
+#: matches ``scalping.nn.MODEL_NAMES``.
+_NN_MODELS: Final[tuple[str, ...]] = (
+    "mlp",
+    "deep_mlp",
+    "residual_mlp",
+    "rnn",
+    "lstm",
+    "gru",
+    "cnn",
+    "dilated_cnn",
+    "cnn_lstm",
+    "tcn",
+    "transformer",
+    "causal_transformer",
+)
+
 #: Bars needed before the simulator has its first decision bar: the feature
 #: warm-up plus one full observation window. Mirrors ``api.runner.MIN_BARS``.
 _MIN_BARS: Final[int] = WARMUP + WINDOW
@@ -188,9 +206,7 @@ def _cmd_data_synth(args: argparse.Namespace) -> None:
     provider = SyntheticProvider(seed=args.seed, start_price=args.start_price)
     frame = provider.fetch(args.symbol, start, end)
     store = ParquetStore(args.root)
-    _print_json(
-        _ingest(frame, args.symbol, store, source="synthetic", synthetic=True)
-    )
+    _print_json(_ingest(frame, args.symbol, store, source="synthetic", synthetic=True))
 
 
 def _cmd_data_csv(args: argparse.Namespace) -> None:
@@ -265,6 +281,103 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
         raise _ExitCode(2)
 
 
+# --- neural networks ---------------------------------------------------------
+def _nn_data(args: argparse.Namespace, *, window: int, clip: float = 5.0):
+    """Build windowed tensors for one stored symbol/timeframe."""
+    from scalping.datasets.builder import build_dataset
+    from scalping.features.build import build_features
+    from scalping.nn import WindowConfig, build_windowed_dataset
+
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = build_features(frame, Settings().costs)
+    bundle = build_dataset(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        horizon=args.horizon,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+    )
+    data = build_windowed_dataset(bundle, WindowConfig(window=window, clip=clip))
+    return bundle, data
+
+
+def _cmd_nn_train(args: argparse.Namespace) -> None:
+    """Fit one sequence model and write a resumable checkpoint."""
+    from scalping.nn import TrainConfig, select_device, train_classifier
+
+    _, data = _nn_data(args, window=args.window, clip=args.clip)
+    checkpoint = Path(args.checkpoint)
+    config = TrainConfig(
+        model=args.model,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        hidden=args.hidden,
+        dropout=args.dropout,
+        patience=args.patience,
+        device=args.device,
+        seed=args.seed,
+        checkpoint_every=args.checkpoint_every,
+    )
+    result = train_classifier(data, config, checkpoint=checkpoint)
+    payload = {
+        "symbol": args.symbol,
+        "timeframe": args.timeframe,
+        "dataset_id": data.dataset_id,
+        "counts": data.counts(),
+        "window": data.window,
+        "device": select_device(args.device).type,
+        **result.to_dict(),
+    }
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2) + "\n")
+    _print_json(
+        {
+            "checkpoint": str(checkpoint),
+            "out": str(out),
+            "dataset_id": data.dataset_id,
+            "best_epoch": result.best_epoch,
+            "val_accuracy": result.val_accuracy,
+            "stopped": result.stopped,
+            "device": payload["device"],
+            "counts": data.counts(),
+        }
+    )
+
+
+def _cmd_nn_evaluate(args: argparse.Namespace) -> None:
+    """Score a checkpoint on one split of a freshly rebuilt dataset."""
+    from scalping.nn import evaluate_checkpoint, load_checkpoint
+
+    payload = load_checkpoint(args.checkpoint)
+    _, data = _nn_data(args, window=int(payload["window"]), clip=args.clip)
+    report = evaluate_checkpoint(args.checkpoint, data, split=args.split, device=args.device)
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, indent=2) + "\n")
+    metrics = report["metrics"]
+    _print_json(
+        {
+            "checkpoint": str(args.checkpoint),
+            "split": args.split,
+            "rows": metrics["rows"],
+            "accuracy": metrics["accuracy"],
+            "balanced_accuracy": metrics["balanced_accuracy"],
+            "log_loss": metrics["log_loss"],
+            "brier": metrics["brier"],
+            "dataset_id": report["dataset_id"],
+            "trading_claim": report["trading_claim"],
+        }
+    )
+
+
 def _cmd_dataset_build(args: argparse.Namespace) -> None:
     """Build a chronological, purged dataset manifest from a stored symbol."""
     store = ParquetStore(args.root)
@@ -272,8 +385,10 @@ def _cmd_dataset_build(args: argparse.Namespace) -> None:
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
     features = build_features(frame, Settings().costs)
-    groups = None if args.groups == "all" else tuple(
-        part.strip() for part in args.groups.split(",") if part.strip()
+    groups = (
+        None
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
     bundle = build_dataset(
         features,
@@ -308,8 +423,10 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
     features = build_features(frame, Settings().costs)
-    groups = DEFAULT_GROUPS if args.groups == "all" else tuple(
-        part.strip() for part in args.groups.split(",") if part.strip()
+    groups = (
+        DEFAULT_GROUPS
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
     spec = TrainSpec(
         model=args.model,
@@ -353,9 +470,7 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
     store = ParquetStore(args.root)
     frame = store.read(result.symbol, result.timeframe)
     if frame.is_empty():
-        raise CliError(
-            f"no {result.symbol} {result.timeframe} bars under {args.root}"
-        )
+        raise CliError(f"no {result.symbol} {result.timeframe} bars under {args.root}")
     features = build_features(frame, Settings().costs)
     multipliers = tuple(float(value) for value in args.stress.split(",") if value)
     evaluation = evaluate_model(
@@ -571,7 +686,9 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
     ml_evaluate.add_argument("--run", required=True, help="runs/ml/<run> directory")
     ml_evaluate.add_argument("--root", default=str(DEFAULT_ROOT))
-    ml_evaluate.add_argument("--split", choices=("train", "validation", "test"), default="validation")
+    ml_evaluate.add_argument(
+        "--split", choices=("train", "validation", "test"), default="validation"
+    )
     ml_evaluate.add_argument("--threshold", type=float, default=0.55)
     ml_evaluate.add_argument("--exit-threshold", type=float, default=0.55)
     ml_evaluate.add_argument("--window", type=int, default=WINDOW)
@@ -592,6 +709,47 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--root", default=str(DEFAULT_ROOT))
     build.add_argument("--out", required=True, help="manifest JSON path")
     build.set_defaults(handler=_cmd_dataset_build)
+
+    nn_parser = commands.add_parser("nn", help="train and evaluate sequence models")
+    nn_commands = nn_parser.add_subparsers(dest="nn_command", required=True)
+    nn_train = nn_commands.add_parser("train", help="fit one sequence model")
+    nn_train.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    nn_train.add_argument("--timeframe", default="H1")
+    nn_train.add_argument("--model", choices=_NN_MODELS, default="gru")
+    nn_train.add_argument("--window", type=int, default=60)
+    nn_train.add_argument("--clip", type=float, default=5.0)
+    nn_train.add_argument("--horizon", type=int, default=1)
+    nn_train.add_argument("--epochs", type=int, default=10)
+    nn_train.add_argument("--batch-size", type=int, default=64)
+    nn_train.add_argument("--hidden", type=int, default=64)
+    nn_train.add_argument("--dropout", type=float, default=0.1)
+    nn_train.add_argument("--learning-rate", type=float, default=1e-3)
+    nn_train.add_argument("--patience", type=int, default=5)
+    nn_train.add_argument("--checkpoint-every", type=int, default=1)
+    nn_train.add_argument("--device", choices=("auto", "cpu", "mps"), default="auto")
+    nn_train.add_argument("--seed", type=int, default=0)
+    nn_train.add_argument("--train-fraction", type=float, default=0.70)
+    nn_train.add_argument("--validation-fraction", type=float, default=0.15)
+    nn_train.add_argument("--purge", type=int, default=0)
+    nn_train.add_argument("--root", default=str(DEFAULT_ROOT))
+    nn_train.add_argument("--checkpoint", required=True, help="checkpoint path to write")
+    nn_train.add_argument("--out", required=True, help="training report JSON path")
+    nn_train.set_defaults(handler=_cmd_nn_train)
+
+    nn_eval = nn_commands.add_parser("evaluate", help="score a checkpoint on one split")
+    nn_eval.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    nn_eval.add_argument("--timeframe", default="H1")
+    nn_eval.add_argument("--horizon", type=int, default=1)
+    nn_eval.add_argument("--train-fraction", type=float, default=0.70)
+    nn_eval.add_argument("--validation-fraction", type=float, default=0.15)
+    nn_eval.add_argument("--purge", type=int, default=0)
+    nn_eval.add_argument("--split", choices=("train", "validation", "test"), default="test")
+    nn_eval.add_argument("--clip", type=float, default=5.0)
+    nn_eval.add_argument("--device", choices=("auto", "cpu", "mps"), default="auto")
+    nn_eval.add_argument("--root", default=str(DEFAULT_ROOT))
+    nn_eval.add_argument("--checkpoint", required=True)
+    nn_eval.add_argument("--out", default=None, help="optional full report path")
+    nn_eval.set_defaults(handler=_cmd_nn_evaluate)
 
     backtest = commands.add_parser("backtest", help="replay a stored symbol")
     backtest.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
