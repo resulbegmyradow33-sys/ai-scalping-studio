@@ -206,6 +206,11 @@ def predict_checkpoint(
     payload = load_checkpoint(checkpoint)
     if payload["n_features"] != data.feature_count or payload["window"] != data.window:
         raise ValueError("checkpoint shape does not match the dataset")
+    if payload.get("dataset_id") not in (None, data.dataset_id):
+        raise ValueError(
+            f"checkpoint was trained on {payload['dataset_id']!r}, "
+            f"not {data.dataset_id!r}; rebuild the same dataset"
+        )
     classes = tuple(int(value) for value in payload["classes"])
     model = build_model(
         payload["model"],  # type: ignore[arg-type]

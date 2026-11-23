@@ -102,8 +102,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] 1D CNN, dilated CNN, CNN-LSTM.
 - [x] Causal TCN with configurable receptive field.
 - [ ] PARTIAL: shared evaluator + rule baseline done; classical ML comparison and simulator/cost gate still open.
-- [ ] Checkpoint round-trip and causality tests.
-- [ ] `docs/neural-network-research.md`.
+- [x] Checkpoint round-trip and causality tests.
+- [x] `docs/neural-network-research.md`.
 
 ## Phase 7 — Transformers
 
