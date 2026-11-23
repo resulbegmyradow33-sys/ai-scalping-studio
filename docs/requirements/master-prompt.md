@@ -326,3 +326,288 @@ separately.
 - **PARTIAL** — some pieces exist, but the requirement is not met end to end.
 - **MISSING** — not implemented.
 - **EXPERIMENTAL** — implemented but not validated out of sample.
+
+
+---
+
+# AUTONOMOUS SELF-LEARNING MISSION — OVERRIDES AND ADDITIONS
+
+The following sections are first-class requirements of this project. They clarify
+and, where stated, override earlier wording. The product goal is not a bot that
+executes a human-authored strategy menu. The goal is a locally operating,
+autonomous research-and-trading system that discovers its own strategies from
+market evidence, learns through controlled experiments, manages its own
+training/research workflow, and can trade autonomously in paper mode. No
+particular trading strategy, named methodology, indicator combination, or
+strategy supplied by the owner is a prerequisite.
+
+## 28. Primary objective: strategy-independent autonomous intelligence
+
+The system MUST NOT depend on the owner supplying entry rules, exit rules,
+indicator combinations, ICT/SMC rules, named strategies, or a preferred trading
+method. Existing strategies and human-supplied strategies may be imported as
+optional baselines for comparison only. They must never constrain the search
+space or be treated as the required answer.
+
+The system must be able to:
+- Observe raw and derived market data and discover predictive or tradable
+  structure without being handed a strategy.
+- Form its own measurable hypotheses from data.
+- Generate candidate policies and strategies from a bounded, inspectable
+  strategy representation.
+- Discover entry, exit, position-management, timing, and NO-TRADE behaviour.
+- Test candidates across symbols, timeframes, market regimes, and changing
+  transaction costs where data permits.
+- Learn from both simulated outcomes and paper-trading feedback.
+- Reject candidates that fail independent validation, even if their training
+  results look excellent.
+- Continue researching when no candidate beats the current champion; it must
+  be allowed to conclude that no trade or no improvement is the best decision.
+
+The strategy search space must be generated from reusable primitives rather
+than a fixed list of named strategies. Primitives may include causal price,
+return, volatility, volume/flow (only when genuine), market-structure,
+cross-timeframe, time/session, and execution-cost features; comparisons,
+thresholds, boolean/conditional expressions, temporal windows, state
+transitions, entry/exit rules, and position-management actions. The owner must
+not have to author these combinations.
+
+## 29. Autonomous Strategy Discovery Engine
+
+Build a dedicated engine that creates, mutates, evaluates, and archives
+strategies without human-written strategy rules.
+
+Required capabilities:
+1. A safe, versioned strategy DSL/AST representing observations, conditions,
+   entry/exit decisions, holding logic, and sizing requests. No arbitrary code
+   execution or eval of generated code.
+2. Candidate generation using appropriate methods such as genetic programming,
+   evolutionary search, grammar-based search, random search, and Bayesian
+   optimisation. Select methods based on evidence and compute budget; do not
+   implement every algorithm merely for its name.
+3. Search over feature subsets, thresholds, lookback windows, entry/exit logic,
+   regime conditioning, multi-timeframe relationships, and holding periods.
+4. Optional policy discovery through RL, with an environment whose observations
+   contain only information available at decision time and whose actions
+   include BUY, SELL, HOLD, CLOSE, REDUCE and NO TRADE as appropriate.
+5. Reward/objective design based on net outcomes after spread, commission,
+   slippage and execution assumptions; penalise drawdown, tail risk,
+   overtrading, unstable turnover and excessive complexity. Do not optimise
+   win-rate or raw accuracy alone.
+6. Candidate deduplication, complexity limits, search budgets, deterministic
+   seeds, experiment lineage, reproducibility and cancellation.
+7. A strategy archive containing source representation, parent/mutation
+   lineage, parameters, dataset hashes, symbols, timeframes, costs, code
+   version, experiment results and rejection reasons.
+8. Strategy comparison against simple baselines and the current champion.
+9. Regime-conditional and cross-symbol evaluation to detect strategies that
+   only exploit one narrow historical condition.
+10. A mandatory NO TRADE option when expected net edge is insufficient or
+    uncertainty/cost/risk is too high.
+
+No strategy may be selected using the final untouched test set. Use nested
+chronological validation / walk-forward evaluation, purge and embargo where
+labels overlap, a locked final test set, and a separate forward/paper period.
+Control multiple-testing and data-snooping risk: record the number of trials,
+penalise complexity, assess parameter sensitivity and stability, and do not
+reuse the final holdout for repeated tuning. A large search producing one
+profitable backtest is not evidence of a durable edge.
+
+## 30. Knowledge Ingestion and Research Engine
+
+The owner must be able to add research material after the application is
+installed. Support local, offline ingestion where practical:
+- Market datasets: CSV, Parquet, JSON and supported tick/bar formats.
+- Research documents: PDF, TXT, Markdown, HTML and DOCX where lightweight,
+  maintained parsers are available.
+- Experiment and paper-trading logs, broker exports, strategy reports and
+  model evaluation artifacts.
+
+For every imported item:
+1. Preserve the original file and provenance; compute a checksum and record
+   source, import time, format, size and parser version.
+2. Extract text/tables/metadata where supported; report extraction failures,
+   scanned-PDF/OCR limitations and unsupported formats honestly.
+3. Index extracted content locally with document/page/section references.
+4. Separate factual claims, definitions, examples, opinions, hypotheses and
+   empirical market data. Never treat a book's claim as proven market truth.
+5. Convert potentially testable ideas into structured research hypotheses:
+   what is observed, proposed condition, expected effect, market/timeframe
+   scope, evidence source, assumptions and a falsification test.
+6. Link every generated hypothesis to its source passages and later experiment
+   IDs so the user can trace why it was proposed and what happened.
+7. Send hypotheses to the Strategy Discovery Engine for quantitative testing;
+   do not directly convert prose into live orders or trusted strategy rules.
+8. Allow the system to learn from its own paper-trading and backtest reports.
+
+Important capability boundary: document ingestion is not the same as training a
+language model. Under the zero-cost/no-mandatory-LLM constraint, the system
+should use deterministic parsers, metadata extraction, search/indexing,
+lightweight NLP and structured hypothesis templates. It must not claim to
+understand every book like a human or to have trained on a PDF. Optional
+advanced language tooling may be proposed separately only if it is free,
+offline, fits the hardware and is explicitly approved; it is not a dependency
+for the core trading learner.
+
+## 31. Autonomous Learning Orchestrator
+
+Create one persistent orchestrator that coordinates the complete learning
+lifecycle. It is a real executable subsystem, not just a scheduler label or
+dashboard page.
+
+It must:
+- Detect newly imported data, documents, broker exports and completed paper
+  sessions.
+- Route each item to the correct ingestion/validation pipeline.
+- Decide which research jobs are eligible based on data sufficiency, novelty,
+  drift, previous results and resource budget.
+- Create and queue dataset preparation, hypothesis generation, strategy
+  search, ML/DL/RL training, evaluation, drift checks and paper-analysis jobs.
+- Enforce dependency order, one heavy job at a time, RAM/CPU/disk budgets,
+  priorities, cancellation, pause/resume, retry limits and crash recovery.
+- Persist all jobs and states so restart does not lose experiment history.
+- Avoid pointless retraining when there is no meaningful new data or evidence.
+- Keep paper trading isolated from training failures and heavy training
+  processes.
+- Explain every automated action through an auditable event log.
+- Support manual pause, safe mode, disable-autonomous-research and rollback
+  controls without requiring the owner to design strategies.
+
+Autonomy means the system can initiate and manage approved research tasks on
+its own. It does not mean unlimited compute, uncontrolled self-modification,
+or permission to alter risk limits.
+
+## 32. Continuous learning, feedback and champion governance
+
+Implement a closed learning loop:
+market observation → hypothesis/candidate generation → simulation →
+independent validation → paper trial → outcome analysis → model/strategy
+update proposal → champion comparison → promotion or rejection → monitoring.
+
+For every paper trade, persist the timestamp, data snapshot/version, symbol,
+timeframe, observation/features, selected policy/strategy version, action,
+confidence/uncertainty, expected outcome, risk decision, requested and filled
+prices, spread, slippage, commission, exit reason, realised P&L/R, and relevant
+market regime. Keep immutable historical records.
+
+Learning from outcomes must account for delayed labels, overlapping trades,
+position interactions and transaction costs. Do not update a model from an
+outcome until the relevant outcome is fully known and correctly attributed.
+Distinguish training feedback from independent evaluation data.
+
+Maintain:
+- Immutable experiment and model versions.
+- A champion model/policy/strategy and separate candidate versions.
+- Promotion rules with minimum sample sizes, OOS and walk-forward evidence,
+  cost stress, regime coverage, stability and comparison against champion.
+- Automatic rejection and rollback.
+- Drift and degradation monitoring.
+- A record of failed experiments and why they failed.
+- The ability to keep the current champion or select NO TRADE if no candidate
+  passes.
+
+The system may automatically promote a candidate only inside the configured
+paper-trading environment and only after all gates pass. Risk limits are
+immutable to models and strategies. A strategy cannot raise its own limits,
+disable the risk engine, or grant itself real-money access.
+
+## 33. Autonomous trading and execution boundary
+
+The finished system must be capable of making its own BUY, SELL, HOLD, CLOSE,
+REDUCE or NO TRADE decisions and managing a complete simulated position
+lifecycle without the owner supplying a strategy.
+
+Required sequence:
+1. Historical backtest and robust walk-forward validation.
+2. Continuous/replay paper trading using new market data.
+3. Optional broker demo adapter (for example, MT5 demo) behind explicit
+   configuration, disabled by default and with no embedded credentials.
+4. Human review of evidence before any future consideration of real capital.
+
+For this project, real-money execution remains disabled and out of scope.
+Autonomous paper trading is the required end state; demo connectivity is an
+optional later stage. Never describe a backtest as live trading or a paper fill
+as a real broker fill.
+
+## 34. Scope discipline: build what serves the objective
+
+The project is a self-learning trading research and paper-execution studio, not
+a collection of fashionable model names.
+
+- Do not implement every neural architecture, RL algorithm or data science
+  package just because it appears in a list. Choose the smallest set that
+  answers a measurable research question and fits the M2.
+- Keep LightGBM/XGBoost and compact GRU/TCN/PPO as candidate tools, not
+  mandatory winners. Add Transformers, SAC/TD3/DQN, autoencoders, Mamba, GNN or
+  other methods only when an experiment justifies them.
+- Remove duplicate modules, dead code, placeholder interfaces, unused
+  dependencies, redundant dashboards and hard-coded strategy assumptions when
+  an audit proves they do not serve the objective. Preserve working behaviour
+  and tests; do not delete functionality merely to simplify.
+- Do not require the owner to choose indicators, write strategies, label every
+  trade manually, or select the winning model. The owner supplies data,
+  documents, constraints and approval for external actions; the system
+  performs the research.
+- Keep the implementation local-first, offline-capable after data/dependencies
+  are available, zero-cost in mandatory services, and resource-aware.
+- Do not fabricate data, metrics, training runs, test results or profitability.
+  Report separately: implemented, tested, trained, independently validated,
+  paper-traded and profitable (profitability must never be guaranteed).
+
+## 35. Updated execution priorities
+
+The existing phases remain, but the autonomous objective is not postponed to a
+cosmetic final feature. After data integrity, leakage-safe datasets and the
+minimum usable ML/RL evaluation foundations are reliable, prioritise in this
+order:
+
+1. Complete the autonomous learning registry, experiment lineage, scheduler,
+   champion/candidate gate and rollback.
+2. Build the strategy DSL and autonomous strategy discovery/search engine.
+3. Build document/data knowledge ingestion and hypothesis traceability.
+4. Connect the Learning Orchestrator to new data, new documents, strategy
+   discovery, model training, evaluation and paper feedback.
+5. Complete independent risk and realistic execution simulation.
+6. Run the full closed loop in paper trading and expose its state in the UI.
+7. Expand model families only when measured evidence supports the added cost.
+
+Do not block the strategy-independent discovery engine on implementing every
+listed neural architecture. Do not treat a manual strategy library as the
+strategy discovery engine.
+
+## 36. Additional acceptance criteria for the actual autonomous objective
+
+The system is not accepted as autonomous self-learning until all of these
+end-to-end tests pass:
+
+1. Import a previously unseen market dataset; validate provenance and quality;
+   build a leakage-safe dataset without manual feature/strategy rules.
+2. Generate multiple new strategy candidates from the strategy grammar/search
+   space without the owner providing entry/exit rules.
+3. Reproduce a candidate experiment from its saved data hash, code version,
+   configuration and random seed.
+4. Reject deliberately overfit candidates on unseen chronological data and
+   transaction-cost stress tests.
+5. Demonstrate that the search can select NO TRADE and can conclude that no
+   candidate beats the champion.
+6. Import a sample PDF and dataset; preserve source references; produce
+   traceable test hypotheses without claiming the PDF itself trained a model.
+7. Detect new data or completed paper-trade outcomes and automatically queue
+   eligible research jobs.
+8. Train a candidate, compare it with the champion, and demonstrate promotion,
+   rejection and rollback with an audit trail.
+9. Run paper trading autonomously without a human selecting the strategy.
+10. Show that risk controls cannot be bypassed by generated strategies, RL
+    policies, models or the orchestrator.
+11. Recover correctly after application restart, interrupted training and
+    cancelled jobs.
+12. Operate within measured Mac mini M2 resource limits.
+13. Demonstrate the complete loop:
+    import → validate → learn/research → generate strategy → backtest →
+    walk-forward/OOS validation → paper trade → analyse feedback → candidate
+    update → champion decision → monitor/rollback.
+
+A module name, prompt instruction, architecture diagram or placeholder does
+not satisfy an acceptance criterion. Each item requires code, tests and a
+recorded reproducible run. Even passing these criteria proves system
+functionality, not future profitability.
