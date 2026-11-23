@@ -15,12 +15,13 @@ from sklearn.ensemble import (
     HistGradientBoostingClassifier,
     RandomForestClassifier,
 )
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, SGDClassifier
 
 __all__ = ["MODEL_NAMES", "build_model"]
 
 MODEL_NAMES: Final[tuple[str, ...]] = (
     "logistic",
+    "sgd",
     "random_forest",
     "extra_trees",
     "hist_gradient",
@@ -67,6 +68,12 @@ class _XGBLabelClassifier:
             raise RuntimeError("model is not fitted")
         return self.classes_[np.argmax(self.predict_proba(X), axis=1)]
 
+    @property
+    def feature_importances_(self) -> np.ndarray:
+        if self._model is None:
+            raise RuntimeError("model is not fitted")
+        return np.asarray(self._model.feature_importances_, dtype=np.float64)
+
 
 def build_model(name: str, *, seed: int = 0) -> Any:
     """Return an unfitted estimator for ``name``.
@@ -79,6 +86,16 @@ def build_model(name: str, *, seed: int = 0) -> Any:
     if key == "logistic":
         return LogisticRegression(
             max_iter=2000,
+            class_weight="balanced",
+            random_state=seed,
+        )
+    if key == "sgd":
+        return SGDClassifier(
+            loss="log_loss",
+            penalty="l2",
+            alpha=1e-4,
+            max_iter=2000,
+            tol=1e-4,
             class_weight="balanced",
             random_state=seed,
         )
@@ -140,6 +157,4 @@ def build_model(name: str, *, seed: int = 0) -> Any:
             random_state=seed,
             verbosity=0,
         )
-    raise ValueError(
-        f"unknown model {name!r}; available: {', '.join(MODEL_NAMES)}"
-    )
+    raise ValueError(f"unknown model {name!r}; available: {', '.join(MODEL_NAMES)}")
