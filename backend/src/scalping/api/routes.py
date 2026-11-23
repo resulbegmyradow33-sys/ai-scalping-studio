@@ -10,11 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
-import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Final
+from typing import Any
 
 import polars as pl
 from anyio import ClosedResourceError
@@ -51,6 +49,7 @@ from scalping.api.schemas import (
     TimeframeSpec,
     TrainRequest,
     TrainResponse,
+    is_symbol_id,
 )
 from scalping.api.train_runner import (
     RunControlError,
@@ -126,12 +125,10 @@ def timeframe_registry() -> list[TimeframeSpec]:
 
 #: Symbol and timeframe values end up as filesystem path segments, so they are
 #: validated at the HTTP boundary before any store or provenance path is built.
-_SAFE_SYMBOL: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
-
-
+#: The same rule is :data:`scalping.api.schemas.SymbolId` for request bodies.
 def _checked_ids(symbol: str, timeframe: str) -> None:
     """Reject ids that could leave the data root; 422, never a silent rewrite."""
-    if ".." in symbol or not _SAFE_SYMBOL.fullmatch(symbol):
+    if not is_symbol_id(symbol):
         raise HTTPException(status_code=422, detail=f"invalid symbol {symbol!r}")
     if timeframe not in TIMEFRAMES:
         raise HTTPException(status_code=422, detail=f"unknown timeframe {timeframe!r}")
@@ -247,20 +244,22 @@ def market_regime(
 def _import_path(raw: str, data_root: Path) -> Path:
     """Resolve an HTTP-supplied CSV path against the data root and confine it.
 
-    The CLI keeps the unrestricted form: there the operator names their own
-    file. The HTTP surface only reads exports that live under the data root,
-    normalised and prefix-checked, so a request cannot turn into a read of an
+    Both sides are resolved first, so a symlink under the root that points
+    outside it is rejected instead of read; a lexical prefix check alone lets
+    ``data/link -> /tmp`` through. The CLI keeps the unrestricted form: there
+    the operator names their own file. The HTTP surface only reads exports that
+    live under the data root, so a request cannot turn into a read of an
     arbitrary file.
     """
-    base = os.path.normpath(str(data_root))
-    candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
-    target = os.path.normpath(candidate)
-    if target != base and not target.startswith(base + os.sep):
+    root = Path(data_root).resolve()
+    raw_path = Path(raw)
+    candidate = (raw_path if raw_path.is_absolute() else root / raw_path).resolve()
+    if candidate != root and not candidate.is_relative_to(root):
         raise HTTPException(
             status_code=422,
-            detail=f"csv path must stay under the data root {base}",
+            detail=f"csv path must stay under the data root {root}",
         )
-    return Path(target)
+    return candidate
 
 
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:
