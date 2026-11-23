@@ -473,6 +473,12 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
         raise CliError(f"no {result.symbol} {result.timeframe} bars under {args.root}")
     features = build_features(frame, Settings().costs)
     multipliers = tuple(float(value) for value in args.stress.split(",") if value)
+    regime_labels = None
+    if args.regime_labels:
+        path = Path(args.regime_labels)
+        if not path.is_file():
+            raise CliError(f"regime labels not found: {path}")
+        regime_labels = pl.read_parquet(path)
     evaluation = evaluate_model(
         result,
         features,
@@ -482,6 +488,8 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
         exit_threshold=args.exit_threshold,
         window=args.window,
         stress=multipliers,
+        regime_labels=regime_labels,
+        compute_regime=args.regime,
     )
     _print_json(
         {
@@ -493,6 +501,7 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
             "metrics": evaluation.metrics,
             "hold": evaluation.hold,
             "stress": evaluation.stress,
+            "regime": evaluation.regime,
         }
     )
 
@@ -693,6 +702,16 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_evaluate.add_argument("--exit-threshold", type=float, default=0.55)
     ml_evaluate.add_argument("--window", type=int, default=WINDOW)
     ml_evaluate.add_argument("--stress", default="", help="comma-separated cost multipliers")
+    ml_evaluate.add_argument(
+        "--regime",
+        action="store_true",
+        help="attach rule-based regime labels to the base run's trades",
+    )
+    ml_evaluate.add_argument(
+        "--regime-labels",
+        default="",
+        help="parquet with ts + regime columns; overrides --regime labels",
+    )
     ml_evaluate.set_defaults(handler=_cmd_ml_evaluate)
 
     dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
