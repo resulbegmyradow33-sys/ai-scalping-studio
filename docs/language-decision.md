@@ -123,13 +123,24 @@ up-gaps at 1.77M rows). A bit-identical C port runs the same loop in **1.69 s**
 (87x), and the whole build would fall to ~7.5 s. `order_block_distance` is 2.1%
 (3.6 s); everything else is ~1.3%.
 
-That does **not** justify a native rewrite yet. The 87x is a language constant on
-top of an O(n·k) algorithm. The correct next step is a Python algorithmic fix
-(predecessor/successor query plus a next-smaller-element death pass), expected
-to land in the 2–5 s range with no toolchain, wheel or FFI. The benchmarker's
-naive heap variant reached 2.02 s but was not output-equivalent, so it is a lower
-bound, not a drop-in. Extract only `fvg` to Rust/PyO3 if the corrected Python
-implementation still misses the wall-clock budget on the 5.89M-row store.
+That did **not** justify a native rewrite, and the Python fix has now landed:
+
+| Run | Rows | Old | New | Speedup | Bit-identical |
+|---|---:|---:|---:|---:|---|
+| M1 full | 1,773,331 | 149.5 s | **1.93 s** | 77.7x | yes (3 arrays) |
+| H1 full | 29,586 | 0.325 s | 0.030 s | 11.0x | yes |
+| C port reference | 1,773,331 | — | 1.694 s | — | — |
+
+The Python scan is 14% slower than the C port, not 87x slower, and the whole
+`build_features` fell from ~168–173 s to **8.65 s / 1.57 GB peak**. The three
+`fvg` calls inside it are 2.55 s; the remaining ~6.1 s is outside `fvg`, so the
+~5 s target is not reachable by changing `fvg` alone. No Rust, Go or C module was
+added. The next wins are the Python work already tracked as issues #69 (feature
+cache) and #70 (one lazy plan, month chunking).
+
+The trigger for a native module is unchanged: only if the optimised Python path
+still misses the wall-clock budget on the 5.89M-row store, and then only `fvg`
+moves behind PyO3.
 
 ## Honest limitations
 

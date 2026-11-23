@@ -21,6 +21,18 @@ evaluated on the first bar priced *after* the fill.
 The simulator, not the broker, owns the balance, equity and day anchor; the
 broker only reports fills and the unrealized PnL of its one position.
 
+Kill switches
+-------------
+The simulator owns the state the Phase 11 limits need: ``week_start_equity``
+(rolled on the same 17:00 UTC session boundary, at the ISO-week change),
+``_peak`` (episode peak equity), ``consecutive_losses`` (reset by a win, by a
+timed pause expiry, or at a session roll when ``pause_bars == 0``),
+``paused_until`` and ``spread_points`` (bar spread / contract point). Every
+entry passes ``RiskEngine.allow_new_extended``; a policy has no path around it.
+A tripped weekly, drawdown or emergency switch force-closes an open position
+with the switch name as ``Trade.reason``. With every Phase 11 field at ``0``
+the loop and its results are the pre-Phase-11 behaviour.
+
 Strategy context
 ----------------
 With a ``strategy_selector`` the observation gains six values at the end: a
@@ -50,6 +62,7 @@ state, so a caller can ask before every decision without changing the episode.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from math import isfinite
 from typing import Any, Final, NamedTuple, Protocol, runtime_checkable
@@ -115,6 +128,8 @@ def _flow_features(flow: np.ndarray, threshold: np.ndarray) -> np.ndarray:
         excess = np.where(thr > 0, (np.abs(flow64) - thr) / thr, 0.0)
     out = np.column_stack((flow64, excess, change)).astype(np.float32)
     return np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 _RISK_BONUS: Final[float] = 0.02
 _REWARD_CLIP: Final[float] = 5.0
 
@@ -263,9 +278,7 @@ class Simulator:
         if self._strategy_selector is not None:
             self.obs_dim += _STRATEGY_CONTEXT
         self._last_index = (len(features.X) if end is None else min(int(end), len(features.X))) - 1
-        self._first_index = max(
-            int(start), features.valid_from + self.window - 1, self.window - 1
-        )
+        self._first_index = max(int(start), features.valid_from + self.window - 1, self.window - 1)
 
         # Both matrices are frame-wide but causal for the rows they expose, so
         # building them once is equivalent to rebuilding a row per step without
@@ -291,7 +304,12 @@ class Simulator:
         # Episode state, fully established by reset().
         self.balance = self._initial
         self.day_start_equity = self._initial
+        self.week_start_equity = self._initial
         self.session: date | None = None
+        self.week: tuple[int, int] | None = None
+        self.consecutive_losses = 0
+        self.paused_until: datetime | None = None
+        self.spread_points: float | None = None
         self.steps = 0
         self.seed: int | None = None
         self.broker = PaperBroker(settings.contract, settings.costs, 0.0)
@@ -368,6 +386,7 @@ class Simulator:
         self.steps = 0
         self.balance = self._initial
         self.day_start_equity = self._initial
+        self.week_start_equity = self._initial
         self._peak = self._initial
         self._prev_excess = 0.0
         self._equity_before = self._initial
@@ -376,6 +395,10 @@ class Simulator:
         self._terminated = False
         self._reason = None
         self.session = None
+        self.week = None
+        self.consecutive_losses = 0
+        self.paused_until = None
+        self.spread_points = None
         self.strategy = self._base_strategy
         self._arm = -1
         self._arm_strength = 0.0
@@ -391,6 +414,8 @@ class Simulator:
             self._last_obs = np.zeros(self.obs_dim, dtype=np.float32)
             return self._last_obs.copy()
         self.session = self.risk.session_anchor(self._ts(self._i))
+        self.week = self.risk.week_anchor(self._ts(self._i))
+        self.spread_points = self._spread_points_at(self._i)
         self._choose_strategy()
         self._last_obs = self._observe()
         self._equity_value = self._equity()
@@ -413,11 +438,21 @@ class Simulator:
 
         bar = self._bar(self._i)
         self.broker.atr = self._atr(self._i)
+        self.spread_points = self._spread_points_at(self._i)
+        self._expire_pause(bar.ts)
         equity_now = self._equity()
         session = self.risk.session_anchor(bar.ts)
         if session != self.session:
             self.day_start_equity = equity_now
             self.session = session
+            if self.risk.risk.pause_bars == 0:
+                # A zero-pause consecutive-loss block lasts until the anchor
+                # resets; the roll is that reset.
+                self.consecutive_losses = 0
+        week = self.risk.week_anchor(bar.ts)
+        if week != self.week:
+            self.week = week
+            self.week_start_equity = equity_now
         self._equity_before = equity_now
 
         trade, opened, blocked = self._apply(action, bar)
@@ -435,13 +470,27 @@ class Simulator:
             closed = self.broker.update(next_bar)
             if closed is not None:
                 trade = closed
-                self.balance += closed.pnl
+                self._book(closed)
             if self.broker.position is not None:
                 account = self.broker.state(self.balance, self.day_start_equity)
                 if self.risk.must_force_close(account.bars_in_trade):
                     trade = self._close(next_bar, "timeout")
             equity = self._equity()
             reason = None
+
+        # Peak-to-current drawdown is measured against the episode peak,
+        # including the mark that just happened. The reward's own peak update
+        # stays below, unchanged.
+        peak = max(self._peak, equity)
+        kill = self.risk.kill_switch_reason(self._account(peak))
+        if kill is not None:
+            self._latch_pause()
+            if self.broker.position is not None:
+                # Weekly/drawdown/emergency switches own the exit: the policy
+                # cannot hold a position through a tripped equity kill switch.
+                trade = self._close(self._bar(self._i), kill)
+                equity = self._equity()
+        self._maybe_latch_consecutive()
 
         if self.broker.position is not None and equity <= _TERMINATE_FRACTION * self._initial:
             # Equity depletion with a live position: book the exit at this bar
@@ -572,8 +621,8 @@ class Simulator:
             if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
                 blocked = "session_closed"
             else:
-                account = self.broker.state(self.balance, self.day_start_equity)
-                allowed, reason = self.risk.allow_new(account, bar.ts)
+                account = self._account()
+                allowed, reason = self.risk.allow_new_extended(account, bar.ts)
                 if not allowed:
                     blocked = reason
                 elif self.broker.position is not None:  # only reachable with max_positions > 1
@@ -618,8 +667,62 @@ class Simulator:
 
     def _close(self, bar: Bar, reason: str) -> Trade:
         trade = self.broker.close(bar, reason)
-        self.balance += trade.pnl
+        self._book(trade)
         return trade
+
+    # --- kill-switch state --------------------------------------------------
+
+    def _account(self, peak_equity: float | None = None) -> AccountState:
+        """The broker snapshot plus the simulator-owned kill-switch state."""
+        state = self.broker.state(self.balance, self.day_start_equity)
+        return replace(
+            state,
+            week_start_equity=self.week_start_equity,
+            peak_equity=self._peak if peak_equity is None else peak_equity,
+            consecutive_losses=self.consecutive_losses,
+            paused_until=self.paused_until,
+            spread_points=self.spread_points,
+        )
+
+    def _book(self, trade: Trade) -> None:
+        """Apply a closed trade to the balance and the loss streak."""
+        self.balance += trade.pnl
+        self.consecutive_losses = self.consecutive_losses + 1 if trade.pnl < 0 else 0
+        self._maybe_latch_consecutive()
+
+    def _expire_pause(self, ts: datetime) -> None:
+        """Clear a timed latch once its bar is reached and restart the streak."""
+        if self.paused_until is not None and ts >= self.paused_until:
+            self.paused_until = None
+            self.consecutive_losses = 0
+
+    def _latch_pause(self) -> None:
+        """Hold entries for ``pause_bars`` decision bars after the trip bar.
+
+        ``paused_until`` is the timestamp of the first bar at which entries are
+        allowed again, so the next ``pause_bars`` decision bars stay blocked.
+        The target is clamped to the last available bar. ``pause_bars == 0``
+        leaves the switch condition-driven and does not latch.
+        """
+        if self.risk.risk.pause_bars <= 0 or self.paused_until is not None:
+            return
+        target = min(self._i + self.risk.risk.pause_bars + 1, self._last_index)
+        if target > self._i:
+            self.paused_until = self._ts(target)
+
+    def _maybe_latch_consecutive(self) -> None:
+        limit = self.risk.risk.consecutive_loss_pause
+        if limit > 0 and self.consecutive_losses >= limit:
+            self._latch_pause()
+
+    def _spread_points_at(self, index: int) -> float | None:
+        point = self.settings.contract.point
+        if not isfinite(point) or point <= 0:
+            return None
+        spread = float(self.features.spread[index])
+        if not isfinite(spread) or spread < 0:
+            return None
+        return spread / point
 
     # --- strategy ----------------------------------------------------------
 
