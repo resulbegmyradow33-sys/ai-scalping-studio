@@ -16,6 +16,7 @@ scope.
 
 from __future__ import annotations
 
+from scalping.paper.autonomous import AutonomousPaperRunner, AutonomousSummary
 from scalping.paper.ledger import (
     SCHEMA_VERSION,
     DuplicateError,
@@ -44,6 +45,8 @@ __all__ = [
     "ACTION_NAMES",
     "SCHEMA_VERSION",
     "AdapterDisabled",
+    "AutonomousPaperRunner",
+    "AutonomousSummary",
     "DuplicateError",
     "EquityPoint",
     "FillRecord",

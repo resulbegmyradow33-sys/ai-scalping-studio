@@ -2,8 +2,9 @@
 
 Phase 12 slices one and two: a persistent, restart-safe paper-trading ledger, a
 deterministic session runner, a read/write HTTP API over the ledger, and a
-disabled MT5 demo adapter skeleton. There is still no scheduler and no frontend
-page; a session row is a record, not a running process.
+disabled MT5 demo adapter skeleton. Phase 19 slice A adds an autonomous runner
+that paper-trades a validated DSL strategy spec. There is still no scheduler and
+no frontend page; a session row is a record, not a running process.
 
 ## No real-money execution
 
@@ -22,6 +23,9 @@ Implemented:
   schema version and explicit `BEGIN IMMEDIATE` transactions.
 - `scalping.paper.PaperSession` — drives the existing
   `scalping.env.simulator.Simulator` one bar at a time and records every step.
+- `scalping.paper.autonomous.AutonomousPaperRunner` — loads stored bars through
+  the feature cache and paper-trades a validated DSL `StrategySpec` without a
+  hand-written policy; see “Autonomous DSL runner”.
 - Restart safety: reopening a ledger and resuming a session replays the
   recorded actions, verifies the account against the stored state and only then
   appends. Duplicate history is impossible by construction.
@@ -147,6 +151,110 @@ with PaperLedger("var/paper/session-1.db") as ledger:
 `started_at` is injectable for byte-identical replays in tests; production
 callers leave it out.
 
+## Autonomous DSL runner
+
+`scalping.paper.autonomous.AutonomousPaperRunner` removes the hand-written
+policy from the paper path. It accepts a validated
+`scalping.strategy.dsl.nodes.StrategySpec` — the same object the discovery
+engine searches over — and drives the existing `PaperSession`, `Simulator` and
+`RiskEngine`. The strategy is **discovered, not human-authored**: this slice
+supplies the execution boundary, so a candidate selected by the autonomous
+pipeline can be paper-traded without the owner writing entry or exit rules.
+
+```python
+from scalping.data.store import ParquetStore
+from scalping.paper import PaperLedger
+from scalping.paper.autonomous import AutonomousPaperRunner
+
+with PaperLedger("var/paper/autonomous.db") as ledger:
+    runner = AutonomousPaperRunner(
+        ledger,
+        spec,                       # StrategySpec from discovery
+        "XAUUSD",
+        "M1",
+        settings,                   # scalping.config.Settings
+        store=ParquetStore("data"), # stored bars
+        session_id="auto-xauusd-m1",
+    )
+    runner.run()                    # every remaining stored bar
+    print(runner.summary())         # session id, hash, bars, trades, P&L, position
+    runner.close()
+```
+
+What the runner does:
+
+1. Validates the spec with the DSL validator **before** reading bars or creating
+   session state. An invalid spec raises `DslValidationError` and leaves the
+   ledger untouched — no session row and no feature-cache entry.
+2. Reads the stored slice through `ParquetStore` and builds the feature matrix
+   through `FeatureCache` (enabled by default under
+   `<store root>/.feature-cache`; pass `cache=False` or a shared
+   `FeatureCache`). There is no second data path and no matrix rebuilt per bar.
+3. Calls the compiled interpreter for every decision bar with the current
+   feature row, the open position's side and its completed-bar count. It maps
+   `BUY/SELL/HOLD/CLOSE/NO_TRADE` to the simulator's `1/2/0/3/0`; `NO_TRADE`
+   suppresses entries rather than flattening a position, matching the
+   interpreter's own precedence.
+4. Writes every signal, order, fill, trade and equity mark through
+   `PaperLedger`'s existing methods. The runner holds no SQL and opens no second
+   connection, so the ledger's transaction and constraint rules still apply.
+
+### Spec-hash attribution
+
+The canonical spec hash (`StrategySpec.canonical_hash()`) is the strategy
+version:
+
+| Record | Attribution |
+|---|---|
+| `sessions.strategy` | `"dsl"` |
+| `sessions.model_version` | canonical spec hash |
+| `sessions.config_json.extra.dsl` | `spec_version`, `spec_hash` and the full canonical payload |
+| `signals.model_version` | canonical spec hash, on every decision |
+| `signals.action` | mapped action name (`hold`/`buy`/`sell`/`close`) |
+| `signals.reason` | the DSL reason (`entry_long`, `exit`, `holding_limit`, `no_trade`, …); a gate that refused the action is appended as `; blocked=<reason>` |
+| `signals.probabilities_json` | `NULL` — the DSL is deterministic and emits no probability |
+
+The DSL `spec_version` is part of the canonical payload, so a signal carrying
+the hash is pinned to the exact version and every behavioural field. The
+explicit integer is also stored once per session in `config_json.extra.dsl`
+because the `signals` table has no dedicated version column. The full canonical
+payload in the session config means the strategy can be reconstructed and its
+hash recomputed from the ledger alone.
+
+### Resume and determinism
+
+The default session id is `auto-<symbol>-<timeframe>-<hash prefix>`, so a
+restart reopens the same record instead of creating a duplicate; pass
+`session_id` to separate runs of the same spec. `resume()` and `run()` use
+`PaperSession`'s replay semantics: recorded actions are replayed through a fresh
+simulator and the balance and open position are checked against the ledger
+before anything new is appended. The DSL history is reseeded from feature rows
+strictly before the decision bar, so a resume cannot introduce look-ahead.
+
+`run(bars=None, max_bars=None)` caps one call with `bars` and the session's
+total decisions with `max_bars` (counted from the ledger, so the cap survives a
+restart). With neither, every remaining stored bar is processed and the call
+stops when the episode ends.
+
+Determinism follows from the inputs: the same store slice, spec and seed produce
+identical signals and trades, and two complete ledgers compare row for row in
+the tests. A different `started_at` only changes the session metadata, not the
+trading path.
+
+### Risk and real money
+
+The spec never sees `settings.risk`. Entries, stops, targets and position size
+come from the simulator's `RiskEngine`; the DSL sizing nodes (`FixedFraction`,
+`AtrMultiple`) are part of the candidate identity but do not reach the broker.
+A generated strategy therefore cannot raise a limit, disable the risk engine or
+grant itself a live path. Risk-gate refusals are written to the signal reason
+and as rejected orders with their reason, and the runner lets them propagate
+instead of catching or retrying around them.
+
+The module imports no network client, holds no credentials and has no
+order-routing code. Real-money execution remains disabled and out of scope; the
+autonomous runner is a paper record, not a broker connection.
+
 ## HTTP API
 
 `scalping.api.routes_paper` mounts under `/api/paper`. It reads and writes the
@@ -214,13 +322,20 @@ integration:
 - A demo or live MT5 integration. `Mt5DemoAdapter` refuses every call.
 - Session scheduler and a long-running process separate from training; the API
   records a session but nothing steps it.
+- API/CLI wiring for `AutonomousPaperRunner`. It is constructed in-process; the
+  next slice adds the endpoint/command that selects a discovered spec, runs it
+  and exposes the summary.
+- A continuous feed. The autonomous runner processes the stored slice it was
+  constructed with; new bars require a new runner, which then resumes the same
+  session by id.
 - The Paper Trading frontend page (next slice).
 - Limit orders and partial fills. `orders.status` already has `pending`, and
   `resume` reports pending rows, but the runner only sends market orders.
 - Exit fills in `fills`. The broker settles exits as `trades`; the exit price
   and reason live there.
 - Probability vectors on signals. The column exists and is written when a
-  caller supplies one; the current policy contract returns a discrete action.
+  caller supplies one; the current policy contract returns a discrete action,
+  and the autonomous DSL runner deliberately stores `NULL`.
 
 ## Tests
 
@@ -242,10 +357,19 @@ importing the module does not load the terminal package, that no network client
 or secret appears in the source, and that every operation refuses even after a
 caller sets flags on the instance.
 
+`backend/tests/test_paper_autonomous.py` covers the DSL runner: an invalid spec
+is refused before a session row exists, two fresh ledgers over the same slice
+are byte-identical, 60 bars plus a reopen plus 440 bars equals one 500-bar run,
+every signal carries the canonical hash and a reason, a NO TRADE spec records
+signals without orders, a daily-loss block is recorded and never bypassed, a
+sizing node cannot change the broker's lot, `max_bars` survives across calls, a
+reopened ledger keeps the attribution, and a source scan finds no network,
+credential or real-money path.
+
 ```bash
 cd backend
 uv run ruff check src tests scripts
 uv run mypy src
-uv run pytest tests/test_api_paper.py tests/test_paper_mt5.py -q
+uv run pytest tests/test_api_paper.py tests/test_paper_mt5.py tests/test_paper_autonomous.py -q
 uv run pytest
 ```
