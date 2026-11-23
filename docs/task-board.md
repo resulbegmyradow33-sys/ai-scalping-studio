@@ -36,7 +36,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Statistical outlier detection and cross-source reconciliation.
 - [ ] Tick table layer for querying ticks without pre-aggregation.
 - [ ] Data-quality report in the dashboard.
-- [ ] Per-symbol sessions enforced in the simulator.
+- [x] Per-symbol sessions enforced in the simulator.
 - [ ] Dataset import is chunked automatically for multi-GB files.
 
 ## Phase 3 — Features and datasets

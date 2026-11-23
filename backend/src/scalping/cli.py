@@ -424,9 +424,13 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
     settings = Settings()
     features = build_features(frame, settings.costs)
     if args.policy == _POLICY_RULE:
-        result = run_backtest(_rule_baseline, features, settings, policy_name=RULE_LABEL)
+        result = run_backtest(
+            _rule_baseline, features, settings, policy_name=RULE_LABEL, symbol=args.symbol
+        )
     else:
-        result = run_backtest(_hold, features, settings, policy_name=_POLICY_HOLD)
+        result = run_backtest(
+            _hold, features, settings, policy_name=_POLICY_HOLD, symbol=args.symbol
+        )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

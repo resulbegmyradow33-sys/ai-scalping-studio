@@ -56,6 +56,7 @@ from typing import Any, Final
 import numpy as np
 
 from scalping.config import Settings
+from scalping.data.registry import session_for
 from scalping.data.store import ParquetStore
 from scalping.env.simulator import Simulator
 from scalping.features.build import FeatureFrame, build_features
@@ -464,7 +465,12 @@ class SimulationRunner:
         features = self._load_features()
         if self._rule is not None:
             self._rule.reset()
-        sim = Simulator(features, self._run_settings, strategy=self._strategy)
+        sim = Simulator(
+            features,
+            self._run_settings,
+            strategy=self._strategy,
+            session=session_for(self._symbol),
+        )
         session_id = uuid.uuid4().hex[:8]
         with self._lock:
             self._features = features
@@ -523,7 +529,12 @@ class SimulationRunner:
         self._features = features
         if self._rule is not None:
             self._rule.reset()
-        self._sim = Simulator(features, self._run_settings, strategy=self._strategy)
+        self._sim = Simulator(
+            features,
+            self._run_settings,
+            strategy=self._strategy,
+            session=session_for(self._symbol),
+        )
         self._side = None
         self._playing = False
         self._state = "idle"
