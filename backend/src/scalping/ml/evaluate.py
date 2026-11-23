@@ -18,7 +18,7 @@ evaluation and not a promotion gate. Cost-stress runs are headline-only.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, Final
 
@@ -233,6 +233,12 @@ def _probabilities(model: Any, result: MLResult, X: np.ndarray) -> tuple[np.ndar
     return np.asarray(p_up, dtype=np.float64), np.asarray(p_down, dtype=np.float64)
 
 
+def _check_cancel(cancel_check: Callable[[], bool] | None) -> None:
+    """Abort between simulator passes when the caller asked to cancel."""
+    if cancel_check is not None and cancel_check():
+        raise InterruptedError("evaluation cancelled")
+
+
 def evaluate_model(
     result: MLResult,
     features: FeatureFrame,
@@ -245,6 +251,7 @@ def evaluate_model(
     stress: tuple[float, ...] = (),
     regime_labels: pl.DataFrame | None = None,
     compute_regime: bool = True,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> EvaluationResult:
     """Run the fitted classifier on one chronological split.
 
@@ -259,6 +266,12 @@ def evaluate_model(
     policy at higher costs and remain headline-only, because a regime bucket
     computed from stressed PnL would mix two different cost assumptions in one
     table.
+
+    ``cancel_check`` is polled between simulator passes (before the base run,
+    before hold, and between stress runs). A backtest pass itself is not
+    interruptible; a caller that needs a hard stop must wait for the current
+    pass. ``InterruptedError`` means the evaluation stopped on request and no
+    result should be published.
     """
     if split not in _SPLITS:
         raise ValueError(f"unknown split {split!r}; choose train/validation/test")
@@ -317,7 +330,9 @@ def evaluate_model(
             max_steps=len(active.ts) + 1,
         )
 
+    _check_cancel(cancel_check)
     base = run(1.0)
+    _check_cancel(cancel_check)
     hold = _metrics(
         run_backtest(
             lambda obs: 0,
@@ -328,6 +343,7 @@ def evaluate_model(
             max_steps=len(sliced.ts) + 1,
         )
     )
+    _check_cancel(cancel_check)
 
     breakdown: dict[str, Any] = {}
     if regime_labels is not None:
@@ -335,12 +351,17 @@ def evaluate_model(
     elif compute_regime:
         breakdown = _regime_breakdown(base.trades, _rule_labels(sliced))
 
+    stressed: dict[str, dict[str, Any]] = {}
+    for value in stress:
+        _check_cancel(cancel_check)
+        stressed[f"x{value:g}"] = _metrics(run(value))
+
     return EvaluationResult(
         split=split,
         threshold=threshold,
         exit_threshold=exit_threshold,
         metrics=_metrics(base),
         hold=hold,
-        stress={f"x{value:g}": _metrics(run(value)) for value in stress},
+        stress=stressed,
         regime=breakdown,
     )
