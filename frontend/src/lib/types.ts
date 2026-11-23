@@ -324,6 +324,156 @@ export interface StrategyCard {
   forward?: ForwardResult;
 }
 
+// --- classical ML ------------------------------------------------------------
+
+/** `GET /api/symbols`; only the fields the form shows are named. */
+export interface SymbolSpec {
+  symbol: string;
+  description: string;
+  asset_class: string;
+}
+
+/** Bar sizes the ML endpoints accept (`MLTimeframe` in the API schema). */
+export type MLTimeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+
+/** Split names `/api/ml/evaluate` accepts. */
+export type MLSplit = "train" | "validation" | "test";
+
+/** One of the runner's statuses; unknown strings are shown verbatim. */
+export type MLRunStatus =
+  | "preparing"
+  | "running"
+  | "cancelling"
+  | "cancelled"
+  | "completed"
+  | "failed"
+  | "unknown";
+
+/** `POST /api/ml/train`; `groups: null` means every registered group. */
+export interface MLTrainRequest {
+  symbol: string;
+  timeframe: MLTimeframe;
+  model: string;
+  horizon: number;
+  groups?: string[] | null;
+  train_fraction: number;
+  validation_fraction: number;
+  purge_bars: number;
+  embargo_bars: number;
+  seed?: number;
+  evaluate_test?: boolean;
+  include_flat: boolean;
+}
+
+export interface MLTrainResponse {
+  run_id: string;
+}
+
+/** One row of `GET /api/ml/runs`. */
+export interface MLRunSummary {
+  run_id: string;
+  status: string;
+  created_at: string | null;
+  model: string | null;
+  symbol: string | null;
+  timeframe: string | null;
+  dataset_id: string | null;
+}
+
+/**
+ * Prediction metrics of one split. Fields are optional because a failed or
+ * older report may omit them; a missing value is a dash, never a zero.
+ */
+export interface MLPredictionMetrics {
+  rows?: number;
+  accuracy?: number;
+  balanced_accuracy?: number;
+  log_loss?: number;
+  brier?: number;
+  calibration?: {
+    ece?: number;
+    mce?: number;
+  };
+}
+
+/** Flattened calibration of the validation split (top level of the detail). */
+export interface MLCalibration {
+  brier: number | null;
+  log_loss: number | null;
+  ece: number | null;
+  mce: number | null;
+}
+
+/** `GET /api/ml/runs/{id}`; everything is prediction metrics, not trading. */
+export interface MLRunDetail {
+  run_id: string;
+  status: string;
+  created_at: string | null;
+  finished_at: string | null;
+  model: string | null;
+  symbol: string | null;
+  timeframe: string | null;
+  dataset_id: string | null;
+  config: Record<string, unknown>;
+  spec: Record<string, unknown>;
+  columns: string[];
+  validation: MLPredictionMetrics | null;
+  test: MLPredictionMetrics | null;
+  baseline: Record<string, unknown> | null;
+  split_counts: Record<string, number>;
+  calibration: MLCalibration | null;
+  error: string | null;
+}
+
+/** The trading metrics of one split; same shape as `Metrics`, fewer fields. */
+export interface MLTradingMetrics {
+  trades: number;
+  net_profit: number;
+  profit_factor: number | null;
+  win_rate: number;
+  expectancy_r: number;
+  max_drawdown: number;
+  total_costs: number;
+}
+
+/** One per-regime bucket; `profit_factor` is `null` when not representable. */
+export interface MLRegimeRow {
+  regime: string;
+  trades: number;
+  win_rate: number;
+  expectancy_r: number;
+  total_r: number;
+  pnl: number;
+  profit_factor: number | null;
+}
+
+export interface MLRegimeTable {
+  rows: MLRegimeRow[];
+  unmatched_trades: number;
+}
+
+export interface MLEvaluateRequest {
+  run_id: string;
+  split: MLSplit;
+  stress?: number[];
+  regime?: boolean;
+}
+
+/** `POST /api/ml/evaluate`: headline, hold baseline, stress and regimes. */
+export interface MLEvaluateResponse {
+  run_id: string;
+  symbol: string;
+  timeframe: string;
+  dataset_id: string;
+  split: string;
+  threshold: number;
+  exit_threshold: number;
+  metrics: MLTradingMetrics;
+  hold: MLTradingMetrics;
+  stress: Record<string, MLTradingMetrics>;
+  regime: MLRegimeTable;
+}
+
 export interface CalibrateRequest {
   symbol?: string;
   timeframe?: "M1" | "M5" | "M15" | "H1" | "D1";

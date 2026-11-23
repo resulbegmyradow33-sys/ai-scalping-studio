@@ -33,6 +33,7 @@ from scalping.api.schemas import (
     OkResponse,
 )
 from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.models import MODEL_NAMES
 from scalping.ml.train import TrainSpec
 
 __all__ = ["router"]
@@ -43,6 +44,19 @@ router = APIRouter(prefix="/api/ml", tags=["ml"])
 def _ml(request: Request) -> MLRunner:
     runner: MLRunner = request.app.state.ml
     return runner
+
+
+@router.get("/models", response_model=list[str])
+def ml_models() -> list[str]:
+    """Model names the factory can build, in registry order.
+
+    The UI reads this instead of hard-coding the list, so a new estimator or a
+    removed optional backend reaches the panel without a frontend edit. The
+    names are exactly the strings ``POST /api/ml/train`` accepts; whether an
+    optional backend (lightgbm/xgboost) actually imports is a separate,
+    per-run error.
+    """
+    return list(MODEL_NAMES)
 
 
 @router.post("/train", response_model=MLTrainResponse, status_code=202)
