@@ -1,16 +1,18 @@
 # Autonomous strategy discovery
 
-Phase 16, slice A. The objective is strategy-independent discovery: the system
+Phase 16. The objective is strategy-independent discovery: the system
 must generate and test candidates without the owner supplying entry rules, exit
-rules or named strategies. This slice builds the parts that do not depend on the
-strategy language — the candidate contract, the archive that holds the evidence,
-and a bounded search loop. The DSL/AST and its interpreter are a separate slice;
-they plug in through the protocols here without changing the loop.
+rules or named strategies. Slice A built the candidate contract, the archive
+that holds the evidence and a bounded search loop. Slice B added the
+DSL/AST and its interpreter (`docs/strategy-dsl.md`). Slice C wires that DSL to
+the simulator in `scalping.discovery.evaluate.DslEvaluator`, so a candidate now
+produces real net-of-cost trial metrics. The protocol seam is unchanged: the
+loop still knows nothing about strategy semantics.
 
-Nothing in this slice executes generated code. A candidate is data: canonical
-JSON, a sha256 id and a structural cost. The evaluator that scores it is
-injected, and the only dataset the loop ever names is the validation one it is
-configured with.
+Nothing in the discovery package executes generated code. A candidate is data:
+canonical JSON, a sha256 id and a structural cost. The evaluator interprets
+typed nodes with a closed set of operations, and the only dataset the loop ever
+names is the validation one it is configured with.
 
 ## Candidate contract
 
@@ -181,23 +183,120 @@ evidence instead of taking whichever row happens to be first.
 
 ## Dataset discipline
 
-The loop has one dataset handle and passes it to every evaluation. In this slice
-it is meant to be a **validation** dataset. The untouched test slice is not
-reachable from here: there is no split switch, no path to the store and no test
-dataset id. Evaluating on the final holdout during search turns the holdout into
-another training set, and no later gate can undo that.
+The loop has one dataset handle and passes it to every evaluation. It is meant
+to be a **validation** dataset. The untouched test slice is not reachable from
+here: there is no split switch, no path to the store and no test dataset id.
+Evaluating on the final holdout during search turns the holdout into another
+training set, and no later gate can undo that.
 
-Purge and embargo geometry is not reimplemented. The evaluator owns its splits
-and can reuse `scalping.ml.cv.fold_geometry`, which is the same arithmetic
-`cross_validate` and `fit_oof` use.
+Purge and embargo geometry is not reimplemented. The caller builds the
+validation frame — reusing `scalping.ml.cv.fold_geometry` and the dataset
+builder's purge/embargo rules — and hands that one frame to the evaluator. The
+evaluator does not split, fold or embargo on its own.
+
+## DSL evaluator: `DslEvaluator`
+
+`scalping.discovery.evaluate.DslEvaluator` is the production `Evaluator`. It
+interprets one `StrategySpec` bar by bar and drives the same `Simulator` as
+`scalping.backtest.engine.run_backtest`: `reset()`, then one `step(action)` per
+bar, recording the marked equity and every closed `Trade`. Metrics come from
+`scalping.backtest.metrics.compute`, so spread, slippage and commission are
+already inside the fills and are never subtracted twice.
+
+```python
+DslEvaluator(
+    features, settings,
+    *, symbol, timeframe, dataset_id,
+    gate=GateCriteria(), window=60, stress=(), max_steps=None,
+)
+```
+
+`evaluate(candidate, *, dataset_id, code_version, budget) -> TrialResult`.
+
+`features` is a **prebuilt** `FeatureFrame`. It is validated once at
+construction (2-D `X`, column names, `ts`/`ohlc`/`spread`/`atr` shapes,
+`valid_from`, finiteness after warm-up) and reused for every candidate. Nothing
+is rebuilt per proposal and the frame is never mutated. `code_version` and
+`budget` are accepted for the protocol and do not change the arithmetic: one
+candidate costs one frame pass per requested stress multiplier.
+
+### Bar order and the action mapping
+
+A decision at bar `i` reads row `i` plus the policy's history of rows before
+`i`. History is seeded with at most `max_lookback` rows that already occurred
+before the first decision bar, so a lookback is available from the first
+decision without reading a future row. Rows before `valid_from` carry warm-up
+`NaN`; the interpreter treats them as unknown, not as zero.
+
+| DSL action | Simulator action | Note |
+|---|---|---|
+| `BUY` | `1` | entry, subject to the risk engine and session gate |
+| `SELL` | `2` | entry, same gates |
+| `CLOSE` | `3` | rejected as `no_position` when flat |
+| `HOLD` | `0` | |
+| `NO_TRADE` | `0` | suppresses the entry; it does **not** flatten a position |
+
+`NO_TRADE → HOLD` is deliberate. The interpreter evaluates `no_trade` before
+exits, so on a true no-trade bar it has already suppressed the exit decision;
+flattening at the execution layer would contradict the DSL's own precedence. An
+open position is closed by an exit rule or the holding limit on a later bar.
+
+Exits are also evaluated before entries, and a `CLOSE` on a flat account is
+rejected as `no_position`. A strategy whose exit condition is true while flat
+therefore never enters; those candidates appear as zero-trade trials, which is
+the interpreter's precedence, not an evaluator bug.
+
+`window` is the simulator's observation warm-up and therefore sets the first
+decision bar (`max(valid_from + window - 1, window - 1)`), exactly as the
+backtest engine does. `max_steps` overrides the simulator's 20 000-step default;
+pass the frame length when a long validation window must run end to end.
+
+### Dataset guard
+
+The evaluator is bound to one `dataset_id` at construction.
+
+- Any other id passed to `evaluate` raises `ValueError` before a bar is read.
+- An id whose tokens name the untouched split — `test`, `tests`, `holdout`,
+  `final`, `locked`, including `final-test` and `hold-out` spellings — is
+  refused at construction. The match is token-based, so `latest` is allowed.
+- The evaluator has no store handle and no path to the final split. This is a
+  guard, not a substitute for split discipline: the caller still owns the
+  chronological fold geometry and must hand it a validation frame.
+
+### Cost stress
+
+`stress=(2.0, 3.0, ...)` reruns the same candidate once per multiplier with
+`FeatureFrame.spread * m` (a shallow copy; `X` stays as observed) and
+`spread_floor`, `slippage_atr_frac` and `commission_per_lot` scaled by `m`.
+The policy's decisions are identical because the features are; the fills and
+the account path move, so account-level gates (daily loss, kill switches) can
+block different later entries. A multiplier of `1` reuses the base run.
+
+Each run's finite metrics are flattened into `TrialResult.metrics` as
+`stress_<label>_<metric>` (`stress_x2_net_profit`, `stress_x2_bars`, ...), and
+the gate receives the `{"x2": {"net_profit": ...}}` shape it expects. A gate
+that requires a multiplier the caller did not request rejects with
+`missing_cost_stress` rather than inventing evidence.
+
+### Acceptance
+
+When a gate threshold is enabled, `accepted` and `rejections` come verbatim
+from `scalping.registry.gate.evaluate_candidate`. Rejections keep the
+`code: message` spelling; group them on the text before the first `:`.
+Calibration and regime evidence are never produced by this evaluator, so
+`max_ece` and `min_regime_coverage` reject with `missing_calibration` and
+`missing_regime` instead of passing silently. A default `GateCriteria` is empty
+and accepts every candidate — that is search-fitness mode, not promotion.
+
+Non-finite metrics are omitted rather than clamped: `profit_factor` is `inf`
+for wins without losses, and a gate that requires it then rejects with
+`missing_metric` instead of reading a fabricated number.
 
 ## What is deliberately absent
 
-- **The DSL/AST.** No grammar, no node types, no interpreter, no parser. The
-  protocols are the seam another slice plugs into.
-- **A real evaluator.** Nothing here wires the simulator, costs or walk-forward
-  validation. `TrialResult` is a contract; producing honest metrics is the
-  evaluator's job.
+- **Nested validation inside the evaluator.** It runs one candidate on one
+  frame. Chronological folds, purge/embargo geometry and the locked final test
+  are a caller/orchestrator concern; the evaluator only refuses a holdout id.
 - **Out-of-sample and forward testing.** No test-slice access and no paper
   period. Those are later gates.
 - **Champion comparison and promotion.** `decisions` records an outcome; the
@@ -209,13 +308,19 @@ and can reuse `scalping.ml.cv.fold_geometry`, which is the same arithmetic
   record or a UI button is orchestrator work.
 - **Parameter-sensitivity analysis.** The archive makes it possible; no
   neighbourhood scan is implemented here.
+- **Sizing from DSL nodes.** `FixedFraction`/`AtrMultiple` are part of the
+  candidate identity but do not reach the broker: the simulator's `RiskEngine`
+  owns position size from its frozen config. Two specs differing only in sizing
+  hash differently but simulate identically.
 
 ## Honest note
 
-This slice proves a search process, not a trading edge. It shows that candidates
-can be generated without owner-written rules, identified by content, deduplicated,
-evaluated, lineage-tracked and archived reproducibly within a budget. Whether
-any candidate makes money after spread, commission, slippage and drawdown is a
-question for the evaluator and the validation gates, and the answer may be no
-trade. A large trial count is a warning about data-snooping risk, not a
-qualification.
+This slice proves a search process wired to a cost-aware simulator, not a
+trading edge. It shows that candidates can be generated without owner-written
+rules, identified by content, deduplicated, simulated with real fills and
+costs, gate-checked, lineage-tracked and archived reproducibly within a budget.
+Whether any candidate makes money after spread, commission, slippage and
+drawdown on data it did not see is a question for the walk-forward and
+promotion gates, and the answer may be no trade. A large trial count is a
+warning about data-snooping risk, not a qualification. One candidate with a
+positive validation backtest, alone, is not evidence of a durable edge.
