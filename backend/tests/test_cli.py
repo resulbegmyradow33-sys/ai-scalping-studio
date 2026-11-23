@@ -313,6 +313,128 @@ def test_backtest_with_too_few_bars_exits_2(tmp_path):
     assert not (tmp_path / "short.json").exists()
 
 
+def test_backtest_without_out_exits_2(tmp_path):
+    r = run(
+        "backtest",
+        "--symbol",
+        "XAUUSD",
+        "--policy",
+        "hold",
+        "--root",
+        str(tmp_path),
+    )
+
+    assert r.returncode == 2
+    assert r.stdout == ""
+    assert "--out" in json.loads(r.stderr)["error"]
+
+
+def test_backtest_montecarlo_reports_the_distribution(tmp_path):
+    r = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 0, r.stderr
+
+    out = tmp_path / "mc.json"
+    r = run(
+        "backtest",
+        "montecarlo",
+        "--symbol",
+        "XAUUSD",
+        "--policy",
+        "rule",
+        "--root",
+        str(tmp_path),
+        "--n-paths",
+        "32",
+        "--seed",
+        "3",
+        "--mode",
+        "bootstrap",
+        "--block-size",
+        "4",
+        "--ruin-fraction",
+        "0.5",
+        "--confidence",
+        "0.05,0.5,0.95",
+        "--out",
+        str(out),
+    )
+
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    assert r.stdout.count("\n") == 1
+    payload = json.loads(r.stdout)
+    assert payload["paths"] == 32
+    assert payload["trades"] > 0
+    assert payload["mode"] == "bootstrap"
+    assert set(payload["final_pnl"]) == {"p05", "p50", "p95"}
+    assert 0.0 <= payload["probability_of_ruin"] <= 1.0
+    assert payload["ruin_threshold"] == 5_000.0
+    assert payload["worst_path"]["ending_balance"] <= payload["ending_balance"]["p50"]
+    assert payload["out"] == str(out)
+
+    full = json.loads(out.read_text())
+    assert len(full["outcomes"]) == 32
+    assert full["confidence_levels"] == [0.05, 0.5, 0.95]
+
+
+def test_backtest_sensitivity_reports_rows_and_breakeven(tmp_path):
+    r = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 0, r.stderr
+
+    out = tmp_path / "sens.json"
+    r = run(
+        "backtest",
+        "sensitivity",
+        "--symbol",
+        "XAUUSD",
+        "--policy",
+        "rule",
+        "--root",
+        str(tmp_path),
+        "--commission",
+        "0,7,28",
+        "--out",
+        str(out),
+    )
+
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    assert r.stdout.count("\n") == 1
+    payload = json.loads(r.stdout)
+    assert payload["base"]["parameter"] == "base"
+    assert [axis["parameter"] for axis in payload["axes"]] == ["commission_per_lot"]
+    rows = payload["axes"][0]["rows"]
+    assert [row["value"] for row in rows] == [0.0, 7.0, 28.0]
+    assert all(row["trades"] >= 0 for row in rows)
+    assert "breakeven_multiplier" in payload["axes"][0]
+    assert out.is_file()
+
+    written = json.loads(out.read_text())
+    assert written == {key: value for key, value in payload.items() if key != "out"}
+
+
 def test_csv_missing_file_exits_2_with_json_error(tmp_path):
     r = run(
         "data",

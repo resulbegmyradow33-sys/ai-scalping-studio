@@ -88,7 +88,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Feature importance and ablation.
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
 - [x] Regime breakdown of the trading evaluation (as-of join, partition identity tested).
-- [ ] Model registry metadata in SQLite (Phase 10).
+- [x] Model registry metadata in SQLite (Phase 10).
 - [x] `docs/classical-ml.md`.
 
 ## Phase 6 — Neural network framework
@@ -137,24 +137,24 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 9 — Ensemble and confidence
 
-- [ ] Out-of-fold stacking.
-- [ ] Weighted averaging and voting.
+- [x] Out-of-fold stacking (reuses the purged CV fold geometry).
+- [x] Weighted averaging and voting (soft, weighted, hard with tie → NO_TRADE).
 - [ ] Regime-dependent model selection.
-- [ ] Probability calibration and temperature scaling.
-- [ ] Brier/log loss/calibration curves.
-- [ ] Ensemble disagreement score.
+- [ ] PARTIAL: Brier/log loss/ECE/MCE var; temperature scaling yok.
+- [x] Brier/log loss/calibration curves.
+- [x] Ensemble disagreement score (mean pairwise total variation).
 - [ ] Out-of-distribution/unknown regime detection.
-- [ ] Decision engine: BUY/SELL/HOLD/NO TRADE.
-- [ ] Decision log with models, probabilities, regime, reason.
-- [ ] Compare ensemble vs best member; keep the simpler winner.
+- [x] Decision engine: BUY/SELL/HOLD/NO TRADE (ordered gates, reason required).
+- [ ] PARTIAL: `Decision` kaydı model/probability/disagreement/regime/reason taşıyor; kalıcı log yok.
+- [ ] PARTIAL: karşılaştırma var; 'daha basit olanı tut' otomatik değil.
 - [ ] `docs/ensemble-decision.md`.
 
 ## Phase 10 — Autonomous learning and registry
 
-- [ ] SQLite schema: datasets, experiments, models, promotions, backtests,
-      paper runs, drift, jobs.
-- [ ] Dataset versioning and checksums.
-- [ ] Model versioning, champion pointer and rollback.
+- [ ] PARTIAL: datasets/models/promotions/jobs var; experiments, backtests,
+      paper runs ve drift tabloları yok.
+- [x] Dataset versioning and checksums (dataset_id + digest).
+- [x] Model versioning, champion pointer and rollback (scope'lu).
 - [ ] Candidate → champion gate (trades, OOS, cost stress, regime coverage).
 - [ ] Drift detection: features, predictions, calibration.
 - [ ] Configurable scheduler with pause/resume/cancel.
@@ -190,10 +190,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Track signals, orders, fills, spread, slippage, commission, P&L,
       model/strategy versions and rejection reasons.
 - [x] Restart-safe paper session runner (replay + state verification, no inferred state).
-- [ ] MT5 demo adapter skeleton, disabled, no credentials.
-- [ ] API: account, positions, orders, history.
-- [ ] `docs/paper-trading.md`.
-- [ ] Tests: ledger invariants, restart recovery, no real-money path.
+- [x] MT5 demo adapter skeleton, disabled, no credentials (every op raises).
+- [x] API: account, positions, orders, history (`/api/paper`).
+- [x] `docs/paper-trading.md`.
+- [x] Tests: ledger invariants, restart recovery, no real-money path.
 
 ## Phase 13 — Dashboard
 
@@ -247,3 +247,86 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Local/external LLM — **not used** by policy.
 - [ ] Cloud-hosted neural networks — **not used**.
 - [ ] Paid market data — **not used**.
+
+
+---
+
+## Phase 16 — Autonomous strategy discovery (CORE OBJECTIVE)
+
+- [ ] Confirm existing strategies are optional baselines only, not required
+      owner-supplied rules or a fixed search menu.
+- [ ] Define a safe, versioned strategy DSL/AST; generated strategies cannot
+      execute arbitrary Python or shell code.
+- [ ] Build candidate generation from reusable causal primitives, conditions,
+      lookback windows, entry/exit/holding logic and NO TRADE.
+- [ ] Implement bounded evolutionary/genetic or grammar-based search; add
+      Bayesian/random search only where justified.
+- [ ] Add candidate mutation, crossover, deduplication, complexity limits,
+      reproducible seeds, experiment budgets and cancellation.
+- [ ] Connect candidate evaluation to realistic simulator costs, risk controls,
+      walk-forward validation and untouched OOS data.
+- [ ] Track trial count and control data-snooping/multiple-testing risk.
+- [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
+- [ ] Store full candidate lineage, dataset/code/config hashes and rejection
+      reasons in the registry.
+- [ ] Compare candidates with simple baselines and champion; allow no candidate
+      to win and allow NO TRADE.
+- [ ] Tests: no look-ahead, deterministic replay, DSL safety, overfit rejection,
+      candidate lineage, no-trade selection and cost sensitivity.
+
+## Phase 17 — Knowledge ingestion and hypothesis research
+
+- [ ] Local import for PDF, TXT, Markdown, HTML and DOCX where supported;
+      CSV/JSON/Parquet remain market-data paths.
+- [ ] Preserve originals, checksums, source metadata, parser versions and
+      page/section references.
+- [ ] Extract text/tables and report OCR/scanned-document limitations.
+- [ ] Build a local searchable document index with source citations.
+- [ ] Classify claims, concepts, examples, opinions and empirical observations.
+- [ ] Convert document ideas into structured, falsifiable research hypotheses.
+- [ ] Link each hypothesis to source passages and experiment outcomes.
+- [ ] Route hypotheses to strategy discovery; never treat prose as proven alpha.
+- [ ] Ingest completed backtests, paper logs and broker exports as feedback.
+- [ ] Tests: parser errors, provenance, source traceability, duplicate imports,
+      hypothesis schema and no direct document-to-order path.
+- [ ] Explicit capability note: no mandatory LLM; document extraction is not
+      equivalent to training a language model or human-level book comprehension.
+
+## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation
+
+- [ ] Detect new datasets/documents and completed paper sessions.
+- [ ] Route imports to validation, indexing, dataset and hypothesis pipelines.
+- [ ] Plan and queue eligible research, training, evaluation and drift jobs.
+- [ ] Persist jobs; support pause/resume/cancel/retry/crash recovery.
+- [ ] Enforce M2 RAM/CPU/disk budgets and one heavy job at a time.
+- [ ] Keep paper execution isolated from training failures.
+- [ ] Connect strategy discovery, ML/DL/RL, model registry, champion gate and
+      paper-trading feedback into one auditable lifecycle.
+- [ ] Log why every automated job was started, skipped, promoted or rejected.
+- [ ] Provide owner controls: pause, safe mode, disable research and rollback.
+- [ ] Tests: new-data trigger, job recovery, resource refusal, paper isolation,
+      promotion/rejection/rollback and full closed-loop integration.
+
+## Phase 19 — Autonomous paper-trading acceptance
+
+- [ ] Run the system without owner-authored entry/exit rules.
+- [ ] Demonstrate autonomous BUY/SELL/HOLD/CLOSE/REDUCE/NO TRADE decisions.
+- [ ] Complete historical, walk-forward, untouched OOS and cost-stress gates.
+- [ ] Complete a sustained paper-trading trial with immutable trade attribution.
+- [ ] Demonstrate learning from matured outcomes without data leakage.
+- [ ] Demonstrate champion protection and automatic rollback.
+- [ ] Keep real-money execution disabled; optional MT5 demo remains explicitly
+      configured and disabled by default.
+- [ ] Final report distinguishes implemented, tested, trained, validated,
+      paper-traded and profitable; no profitability guarantee.
+
+## New project-wide acceptance rule
+
+- [ ] The system can import new data and research material, independently
+      generate strategy candidates, test them, reject overfit candidates,
+      choose NO TRADE, paper trade without a human-selected strategy, analyse
+      outcomes, and run another validated learning cycle.
+- [ ] No named strategy, indicator recipe or trading methodology supplied by
+      the owner is required for the core system to function.
+- [ ] All autonomy remains bounded by immutable risk controls and resource
+      limits.
