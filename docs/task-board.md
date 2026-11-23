@@ -82,7 +82,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Brier, log loss, balanced accuracy, per-class metrics, confusion, baseline.
 - [x] Flat-zero rows dropped by default with an audited count; `--include-flat` opt-in.
 - [ ] Return/volatility/regime/trade-outcome tasks.
-- [ ] Purged time-series CV with embargo.
+- [x] Purged time-series CV with embargo.
 - [x] Reliability curve, ECE and guarded MCE.
 - [ ] Calibration thresholds / probability rejection gate.
 - [ ] Feature importance and ablation.
