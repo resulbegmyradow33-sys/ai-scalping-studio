@@ -87,7 +87,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Calibration thresholds / probability rejection gate.
 - [ ] Feature importance and ablation.
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
-- [ ] Regime breakdown of the trading evaluation.
+- [x] Regime breakdown of the trading evaluation (as-of join, partition identity tested).
 - [ ] Model registry metadata in SQLite (Phase 10).
 - [x] `docs/classical-ml.md`.
 
@@ -123,7 +123,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Behavior-cloning warm start.
 - [x] VecNormalize, random starts, checkpoints, pause/resume.
 - [x] Rule, hold and random baselines.
-- [ ] Action masking for flow/risk block.
+- [ ] PARTIAL: flow-gate mask + `masked_action` landed (#76); risk/account gates are
+      not in the mask and nothing wires the mask into training or eval yet.
 - [ ] REDUCE position action.
 - [ ] SAC evaluation.
 - [ ] TD3 evaluation.
@@ -165,13 +166,13 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 11 — Risk and backtesting
 
-- [ ] Max weekly loss.
-- [ ] Max drawdown kill switch.
-- [ ] Consecutive-loss pause.
-- [ ] Max spread and slippage limits.
+- [x] Max weekly loss (Monday 17:00 UTC anchor; default off).
+- [x] Max drawdown kill switch (peak-to-equity; force-closes; default off).
+- [x] Consecutive-loss pause (blocks new entries, never CLOSE; default off).
+- [ ] PARTIAL: max spread points landed; no slippage cap and no rejected-order model.
 - [ ] Data-quality trade block.
-- [ ] Emergency kill switch.
-- [ ] Risk limits cannot be bypassed by a model.
+- [x] Emergency kill switch (equity below a fraction of initial balance; default off).
+- [x] Risk limits cannot be bypassed by a model (frozen at construction, no override).
 - [ ] Purged CV with embargo integrated in evaluation.
 - [ ] Monte Carlo trade-sequence analysis.
 - [ ] Parameter sensitivity.
@@ -185,10 +186,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 ## Phase 12 — Paper trading
 
 - [ ] Broker adapter interface.
-- [ ] Persistent paper ledger (SQLite).
-- [ ] Track signals, orders, fills, spread, slippage, commission, P&L,
+- [x] Persistent paper ledger (SQLite; sessions, signals, orders, fills, trades, equity).
+- [x] Track signals, orders, fills, spread, slippage, commission, P&L,
       model/strategy versions and rejection reasons.
-- [ ] Restart-safe paper session runner.
+- [x] Restart-safe paper session runner (replay + state verification, no inferred state).
 - [ ] MT5 demo adapter skeleton, disabled, no credentials.
 - [ ] API: account, positions, orders, history.
 - [ ] `docs/paper-trading.md`.
