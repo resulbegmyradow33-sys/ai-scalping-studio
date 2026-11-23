@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import polars as pl
 from anyio import ClosedResourceError
@@ -49,6 +49,7 @@ from scalping.api.schemas import (
     TimeframeSpec,
     TrainRequest,
     TrainResponse,
+    is_symbol_id,
 )
 from scalping.api.train_runner import (
     RunControlError,
@@ -122,8 +123,20 @@ def timeframe_registry() -> list[TimeframeSpec]:
     return [TimeframeSpec(timeframe=name, rule=rule) for name, rule in TIMEFRAMES.items()]
 
 
+#: Symbol and timeframe values end up as filesystem path segments, so they are
+#: validated at the HTTP boundary before any store or provenance path is built.
+#: The same rule is :data:`scalping.api.schemas.SymbolId` for request bodies.
+def _checked_ids(symbol: str, timeframe: str) -> None:
+    """Reject ids that could leave the data root; 422, never a silent rewrite."""
+    if not is_symbol_id(symbol):
+        raise HTTPException(status_code=422, detail=f"invalid symbol {symbol!r}")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=422, detail=f"unknown timeframe {timeframe!r}")
+
+
 @router.get("/api/data/status", response_model=DataStatusResponse)
 def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> DataStatusResponse:
+    _checked_ids(symbol, timeframe)
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     provenance = load_provenance(store.root, symbol, timeframe)
@@ -155,6 +168,7 @@ def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> Da
 @router.get("/api/data/validate")
 def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> dict[str, Any]:
     """Structural validation report; explicit because it reads the full slice."""
+    _checked_ids(symbol, timeframe)
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
@@ -174,6 +188,7 @@ def market_regime(
     label, matching ``/api/data/status``. These labels describe the past path
     and are not a price forecast.
     """
+    _checked_ids(symbol, timeframe)
     frame = request.app.state.store.read(symbol, timeframe)
     labels = classify(frame)
     if labels.is_empty():
@@ -226,14 +241,48 @@ def market_regime(
     )
 
 
+#: HTTP CSV imports live here, directly under the data root. The request names
+#: a file in this directory; it never names a path.
+_IMPORTS_DIRNAME: Final[str] = "imports"
+
+
+def _import_file(name: str, data_root: Path) -> Path:
+    """Return the file called ``name`` from ``<data_root>/imports``.
+
+    The request value is only compared against directory entries; it is never
+    joined to a base or handed to a filesystem API. The returned path is the
+    entry produced by :meth:`Path.iterdir`, so the path expression that reaches
+    ``open`` is not derived from request data (CodeQL ``py/path-injection``).
+    Separators and absolute paths are already rejected by ``ImportFileName``; a
+    name that is absent, is not a regular file, or is a symlink is a 422 here,
+    so a link pointing outside the directory cannot be read through.
+    """
+    imports_dir = Path(data_root) / _IMPORTS_DIRNAME
+    imports_dir.mkdir(parents=True, exist_ok=True)
+    for entry in imports_dir.iterdir():
+        if entry.name == name and entry.is_file() and not entry.is_symlink():
+            return entry
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            f"no csv file named {name!r} in {imports_dir}; "
+            f"place the export there and pass its bare file name"
+        ),
+    )
+
 
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:
     if body.provider == "synthetic":
         return SyntheticProvider(seed=_DEFAULT_SEED if body.seed is None else body.seed)
     if body.provider == "csv":
         if body.path is None:  # pragma: no cover - the schema validator rejects this
-            raise HTTPException(status_code=422, detail="path is required when provider is 'csv'")
-        return CsvProvider(Path(body.path), tz_offset_hours=body.tz_offset)
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "path (a file name in <data_root>/imports) is required when provider is 'csv'"
+                ),
+            )
+        return CsvProvider(_import_file(body.path, data_root), tz_offset_hours=body.tz_offset)
     return DukascopyProvider(cache_dir=data_root / "dukascopy", symbol=body.symbol)
 
 
@@ -365,7 +414,9 @@ async def backtest(body: BacktestRequest, request: Request) -> BacktestResponse:
 async def evaluate(body: EvaluateRequest, request: Request) -> EvaluateResponse:
     """Walk-forward and cost-stress a finished run on out-of-sample bars."""
     try:
-        result = await asyncio.to_thread(_trains(request).evaluate, body.run_id, body.symbol, body.folds)
+        result = await asyncio.to_thread(
+            _trains(request).evaluate, body.run_id, body.symbol, body.folds
+        )
     except UnknownRunError as exc:
         raise HTTPException(status_code=404, detail=f"unknown run: {body.run_id}") from exc
     except TrainError as exc:

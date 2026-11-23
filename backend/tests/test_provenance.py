@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import polars as pl
+import pytest
 
 from scalping.data.provenance import (
     build_provenance,
@@ -52,3 +53,12 @@ def test_round_trip_preserves_metadata(tmp_path) -> None:
     assert loaded.synthetic is True
     assert loaded.rows == 3
     assert loaded.dataset_id.startswith("XAUUSD:M1:")
+
+
+def test_provenance_path_refuses_to_leave_the_root(tmp_path) -> None:
+    with pytest.raises(ValueError, match="single path segment"):
+        load_provenance(tmp_path, "../outside", "M1")
+    with pytest.raises(ValueError, match="single path segment"):
+        load_provenance(tmp_path, "XAUUSD", "../../outside")
+    with pytest.raises(ValueError, match="single path segment"):
+        load_provenance(tmp_path, "/etc/passwd", "M1")

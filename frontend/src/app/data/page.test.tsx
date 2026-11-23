@@ -199,33 +199,65 @@ describe("DataPage", () => {
     expect(screen.queryByTestId("download-rows")).not.toBeInTheDocument();
   });
 
-  it("requires an absolute csv path and sends it in the body", async () => {
+  it("requires a bare csv file name and sends it in the body", async () => {
     const download = vi.spyOn(api, "downloadData").mockResolvedValue({ rows: 5 });
     render(<DataPage />);
 
     fireEvent.change(screen.getByLabelText("Sağlayıcı"), { target: { value: "csv" } });
 
-    expect(screen.getByLabelText("CSV dosyası")).toBeInTheDocument();
+    const field = screen.getByLabelText("CSV dosya adı");
+    expect(field).toBeInTheDocument();
+    expect(screen.getByText(/imports\//)).toBeInTheDocument();
     expect(screen.queryByLabelText("Seed")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
 
-    fireEvent.change(screen.getByLabelText("CSV dosyası"), {
-      target: { value: "relative/xauusd.csv" },
-    });
-    expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
-    expect(screen.getByTestId("path-error")).toHaveTextContent(/mutlak/i);
-
-    fireEvent.change(screen.getByLabelText("CSV dosyası"), {
-      target: { value: "/tmp/xauusd.csv" },
-    });
+    // A path is rejected; the message waits for blur, not the keystroke.
+    fireEvent.change(field, { target: { value: "relative/xauusd.csv" } });
     expect(screen.queryByTestId("path-error")).not.toBeInTheDocument();
+    fireEvent.blur(field);
+    expect(screen.getByTestId("path-error")).toHaveTextContent(/dosya adı/i);
+    expect(field).toHaveAttribute("aria-invalid", "true");
+    expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
+
+    fireEvent.change(field, { target: { value: "/tmp/xauusd.csv" } });
+    fireEvent.blur(field);
+    expect(screen.getByTestId("path-error")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "İndir" })).toBeDisabled();
+
+    fireEvent.change(field, { target: { value: "xauusd_h1.csv" } });
+    expect(screen.queryByTestId("path-error")).not.toBeInTheDocument();
+    expect(field).toHaveAttribute("aria-invalid", "false");
     expect(screen.getByRole("button", { name: "İndir" })).toBeEnabled();
 
     fireEvent.click(screen.getByRole("button", { name: "İndir" }));
     await waitFor(() => expect(download).toHaveBeenCalledTimes(1));
     expect(download.mock.calls[0][0]).toEqual(
-      expect.objectContaining({ provider: "csv", path: "/tmp/xauusd.csv", seed: null }),
+      expect.objectContaining({ provider: "csv", path: "xauusd_h1.csv", seed: null }),
     );
+  });
+
+  it("surfaces the backend 422 for an unknown csv file name", async () => {
+    vi.spyOn(api, "downloadData").mockRejectedValue(
+      new ApiError(
+        422,
+        "no csv file named 'absent.csv' in /srv/data/imports; place the export there and pass its bare file name",
+      ),
+    );
+    render(<DataPage />);
+
+    fireEvent.change(screen.getByLabelText("Sağlayıcı"), { target: { value: "csv" } });
+    fireEvent.change(screen.getByLabelText("CSV dosya adı"), {
+      target: { value: "absent.csv" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "İndir" }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("download-error")).toHaveTextContent(
+        "no csv file named 'absent.csv'",
+      ),
+    );
+    expect(screen.getByTestId("download-error")).toHaveTextContent("/srv/data/imports");
+    expect(mutate).not.toHaveBeenCalled();
   });
 
   it("shows provenance fields verbatim for a synthetic dataset", () => {
