@@ -101,7 +101,9 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Vanilla RNN, LSTM, GRU.
 - [x] 1D CNN, dilated CNN, CNN-LSTM.
 - [x] Causal TCN with configurable receptive field.
-- [ ] PARTIAL: shared evaluator + rule baseline done; classical ML comparison and simulator/cost gate still open.
+- [x] Shared evaluator against classical ML and the rule.
+- [ ] PARTIAL: simulator/cost-stress gate for network predictions (the
+      evaluator is prediction-only; `ml evaluate` has the trading path).
 - [x] Checkpoint round-trip and causality tests.
 - [x] `docs/neural-network-research.md`.
 
