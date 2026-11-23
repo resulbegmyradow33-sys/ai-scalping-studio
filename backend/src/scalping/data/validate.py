@@ -115,6 +115,7 @@ def validate_bars(
     symbol: str = "",
     timeframe: str = "M1",
     gap_threshold_minutes: int = 10,
+    include_outliers: bool = True,
 ) -> ValidationReport:
     """Validate a bar frame without mutating it.
 
@@ -250,6 +251,13 @@ def validate_bars(
     gap = _gap_report(df, gap_threshold_minutes)
     if gap is not None:
         issues.append(gap)
+
+    if include_outliers:
+        # Imported here: the outlier module is retrospective QA and imports
+        # ``Issue`` from this module, so a top-level import would be circular.
+        from scalping.data.quality import detect_bar_outliers
+
+        issues.extend(detect_bar_outliers(df))
 
     ok = not any(issue.severity == "error" for issue in issues)
     return ValidationReport(

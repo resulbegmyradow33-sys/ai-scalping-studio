@@ -136,10 +136,39 @@ not stored as a tick table in the main store.
 - negative spread or volume.
 
 Warnings: time gaps above a threshold (weekends are legitimate, so gaps do not
-fail the report by itself).
+fail the report by itself) plus the statistical outliers below.
 
 `validate_ticks` checks sorted stamps, crossed bid/ask, non-finite/negative
 prices and volumes, and nulls.
+
+### Statistical outliers
+
+`scalping/data/quality.py` adds a retrospective warning layer to
+`validate_bars` (disable with `include_outliers=False`):
+
+- `price_outliers` — log returns beyond `8` robust sigma, where the scale is
+  `1.4826 * MAD` (std fallback for a zero MAD);
+- `volume_outliers` — `log1p(volume)` beyond `8` robust sigma.
+
+Both are warnings: a news spike is real data. The check uses the whole slice's
+median/MAD, so it is QA only — never a model feature (that would leak the
+slice's distribution).
+
+### Cross-source reconciliation
+
+`reconcile_bars(primary, secondary, config=...)` compares two frames for the
+same symbol/timeframe by timestamp:
+
+| Code | Severity | Meaning |
+|---|---|---|
+| `only_in_primary` | warning | timestamps the secondary source lacks |
+| `only_in_secondary` | warning | timestamps the primary source lacks |
+| `close_mismatch` | error | closers differ beyond `price_tolerance` |
+| `spread_mismatch` | error | spreads differ beyond `spread_tolerance` |
+| `duplicate_timestamps` | error | a source repeats a timestamp |
+
+`ok` is true when no error-severity issue exists. Nothing is merged or
+repaired; the caller decides which source to trust.
 
 API:
 
