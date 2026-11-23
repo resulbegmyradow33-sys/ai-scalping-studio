@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from scalping.api.app import create_app
@@ -64,3 +66,27 @@ def test_ids_are_validated_before_touching_the_filesystem(tmp_path) -> None:
             assert bad_symbol.status_code == 422, path
             bad_timeframe = client.get(path, params={"symbol": "XAUUSD", "timeframe": "../x"})
             assert bad_timeframe.status_code == 422, path
+
+
+def test_csv_import_is_confined_to_the_data_root(tmp_path) -> None:
+    fixture = Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv"
+    imported = tmp_path / "xauusd.csv"
+    imported.write_bytes(fixture.read_bytes())
+
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        accepted = client.post(
+            "/api/data/download",
+            json={**BODY, "provider": "csv", "path": str(imported), "tz_offset": 3},
+        )
+        escaped = client.post(
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "/etc/passwd"}
+        )
+        traversal = client.post(
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "../outside.csv"}
+        )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["rows"] > 0
+    assert escaped.status_code == 422
+    assert traversal.status_code == 422
+    assert "data root" in escaped.json()["detail"]

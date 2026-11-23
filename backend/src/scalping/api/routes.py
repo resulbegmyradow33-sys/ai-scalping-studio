@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from dataclasses import asdict
 from pathlib import Path
@@ -243,13 +244,32 @@ def market_regime(
     )
 
 
+def _import_path(raw: str, data_root: Path) -> Path:
+    """Resolve an HTTP-supplied CSV path against the data root and confine it.
+
+    The CLI keeps the unrestricted form: there the operator names their own
+    file. The HTTP surface only reads exports that live under the data root,
+    normalised and prefix-checked, so a request cannot turn into a read of an
+    arbitrary file.
+    """
+    base = os.path.normpath(str(data_root))
+    candidate = raw if os.path.isabs(raw) else os.path.join(base, raw)
+    target = os.path.normpath(candidate)
+    if target != base and not target.startswith(base + os.sep):
+        raise HTTPException(
+            status_code=422,
+            detail=f"csv path must stay under the data root {base}",
+        )
+    return Path(target)
+
+
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:
     if body.provider == "synthetic":
         return SyntheticProvider(seed=_DEFAULT_SEED if body.seed is None else body.seed)
     if body.provider == "csv":
         if body.path is None:  # pragma: no cover - the schema validator rejects this
             raise HTTPException(status_code=422, detail="path is required when provider is 'csv'")
-        return CsvProvider(Path(body.path), tz_offset_hours=body.tz_offset)
+        return CsvProvider(_import_path(body.path, data_root), tz_offset_hours=body.tz_offset)
     return DukascopyProvider(cache_dir=data_root / "dukascopy", symbol=body.symbol)
 
 

@@ -162,8 +162,9 @@ def test_download_rejects_unknown_provider(client):
     assert client.post("/api/data/download", json=body).status_code == 422
 
 
-def test_csv_download_uses_the_given_offset(client):
-    path = Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv"
+def test_csv_download_uses_the_given_offset(client, tmp_path):
+    path = tmp_path / "xauusd.csv"
+    path.write_bytes((Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv").read_bytes())
     body = {
         "provider": "csv",
         "symbol": "XAUUSD",
@@ -432,13 +433,17 @@ def test_cors_has_no_wildcard_for_other_origins():
 
 def test_sim_start_accepts_a_store_written_from_a_no_spread_csv(tmp_path, nospread_csv):
     """CSV is the realistic path (spec 5.1): a 6-column export must start."""
-    app = create_app(data_root=tmp_path / "data")
+    root = tmp_path / "data"
+    root.mkdir(parents=True, exist_ok=True)
+    imported = root / "nospread.csv"
+    imported.write_bytes(Path(nospread_csv).read_bytes())
+    app = create_app(data_root=root)
     body = {
         "provider": "csv",
         "symbol": "XAUUSD",
         "start": "2026-01-05T00:00:00Z",
         "end": "2026-01-06T00:00:00Z",
-        "path": str(nospread_csv),
+        "path": str(imported),
         "tz_offset": 0,
     }
     with TestClient(app) as client:
