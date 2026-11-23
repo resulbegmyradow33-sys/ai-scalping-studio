@@ -18,6 +18,7 @@ therefore replays that rule; PPO stays in the research lab.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
 - [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
+- [`docs/language-decision.md`](docs/language-decision.md) — why Python/TypeScript stay; when Rust would be justified.
 
 ## Team
 
