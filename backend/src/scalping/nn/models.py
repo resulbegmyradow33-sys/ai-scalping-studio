@@ -14,6 +14,7 @@ prediction time, so this is not look-ahead.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final, Literal
 
 import torch
@@ -54,46 +55,37 @@ MODEL_NAMES: Final[tuple[ModelName, ...]] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
 class ModelSpec:
-    """Shared constructor arguments; kept as a dataclass for readable tests."""
+    """Shared constructor arguments; validated once so every model trusts them."""
 
-    def __init__(
-        self,
-        *,
-        n_features: int,
-        window: int = 60,
-        n_classes: int = 3,
-        hidden: int = 64,
-        dropout: float = 0.1,
-        seed: int = 0,
-    ) -> None:
-        if n_features < 1:
+    n_features: int
+    window: int = 60
+    n_classes: int = 3
+    hidden: int = 64
+    dropout: float = 0.1
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.n_features < 1:
             raise ValueError("n_features must be >= 1")
-        if window < 1:
+        if self.window < 1:
             raise ValueError("window must be >= 1")
-        if n_classes < 2:
+        if self.n_classes < 2:
             raise ValueError("n_classes must be >= 2")
-        if hidden < 1:
+        if self.hidden < 1:
             raise ValueError("hidden must be >= 1")
-        if not 0.0 <= dropout < 1.0:
+        if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
-        if seed < 0:
+        if self.seed < 0:
             raise ValueError("seed must be >= 0")
-        self.n_features = n_features
-        self.window = window
-        self.n_classes = n_classes
-        self.hidden = hidden
-        self.dropout = dropout
-        self.seed = seed
 
 
 def _check_input(x: Tensor, n_features: int) -> None:
     if x.ndim != 3:
         raise ValueError(f"expected (batch, window, features), got shape {tuple(x.shape)}")
     if x.shape[2] != n_features:
-        raise ValueError(
-            f"expected {n_features} features, got {x.shape[2]}"
-        )
+        raise ValueError(f"expected {n_features} features, got {x.shape[2]}")
 
 
 class _MLP(nn.Module):
@@ -278,10 +270,7 @@ class CausalTCN(nn.Module):
         self.receptive_field = 1 + 2 * (kernel - 1) * sum(self.dilations)
         self.input = _CausalConv1d(spec.n_features, spec.hidden, 1, 1)
         self.blocks = nn.Sequential(
-            *[
-                _TCNBlock(spec.hidden, kernel, dilation, spec.dropout)
-                for dilation in self.dilations
-            ]
+            *[_TCNBlock(spec.hidden, kernel, dilation, spec.dropout) for dilation in self.dilations]
         )
         self.head = nn.Linear(spec.hidden, spec.n_classes)
 
@@ -333,7 +322,9 @@ def build_model(
         return _CNN(spec, dilations=(1, 2, 4))
     if name == "cnn_lstm":
         return _CNN_LSTM(spec)
-    return CausalTCN(spec)
+    if name == "tcn":
+        return CausalTCN(spec)
+    raise AssertionError(f"unhandled model {name!r}")
 
 
 def model_names() -> tuple[str, ...]:
