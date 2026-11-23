@@ -38,6 +38,8 @@ ModelName = Literal[
     "dilated_cnn",
     "cnn_lstm",
     "tcn",
+    "transformer",
+    "causal_transformer",
 ]
 
 MODEL_NAMES: Final[tuple[ModelName, ...]] = (
@@ -51,6 +53,8 @@ MODEL_NAMES: Final[tuple[ModelName, ...]] = (
     "dilated_cnn",
     "cnn_lstm",
     "tcn",
+    "transformer",
+    "causal_transformer",
 )
 
 
@@ -333,7 +337,18 @@ def build_model(
         return _CNN(spec, dilations=(1, 2, 4))
     if name == "cnn_lstm":
         return _CNN_LSTM(spec)
-    return CausalTCN(spec)
+    if name == "tcn":
+        return CausalTCN(spec)
+    from scalping.nn.transformers import build_transformer
+
+    return build_transformer(
+        n_features=spec.n_features,
+        window=spec.window,
+        n_classes=spec.n_classes,
+        hidden=spec.hidden,
+        dropout=spec.dropout,
+        causal=name == "causal_transformer",
+    )
 
 
 def model_names() -> tuple[str, ...]:
