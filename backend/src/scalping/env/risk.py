@@ -1,8 +1,11 @@
-"""Risk engine: dual-limit sizing, session gates and ATR stop placement.
+"""Risk engine: dual-limit sizing, session gates, kill switches and ATR stops.
 
 The engine owns the FX-day session anchor and the hard risk limits. Every limit
 is frozen at construction: ``size``/``allow_new`` take prices and an account
 snapshot, never a risk override, so a caller cannot loosen a limit per trade.
+There is no per-trade or per-policy override argument anywhere in this module:
+a model can choose an action, not the limits applied to it. This is the
+Phase 11 "risk blocks cannot be bypassed by a policy" rule.
 
 Session anchor
 --------------
@@ -13,10 +16,40 @@ to the previous one. It is the single boundary the Simulator uses to roll
 17:00 UTC as a fixed approximation and ignores US daylight saving, which shifts
 the true roll by one hour for part of the year.
 
+``week_anchor`` reuses that session boundary and labels each session with its
+ISO year/week. The FX week therefore rolls at the first 17:00 UTC session
+anchor whose ISO week differs from the previous one; with the fixed 17:00 UTC
+approximation that is Monday 17:00 UTC.
+
+Kill switches
+-------------
+All Phase 11 limits are disabled at their default ``0`` and the engine never
+invents a missing anchor. Semantics, all condition-driven unless ``pause_bars``
+latches them:
+
+* ``weekly_loss_pct`` — loss from ``week_start_equity`` at or beyond the
+  fraction. Blocks entries and force-closes; clears when the week anchor rolls.
+* ``max_drawdown_pct`` — ``(peak_equity - equity) / peak_equity`` at or beyond
+  the fraction. Blocks entries and force-closes; clears when equity recovers.
+* ``min_equity_frac`` — emergency stop when equity is strictly below
+  ``min_equity_frac * ContractSpec.initial_balance``. Blocks entries and
+  force-closes; clears when equity recovers.
+* ``consecutive_loss_pause`` — blocks entries once
+  ``consecutive_losses >= consecutive_loss_pause``. The Simulator resets the
+  count when the pause expires, or at the next session roll when
+  ``pause_bars == 0``.
+* ``max_spread_points`` — blocks entries when ``spread_points`` strictly
+  exceeds the cap. Per-bar only; never latched.
+* ``pause_bars`` — when positive, a tripped weekly/drawdown/emergency or
+  consecutive-loss switch stays latched for that many decision bars after the
+  trip bar (entries resume on the bar whose timestamp equals ``paused_until``).
+  ``0`` leaves the switch condition-driven only.
+
 The engine decides from the passed :class:`AccountState`, not from broker
 internals. That snapshot is expected to be anchored to the session containing
-``ts`` (``day_start_equity`` is the equity at the anchor), so the daily loss
-gate is a pure function of the snapshot.
+``ts`` (``day_start_equity``/``week_start_equity`` are the equity at their
+anchors, ``peak_equity`` the episode peak), so every gate is a pure function of
+the snapshot.
 """
 
 from __future__ import annotations
@@ -55,6 +88,20 @@ def _check_fraction(name: str, value: float) -> None:
         raise ValueError(f"{name} must be in (0, 1], got {value!r}")
 
 
+def _check_optional_fraction(name: str, value: float) -> None:
+    """Validate a switch fraction: ``0`` disables it, otherwise ``(0, 1]``."""
+    _check_finite(name, value)
+    if not 0 <= value <= 1:
+        raise ValueError(f"{name} must be 0 or in (0, 1], got {value!r}")
+
+
+def _check_optional_non_negative(name: str, value: float) -> None:
+    """Validate a switch threshold where ``0`` disables it."""
+    _check_finite(name, value)
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class SizingResult:
     """Outcome of one sizing decision.
@@ -79,9 +126,17 @@ class RiskEngine:
         if risk.max_positions < 1:
             raise ValueError(f"risk.max_positions must be >= 1, got {risk.max_positions!r}")
         if risk.max_bars_in_trade < 1:
+            raise ValueError(f"risk.max_bars_in_trade must be >= 1, got {risk.max_bars_in_trade!r}")
+        _check_optional_fraction("risk.weekly_loss_pct", risk.weekly_loss_pct)
+        _check_optional_fraction("risk.max_drawdown_pct", risk.max_drawdown_pct)
+        _check_optional_fraction("risk.min_equity_frac", risk.min_equity_frac)
+        _check_optional_non_negative("risk.max_spread_points", risk.max_spread_points)
+        if risk.consecutive_loss_pause < 0:
             raise ValueError(
-                f"risk.max_bars_in_trade must be >= 1, got {risk.max_bars_in_trade!r}"
+                f"risk.consecutive_loss_pause must be >= 0, got {risk.consecutive_loss_pause!r}"
             )
+        if risk.pause_bars < 0:
+            raise ValueError(f"risk.pause_bars must be >= 0, got {risk.pause_bars!r}")
         _check_positive("contract.size", contract.size)
         _check_positive("contract.min_lot", contract.min_lot)
         _check_positive("contract.lot_step", contract.lot_step)
@@ -148,12 +203,27 @@ class RiskEngine:
     def allow_new(self, account: AccountState, ts: datetime) -> tuple[bool, str | None]:
         """Decide whether a new position may open at ``ts``.
 
+        Backward-compatible entry point: it delegates to
+        :meth:`allow_new_extended`. With every Phase 11 limit at its default
+        ``0`` the decisions are identical to the pre-Phase-11 engine, because
+        each new check is gated on its own configured limit.
+
         Checks run in this order: a non-positive ``day_start_equity``
         (``"lot_too_small"``: nothing can be measured or sized), the daily loss
         limit at or beyond ``daily_loss_pct`` (``"daily_loss_limit"``; zero or
         negative equity on a real base is a total loss, not a sizing failure),
-        then the position count (``"max_positions"``). The account snapshot is
-        never mutated.
+        then the position count (``"max_positions"``), then the Phase 11
+        switches. The account snapshot is never mutated.
+        """
+        return self.allow_new_extended(account, ts)
+
+    def allow_new_extended(self, account: AccountState, ts: datetime) -> tuple[bool, str | None]:
+        """Full entry gate, including every Phase 11 kill switch.
+
+        Order after the legacy checks: weekly loss, max drawdown, emergency
+        equity floor, consecutive losses, max spread, then a latched
+        ``paused_until``. A missing anchor (``None``) or a disabled limit
+        (``0``) skips that check; the engine never invents an anchor.
         """
         # The snapshot is expected to be anchored to the session ``ts`` names.
         # Computing the anchor validates ts (aware, normalised to UTC) and makes
@@ -172,7 +242,67 @@ class RiskEngine:
         open_positions = 1 if account.position is not None else 0
         if open_positions >= self._risk.max_positions:
             return False, "max_positions"
+
+        kill = self.kill_switch_reason(account)
+        if kill is not None:
+            return False, kill
+        if self._consecutive_losses_tripped(account):
+            return False, "consecutive_loss_pause"
+        if self._spread_tripped(account):
+            return False, "max_spread"
+        if self._paused(account, ts):
+            return False, "kill_switch_pause"
         return True, None
+
+    def kill_switch_reason(self, account: AccountState) -> str | None:
+        """The equity kill switch that is currently engaged, or ``None``.
+
+        Covers the three switches that force-close an open position:
+        ``"weekly_loss_limit"``, ``"max_drawdown"`` and ``"emergency_stop"``.
+        Each is skipped when its limit is ``0`` or when the anchor it needs is
+        missing or non-positive.
+        """
+        _check_finite("account.equity", account.equity)
+        risk = self._risk
+        if risk.weekly_loss_pct > 0 and account.week_start_equity is not None:
+            anchor = account.week_start_equity
+            _check_finite("account.week_start_equity", anchor)
+            if anchor > 0 and (anchor - account.equity) / anchor >= risk.weekly_loss_pct:
+                return "weekly_loss_limit"
+        if risk.max_drawdown_pct > 0 and account.peak_equity is not None:
+            peak = account.peak_equity
+            _check_finite("account.peak_equity", peak)
+            if peak > 0 and (peak - account.equity) / peak >= risk.max_drawdown_pct:
+                return "max_drawdown"
+        if risk.min_equity_frac > 0:
+            floor = risk.min_equity_frac * self._contract.initial_balance
+            if account.equity < floor:
+                return "emergency_stop"
+        return None
+
+    def _consecutive_losses_tripped(self, account: AccountState) -> bool:
+        limit = self._risk.consecutive_loss_pause
+        return limit > 0 and account.consecutive_losses >= limit
+
+    def _spread_tripped(self, account: AccountState) -> bool:
+        limit = self._risk.max_spread_points
+        if limit <= 0 or account.spread_points is None:
+            return False
+        _check_finite("account.spread_points", account.spread_points)
+        return account.spread_points > limit
+
+    def _paused(self, account: AccountState, ts: datetime) -> bool:
+        """True while a ``pause_bars`` latch is still engaged.
+
+        ``paused_until`` is honoured only when ``pause_bars > 0``; with the
+        default the field is inert, matching the pre-Phase-11 engine.
+        """
+        if self._risk.pause_bars <= 0 or account.paused_until is None:
+            return False
+        paused_until = account.paused_until
+        if paused_until.tzinfo is None or paused_until.utcoffset() is None:
+            raise ValueError(f"account.paused_until must be timezone-aware, got {paused_until!r}")
+        return ts < paused_until
 
     # --- exits -------------------------------------------------------------
 
@@ -214,3 +344,14 @@ class RiskEngine:
         if utc.hour >= 17:
             return utc.date()
         return utc.date() - timedelta(days=1)
+
+    def week_anchor(self, ts: datetime) -> tuple[int, int]:
+        """Return the ``(iso_year, iso_week)`` of the session containing ``ts``.
+
+        Built on :meth:`session_anchor`, so the week rolls on the same 17:00 UTC
+        boundary as the day: the first session anchor whose ISO week differs
+        starts a new week. With the fixed approximation that is Monday 17:00
+        UTC. A naive datetime is rejected by ``session_anchor``.
+        """
+        iso = self.session_anchor(ts).isocalendar()
+        return iso.year, iso.week
