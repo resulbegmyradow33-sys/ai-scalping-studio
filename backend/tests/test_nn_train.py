@@ -159,7 +159,7 @@ def test_bad_config_is_rejected() -> None:
     with pytest.raises(TrainError, match="epochs"):
         config(epochs=0)
     with pytest.raises(TrainError, match="unknown model"):
-        config(model="transformer")
+        config(model="spectral")
     with pytest.raises(TrainError, match="device"):
         config(device="tpu")
     with pytest.raises(TrainError, match="max_minutes"):
