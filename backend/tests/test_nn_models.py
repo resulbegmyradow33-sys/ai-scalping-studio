@@ -66,7 +66,7 @@ def test_different_seeds_change_the_weights() -> None:
 
 def test_unknown_model_is_rejected() -> None:
     with pytest.raises(ValueError, match="unknown model"):
-        build_model("transformer", n_features=N_FEATURES)  # type: ignore[arg-type]
+        build_model("spectral", n_features=N_FEATURES)  # type: ignore[arg-type]
 
 
 def test_input_contract_is_enforced() -> None:
