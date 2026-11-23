@@ -178,6 +178,10 @@ Rule-based labels are cheap enough to compute per request. Statistical models
 are research tools and are not fitted inside a request; a fitted model belongs
 in the run registry (Phase 10) before it can serve labels.
 
+The panel page `/intelligence` reads this endpoint: current axes, the
+full-slice distribution and a timeline of the last bars. It renders the API
+values verbatim and states that a regime is not a forecast.
+
 ## 9. Limits
 
 - Regime labels are descriptive, not predictive. Do not report "the regime

@@ -44,6 +44,47 @@ export interface Provenance {
   notes: string;
 }
 
+
+/** One supported bar size from `GET /api/timeframes`. */
+export interface TimeframeSpec {
+  timeframe: string;
+  rule: string;
+}
+
+export interface RegimePoint {
+  ts: string;
+  regime: string;
+  trend: string;
+  volatility: string;
+}
+
+export interface RegimeCount {
+  regime: string;
+  bars: number;
+  share: number;
+}
+
+export interface RegimeCurrent {
+  ts: string;
+  trend: string;
+  trend_strength: string;
+  volatility: string;
+  expansion: string;
+  breakout: string;
+  unusual: boolean;
+  regime: string;
+}
+
+/** Descriptive regime state; labels never predict the next bar. */
+export interface RegimeResponse {
+  symbol: string;
+  timeframe: string;
+  rows: number;
+  current: RegimeCurrent | null;
+  counts: RegimeCount[];
+  series: RegimePoint[];
+}
+
 export interface DownloadRequest {
   provider: ProviderName;
   symbol: string;

@@ -6,6 +6,7 @@ import type {
   DownloadResponse,
   Health,
   OkResponse,
+  RegimeResponse,
   RunControlAction,
   RunDetail,
   RunSummary,
@@ -14,6 +15,7 @@ import type {
   SimStartRequest,
   StartResponse,
   StrategyCard,
+  TimeframeSpec,
 } from "./types";
 
 export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -128,6 +130,15 @@ export const api = {
 
   getDataStatus(symbol: string): Promise<DataStatus> {
     return request<DataStatus>(`/api/data/status?symbol=${encodeURIComponent(symbol)}`);
+  },
+
+  getTimeframes(): Promise<TimeframeSpec[]> {
+    return request<TimeframeSpec[]>("/api/timeframes");
+  },
+
+  getRegime(symbol: string, timeframe: string, limit = 500): Promise<RegimeResponse> {
+    const params = new URLSearchParams({ symbol, timeframe, limit: String(limit) });
+    return request<RegimeResponse>(`/api/regime?${params.toString()}`);
   },
 
   downloadData(body: DownloadRequest): Promise<DownloadResponse> {
