@@ -200,13 +200,102 @@ can be one trade. Cost-stress runs stay headline-only so the table never mixes
 two cost assumptions. Use the breakdown to generate a hypothesis to test on a
 new window, not to select the run that looks best.
 
+## HTTP API
+
+The same training and evaluation is available over HTTP so a panel can run a
+real experiment and read its metrics without a shell. The endpoints live under
+`/api/ml` and are thin wrappers around `scalping.api.ml_runner.MLRunner`; no
+request field names a path.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/ml/train` | Validate, prepare and start a run; `202 {run_id}` |
+| `GET` | `/api/ml/runs` | `{run_id, status, created_at, model, symbol, timeframe, dataset_id}` rows, newest first |
+| `GET` | `/api/ml/runs/{run_id}` | Status, config, validation/test prediction metrics, calibration, split counts, columns, spec, dataset id |
+| `POST` | `/api/ml/runs/{run_id}/control` | `{"action": "cancel"}` for a live run; `200` or `409` |
+| `POST` | `/api/ml/evaluate` | Trade a finished run on one split, optional cost multipliers and regime table |
+
+```bash
+curl -s -X POST localhost:8000/api/ml/train -H 'content-type: application/json' -d '{
+  "symbol": "XAUUSD", "timeframe": "H1", "model": "logistic",
+  "horizon": 5, "groups": ["price", "momentum", "volatility"],
+  "purge_bars": 5, "embargo_bars": 5,
+  "split": "validation", "stress": [2, 3], "regime": true
+}'
+```
+
+`/train` performs validation, the store read, the feature build and the dataset
+geometry check **before** the `202`, so a bad field is `422`, an unusable store
+is `409`, and only a reserved run reaches `runs/ml/<run_id>/`. The response is
+an opaque alphanumeric token; it is never a path fragment and the routes reject
+anything that is not `^[A-Za-z0-9]{1,64}$`.
+
+`/evaluate` reads the symbol, timeframe and spec from the run's own artefact and
+refuses to trade when the stored data no longer reproduces the run's
+`dataset_id`. It returns the headline metrics, the hold baseline, one entry per
+stress multiplier (`x2`, `x3`, …) and, when `regime` is true, the descriptive
+`{rows, unmatched_trades}` table. There is no path field, so an evaluation
+cannot be pointed at another instrument or directory.
+
+### Run lifecycle and the one-job rule
+
+```
+preparing (request thread) -> running -> completed
+                                      -> failed
+                                      -> cancelling -> cancelled
+```
+
+One heavy ML job runs per process. `MLJobSlot` is shared by `/train` and
+`/evaluate`; a second start while a fit or a stress pass is alive is `409
+another ML job is running`. The slot is released in the worker's `finally`, so
+success, failure and cancellation all free it. A second `409` is not a queue:
+nothing is retried in the background.
+
+`cancel` sets a cooperative flag and moves the visible status to `cancelling`.
+The estimator fit and each simulator pass are single blocking calls that cannot
+be interrupted mid-call; the worker observes the flag before the fit, immediately
+after it, and between evaluation stages, and only then writes the terminal
+`cancelled`. A cancel that arrives during a long fit therefore leaves the run
+`cancelling` until the fit returns. That is the honest state, not a stuck job.
+
+Limits: the API refuses a stored slice above 400 000 bars or a selection above
+128 feature columns instead of materialising an unbounded float32 matrix. There
+are no dataset or feature caches in this slice; a run holds one feature frame
+while it works.
+
+### What the API does not decide
+
+The `validation`/`test` numbers are prediction metrics (accuracy, balanced
+accuracy, log loss, Brier, ECE/MCE against the train prior). The `evaluate`
+numbers are trading metrics after the simulator's costs. Neither is a promotion
+decision: the API reports what happened on the chosen split and never writes a
+strategy card, changes the registry champion or claims an edge. A good Brier
+score with negative expectancy is still a rejection, and a positive regime
+bucket can be one trade.
+
 ## Artifacts
+
+The CLI writes:
 
 ```
 runs/ml/ml-<model>-<dataset-suffix>/
 ├── model.joblib   # estimator + classes + selected columns
 └── metrics.json   # dataset id, spec, metrics, baseline, split counts
 ```
+
+An API run owns a directory named by its opaque token and additionally keeps
+the status and report sidecars:
+
+```
+runs/ml/<run_id>/
+├── meta.json      # status timeline, config, dataset id, error
+├── report.json    # validation/test metrics, calibration, evaluation
+├── model.joblib
+└── metrics.json
+```
+
+Both sidecars are written atomically; `meta.json` is written last on success so
+a reader that sees `completed` also sees the report.
 
 `load_model(path)` returns `(model, columns)`. A future SQLite registry
 (Phase 10) will index these directories, add champion/rollback and drift.
