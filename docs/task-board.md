@@ -88,7 +88,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Feature importance and ablation.
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
 - [x] Regime breakdown of the trading evaluation (as-of join, partition identity tested).
-- [ ] Model registry metadata in SQLite (Phase 10).
+- [x] Model registry metadata in SQLite (Phase 10).
 - [x] `docs/classical-ml.md`.
 
 ## Phase 6 — Neural network framework
@@ -137,24 +137,24 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 9 — Ensemble and confidence
 
-- [ ] Out-of-fold stacking.
-- [ ] Weighted averaging and voting.
+- [x] Out-of-fold stacking (reuses the purged CV fold geometry).
+- [x] Weighted averaging and voting (soft, weighted, hard with tie → NO_TRADE).
 - [ ] Regime-dependent model selection.
-- [ ] Probability calibration and temperature scaling.
-- [ ] Brier/log loss/calibration curves.
-- [ ] Ensemble disagreement score.
+- [ ] PARTIAL: Brier/log loss/ECE/MCE var; temperature scaling yok.
+- [x] Brier/log loss/calibration curves.
+- [x] Ensemble disagreement score (mean pairwise total variation).
 - [ ] Out-of-distribution/unknown regime detection.
-- [ ] Decision engine: BUY/SELL/HOLD/NO TRADE.
-- [ ] Decision log with models, probabilities, regime, reason.
-- [ ] Compare ensemble vs best member; keep the simpler winner.
+- [x] Decision engine: BUY/SELL/HOLD/NO TRADE (ordered gates, reason required).
+- [ ] PARTIAL: `Decision` kaydı model/probability/disagreement/regime/reason taşıyor; kalıcı log yok.
+- [ ] PARTIAL: karşılaştırma var; 'daha basit olanı tut' otomatik değil.
 - [ ] `docs/ensemble-decision.md`.
 
 ## Phase 10 — Autonomous learning and registry
 
-- [ ] SQLite schema: datasets, experiments, models, promotions, backtests,
-      paper runs, drift, jobs.
-- [ ] Dataset versioning and checksums.
-- [ ] Model versioning, champion pointer and rollback.
+- [ ] PARTIAL: datasets/models/promotions/jobs var; experiments, backtests,
+      paper runs ve drift tabloları yok.
+- [x] Dataset versioning and checksums (dataset_id + digest).
+- [x] Model versioning, champion pointer and rollback (scope'lu).
 - [ ] Candidate → champion gate (trades, OOS, cost stress, regime coverage).
 - [ ] Drift detection: features, predictions, calibration.
 - [ ] Configurable scheduler with pause/resume/cancel.
@@ -190,10 +190,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Track signals, orders, fills, spread, slippage, commission, P&L,
       model/strategy versions and rejection reasons.
 - [x] Restart-safe paper session runner (replay + state verification, no inferred state).
-- [ ] MT5 demo adapter skeleton, disabled, no credentials.
-- [ ] API: account, positions, orders, history.
-- [ ] `docs/paper-trading.md`.
-- [ ] Tests: ledger invariants, restart recovery, no real-money path.
+- [x] MT5 demo adapter skeleton, disabled, no credentials (every op raises).
+- [x] API: account, positions, orders, history (`/api/paper`).
+- [x] `docs/paper-trading.md`.
+- [x] Tests: ledger invariants, restart recovery, no real-money path.
 
 ## Phase 13 — Dashboard
 
