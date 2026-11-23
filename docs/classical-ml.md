@@ -149,9 +149,56 @@ net/PF/expectancy/drawdown/cost fields as every other strategy and a hold
 baseline, and repeats the run at the requested cost multipliers. The test split
 is available with `--split test`, but should be read once per candidate.
 
-Limitations of this first slice: no regime breakdown yet, no probability
-calibration gate, and the threshold policy is not trained end-to-end as a
-trading objective.
+Limitations of this first slice: no probability calibration gate and the
+threshold policy is not trained end-to-end as a trading objective.
+
+## Regime breakdown
+
+The trading evaluation can also answer *where* the trades happened. It joins
+the same closed trades the headline metrics were computed from to the regime
+label that was current at each trade's **entry** bar, then reports one row per
+regime:
+
+| Field | Meaning |
+|---|---|
+| `regime` | the label at entry (rule engine names, or labels from a parquet) |
+| `trades` | closed trades that entered in this regime |
+| `win_rate` | share with `r_multiple > 0` |
+| `expectancy_r` | mean R multiple |
+| `total_r` | sum of R multiples |
+| `pnl` | net PnL after costs |
+| `profit_factor` | gross win / gross loss; `null` when a bucket has wins but no losses |
+
+`unmatched_trades` counts entries that precede the first label (or carry a
+missing/`NaN` label). Those trades are not dropped and not put in a fake
+bucket: `sum(rows.trades) + unmatched_trades == headline trades` always holds,
+and the code raises if it does not.
+
+```bash
+uv run python -m scalping.cli ml evaluate \
+  --run runs/ml/ml-logistic-316312dff683 \
+  --root ../data-ticks5-store \
+  --regime                      # rule labels, computed causally
+  # or: --regime-labels labels.parquet   # ts + regime columns
+```
+
+JSON output gains a `"regime"` object with `"rows"` and `"unmatched_trades"`;
+the existing keys are unchanged, and without either flag `"regime"` is `{}`.
+
+The join is a backward as-of on the entry timestamp: a label that starts after
+the entry can never be attached, and an entry exactly on a label timestamp uses
+that label. Rule labels are computed from the same sliced bars the policy
+trades, using the existing causal rule engine; no label uses data after its
+bar. The trade-off is that the rule windows warm up inside the split, so the
+first bars default to `sideways`/`normal` rather than borrowing history from
+before the split.
+
+Limitation, stated plainly: these buckets are small (a validation split may
+produce single-digit trades per regime), they describe one already-evaluated
+run, and they are not a promotion gate. A good bucket can be luck; a bad one
+can be one trade. Cost-stress runs stay headline-only so the table never mixes
+two cost assumptions. Use the breakdown to generate a hypothesis to test on a
+new window, not to select the run that looks best.
 
 ## Artifacts
 

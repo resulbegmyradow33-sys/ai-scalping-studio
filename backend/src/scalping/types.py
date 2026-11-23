@@ -41,9 +41,7 @@ class Side(IntEnum):
         The wider return type than ``int.__mul__`` is intentional.
         """
         if not isinstance(other, (int, float)):
-            raise TypeError(
-                f"Side can only be multiplied by a number, got {type(other).__name__}"
-            )
+            raise TypeError(f"Side can only be multiplied by a number, got {type(other).__name__}")
         product = int(self) * other
         if other in (0, 1, -1):
             return Side(int(product))
@@ -115,6 +113,14 @@ class AccountState:
     day_pnl: float
     bars_in_trade: int
     trades_closed: int
+    # Phase 11 kill-switch state. Every field defaults to ``None``/``0`` so
+    # pre-Phase-11 callers keep constructing the same snapshot, and a missing
+    # anchor disables the switch that needs it instead of inventing a value.
+    week_start_equity: float | None = None
+    peak_equity: float | None = None
+    consecutive_losses: int = 0
+    paused_until: datetime | None = None
+    spread_points: float | None = None
 
 
 # --- Static configuration dataclasses ---------------------------------------
@@ -144,6 +150,14 @@ class RiskConfig:
     max_bars_in_trade: int = 120
     sl_atr_mult: float = 1.0
     tp_atr_mult: float = 2.0
+    # Phase 11 kill switches. ``0`` disables each one, so the defaults reproduce
+    # the pre-Phase-11 engine exactly.
+    weekly_loss_pct: float = 0.0  # loss since the week anchor (0 = off)
+    max_drawdown_pct: float = 0.0  # peak-to-current equity drawdown (0 = off)
+    consecutive_loss_pause: int = 0  # losses that trigger an entry pause (0 = off)
+    max_spread_points: float = 0.0  # entry spread cap in contract points (0 = off)
+    min_equity_frac: float = 0.0  # emergency stop below this fraction of initial (0 = off)
+    pause_bars: int = 0  # bars a tripped switch stays latched (0 = condition only)
 
 
 @dataclass(frozen=True, slots=True)
