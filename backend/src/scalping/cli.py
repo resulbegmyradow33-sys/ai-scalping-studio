@@ -486,11 +486,13 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
         purge_bars=args.purge,
         embargo_bars=args.embargo,
         seed=args.seed,
+        include_flat=args.include_flat,
     )
     config = CVConfig(
         n_splits=args.folds,
         purge_bars=args.purge,
         embargo_bars=args.embargo,
+        min_train_rows=args.min_train_rows,
     )
     result = cross_validate(
         features,
@@ -737,10 +739,21 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_cv.add_argument("--horizon", type=int, default=5)
     ml_cv.add_argument("--folds", type=int, default=5)
     ml_cv.add_argument("--purge", type=int, default=5)
-    ml_cv.add_argument("--embargo", type=int, default=0)
+    ml_cv.add_argument(
+        "--embargo",
+        type=int,
+        default=5,
+        help="extra bars before each test block (matches ml train)",
+    )
+    ml_cv.add_argument("--min-train-rows", type=int, default=50)
     ml_cv.add_argument("--train-fraction", type=float, default=0.70)
     ml_cv.add_argument("--validation-fraction", type=float, default=0.15)
     ml_cv.add_argument("--seed", type=int, default=0)
+    ml_cv.add_argument(
+        "--include-flat",
+        action="store_true",
+        help="keep exact-zero returns as a third class (usually harmful)",
+    )
     ml_cv.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_cv.add_argument("--out", default=None, help="optional full report path")
     ml_cv.set_defaults(handler=_cmd_ml_cv)

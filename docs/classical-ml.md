@@ -89,15 +89,17 @@ only `split == 0` rows and cuts them into `n_splits + 1` contiguous blocks:
 
 - fold `k` tests block `k + 1`;
 - fold `k` fits on every earlier block (expanding window);
-- the last `max(purge_bars, horizon)` training rows are dropped, because their
-  labels overlap the test block's future bars;
+- the last `max(purge_bars, spec.purge_bars, horizon)` training rows are
+  dropped, because their labels overlap the test block's future bars;
 - `embargo_bars` extra rows are dropped immediately before the test block;
 - a fold is rejected if the training window falls below `min_train_rows` or if
   either side is empty.
 
-The gap is therefore `max(purge_bars, horizon) + embargo_bars` bars, the same
-rule the dataset builder uses at its own boundaries. Folds are chronological,
-contiguous and non-overlapping. Validation and test rows are never selected:
+The gap is therefore `max(config.purge_bars, spec.purge_bars, horizon) +
+embargo_bars` bars, the same purge rule the dataset builder uses at its own
+boundaries plus any wider purge the caller set for `ml train`. Folds are
+chronological, contiguous and non-overlapping. At least two folds are required;
+one fold has no variance to report. Validation and test rows are never selected:
 they stay untouched for the one-shot final decision, and CV cannot inflate a
 score by reusing them.
 
@@ -108,13 +110,19 @@ uv run python -m scalping.cli ml cv \
   --symbol XAUUSD --timeframe H1 \
   --model logistic --horizon 5 \
   --groups price,momentum,volatility \
-  --folds 5 --purge 5 --embargo 5
+  --folds 5 --purge 5 --embargo 5 \
+  --min-train-rows 50
 ```
 
-Output is one JSON line: dataset id, split counts, every fold's boundaries and
-metrics (accuracy, balanced accuracy, log loss, Brier, ECE/MCE), and the
-mean/std of each metric across folds. `--out` optionally writes the full report;
-no model artifact is produced because CV selects, it does not promote.
+`--embargo` defaults to 5, matching `ml train`; `--include-flat` and
+`--min-train-rows` mirror the training knobs. Output is one JSON line: dataset
+id, `spec`, feature `columns`, split counts, every fold's boundaries and metrics
+(accuracy, balanced accuracy, log loss, Brier, ECE/MCE), and the mean/std of
+each metric across folds. `split_counts` uses the same kept-row semantics as
+`ml train`: train/validation/test exclude flat rows and `flat_dropped` is
+reported separately. `--out` optionally writes the full report; the `out` path
+itself only appears on stdout, so the file is a reproducible record. No model
+artifact is produced because CV selects, it does not promote.
 
 Honest limitations: there is no hyperparameter search yet, so CV compares a
 fixed spec rather than tuning it. Folds share their early history, so they are

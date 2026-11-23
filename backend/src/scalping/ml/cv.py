@@ -50,8 +50,8 @@ class CVConfig:
     min_train_rows: int = 50
 
     def __post_init__(self) -> None:
-        if self.n_splits < 1:
-            raise ValueError("n_splits must be >= 1")
+        if self.n_splits < 2:
+            raise ValueError("n_splits must be >= 2; one fold has no variance")
         if self.purge_bars < 0:
             raise ValueError("purge_bars must be non-negative")
         if self.embargo_bars < 0:
@@ -90,6 +90,8 @@ class CVResult:
     timeframe: str
     dataset_id: str
     model: str
+    spec: TrainSpec
+    columns: tuple[str, ...]
     config: CVConfig
     folds: tuple[CVFold, ...]
     fold_metrics: tuple[dict[str, Any], ...]
@@ -103,6 +105,8 @@ class CVResult:
             "timeframe": self.timeframe,
             "dataset_id": self.dataset_id,
             "model": self.model,
+            "spec": asdict(self.spec),
+            "columns": list(self.columns),
             "config": asdict(self.config),
             "split_counts": self.split_counts,
             "folds": [
@@ -183,6 +187,12 @@ def cross_validate(
     ``build_model(spec.model, seed=spec.seed)`` on its training window and scores
     the next contiguous block. Flat labels are dropped unless
     ``spec.include_flat`` is set, matching :func:`scalping.ml.train.train_classifier`.
+
+    ``split_counts`` follows ``train_classifier``: train/validation/test are rows
+    **kept** after flat filtering, ``flat_dropped`` is counted separately, and
+    ``purged`` is the raw ``split == -1`` count. A fold's ``train_rows`` and
+    ``test_rows`` are geometric block sizes before flat filtering; the fitted and
+    scored counts are in its metrics.
     """
     bundle = build_dataset(
         features,
@@ -205,7 +215,9 @@ def cross_validate(
         raise ValueError("the training split is not contiguous")
 
     edges = _block_edges(train_lo, train_hi, config.n_splits + 1)
-    purge = max(config.purge_bars, spec.horizon)
+    # The fold gap also honours spec.purge_bars: a caller who asked for a wider
+    # boundary purge in `ml train` must not silently get a narrower fold purge.
+    purge = max(config.purge_bars, spec.purge_bars, spec.horizon)
     gap = purge + config.embargo_bars
     keep = (
         np.ones(bundle.y_direction.shape[0], dtype=bool)
@@ -246,11 +258,12 @@ def cross_validate(
 
         y_train = bundle.y_direction[train_index]
         y_test = bundle.y_direction[test_index]
+        labels = np.unique(y_train)
+        if labels.size < 2:
+            raise ValueError(f"fold {fold}: training window has a single class {labels.tolist()}")
         model = build_model(spec.model, seed=spec.seed)
         model.fit(bundle.X[train_index], y_train)
-        classes = tuple(int(value) for value in getattr(model, "classes_", ()))
-        if len(classes) < 2:
-            raise ValueError(f"fold {fold}: training window has fewer than two classes")
+        classes = tuple(int(value) for value in getattr(model, "classes_", labels))
         missing = np.setdiff1d(y_test, np.asarray(classes))
         if missing.size:
             raise ValueError(
@@ -296,14 +309,16 @@ def cross_validate(
         timeframe=timeframe,
         dataset_id=bundle.manifest.dataset_id,
         model=spec.model,
+        spec=spec,
+        columns=bundle.manifest.columns,
         config=config,
         folds=tuple(folds),
         fold_metrics=tuple(fold_metrics),
         aggregate=_aggregate(tuple(fold_metrics)),
         split_counts={
-            "train": bundle.rows("train"),
-            "validation": bundle.rows("validation"),
-            "test": bundle.rows("test"),
+            "train": int(((bundle.split == 0) & keep).sum()),
+            "validation": int(((bundle.split == 1) & keep).sum()),
+            "test": int(((bundle.split == 2) & keep).sum()),
             "purged": int((bundle.split == -1).sum()),
             "flat_dropped": int((~keep).sum()),
         },
