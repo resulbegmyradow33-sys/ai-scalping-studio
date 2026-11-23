@@ -9,6 +9,9 @@ paper trading only.
 :class:`~scalping.paper.ledger.PaperLedger` is the storage layer;
 :class:`~scalping.paper.runner.PaperSession` drives a
 :class:`~scalping.env.simulator.Simulator` bar by bar and writes through it.
+:class:`~scalping.paper.mt5.Mt5DemoAdapter` is a disabled skeleton that refuses
+every operation; it is not an integration and real-money execution is out of
+scope.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from scalping.paper.ledger import (
     SignalRecord,
     TradeRecord,
 )
+from scalping.paper.mt5 import AdapterDisabled, Mt5DemoAdapter
 from scalping.paper.runner import (
     ACTION_CODES,
     ACTION_NAMES,
@@ -39,10 +43,12 @@ __all__ = [
     "ACTION_CODES",
     "ACTION_NAMES",
     "SCHEMA_VERSION",
+    "AdapterDisabled",
     "DuplicateError",
     "EquityPoint",
     "FillRecord",
     "LedgerError",
+    "Mt5DemoAdapter",
     "OrderRecord",
     "PaperLedger",
     "PaperRunResult",

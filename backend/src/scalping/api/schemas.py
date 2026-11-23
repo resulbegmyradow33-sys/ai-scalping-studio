@@ -17,6 +17,7 @@ from scalping.serialize import metrics_payload
 
 __all__ = [
     "IMPORT_NAME_PATTERN",
+    "PAPER_SESSION_PATTERN",
     "SYMBOL_PATTERN",
     "BacktestRequest",
     "BacktestResponse",
@@ -32,6 +33,21 @@ __all__ = [
     "HealthResponse",
     "ImportFileName",
     "OkResponse",
+    "PaperEquityPage",
+    "PaperEquityPoint",
+    "PaperOrder",
+    "PaperOrderPage",
+    "PaperPosition",
+    "PaperPositionPage",
+    "PaperSessionCreate",
+    "PaperSessionCreated",
+    "PaperSessionId",
+    "PaperSessionItem",
+    "PaperSessionPage",
+    "PaperSessionSummary",
+    "PaperTimeframe",
+    "PaperTrade",
+    "PaperTradePage",
     "ProviderName",
     "RegimeCount",
     "RegimeCurrent",
@@ -91,6 +107,23 @@ ImportFileName = Annotated[
         pattern=IMPORT_NAME_PATTERN,
     ),
 ]
+
+#: A paper session id is an opaque token. It is never a path segment: no
+#: separator, no leading dot and a bounded length, so a client cannot steer a
+#: filesystem lookup with it even if a future caller forgets to keep it opaque.
+PAPER_SESSION_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9_-]*$"
+
+PaperSessionId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=64,
+        pattern=PAPER_SESSION_PATTERN,
+    ),
+]
+
+#: Bar sizes a paper session may be opened on; mirrors ``data/registry.py``.
+PaperTimeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
 
 
 def is_symbol_id(value: str) -> bool:
@@ -342,3 +375,158 @@ class CalibrateRequest(BaseModel):
     min_train_trades: int = Field(default=100, ge=10)
     min_holdout_trades: int = Field(default=30, ge=5)
     dry_run: bool = False
+
+
+# --- paper trading -----------------------------------------------------------
+#
+# The paper API reads and writes the ledger; it never names a file. The ledger
+# path is configuration on the app, so no field here can move it. Timestamps are
+# serialised from the ledger's aware datetimes and are always UTC.
+
+
+class PaperSessionCreate(BaseModel):
+    """Open one paper session record.
+
+    ``config`` is stored under ``extra`` in the session's ``config_json`` next to
+    ``{"origin": "api"}``; it is not used to configure a runner in this slice.
+    """
+
+    symbol: SymbolId
+    timeframe: PaperTimeframe = "M1"
+    strategy: str = Field(default="manual", min_length=1, max_length=64)
+    model_version: str | None = Field(default=None, max_length=128)
+    config: dict[str, Any] | None = None
+
+
+class PaperSessionCreated(BaseModel):
+    """The id the server generated; the caller never chooses it."""
+
+    session_id: str
+    status: str
+    started_at: datetime
+
+
+class PaperSessionItem(BaseModel):
+    """One row of the session list."""
+
+    session_id: str
+    symbol: str
+    timeframe: str
+    strategy: str
+    model_version: str | None
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+
+
+class PaperPosition(BaseModel):
+    """A position lifecycle; ``closed_ts`` is set when a trade settles it."""
+
+    position_id: int
+    side: str
+    lot: float
+    entry_ts: datetime
+    entry_price: float
+    sl: float
+    tp: float
+    status: str
+    closed_ts: datetime | None
+    closed_price: float | None
+
+
+class PaperOrder(BaseModel):
+    """One order attempt; a rejection always carries its reason."""
+
+    order_id: int
+    signal_id: int | None
+    ts: datetime
+    side: str
+    lot: float
+    requested_price: float | None
+    status: str
+    rejection_reason: str | None
+
+
+class PaperTrade(BaseModel):
+    """One closed trade, exactly as the broker settled it."""
+
+    trade_id: int
+    side: str
+    entry_ts: datetime
+    entry_price: float
+    exit_ts: datetime
+    exit_price: float
+    lot: float
+    pnl: float
+    r_multiple: float
+    exit_reason: str
+
+
+class PaperEquityPoint(BaseModel):
+    """One account mark."""
+
+    ts: datetime
+    balance: float
+    equity: float
+
+
+class PaperSessionSummary(BaseModel):
+    """Everything the session panel shows above the tables.
+
+    ``balance`` and ``equity`` are ``None`` until the first equity mark;
+    ``trade_count`` counts closed trades only.
+    """
+
+    session_id: str
+    symbol: str
+    timeframe: str
+    strategy: str
+    model_version: str | None
+    status: str
+    started_at: datetime
+    ended_at: datetime | None
+    balance: float | None
+    equity: float | None
+    open_position: PaperPosition | None
+    trade_count: int
+    last_bar_ts: datetime | None
+    config: dict[str, Any]
+
+
+class PaperSessionPage(BaseModel):
+    """A bounded page of sessions plus the total behind it."""
+
+    items: list[PaperSessionItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaperPositionPage(BaseModel):
+    items: list[PaperPosition]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaperOrderPage(BaseModel):
+    items: list[PaperOrder]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaperTradePage(BaseModel):
+    items: list[PaperTrade]
+    total: int
+    limit: int
+    offset: int
+
+
+class PaperEquityPage(BaseModel):
+    """The newest equity window in chronological order; ``offset`` pages back."""
+
+    items: list[PaperEquityPoint]
+    total: int
+    limit: int
+    offset: int
