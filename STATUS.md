@@ -4,7 +4,7 @@ Bu dosya, `docs/requirements/master-prompt.md` hedeflerine göre deponun
 durumunu tek sayfada gösterir. Ayrıntılı kanıt: `docs/architecture-audit.md`.
 Plan: `docs/implementation-roadmap.md`. Görev listesi: `docs/task-board.md`.
 
-Son güncelleme: 2026-11-23 · Branch `main` @ `7154d48`
+Son güncelleme: 2026-11-23 · Branch `main` @ `2fb33c3`
 
 ## Bugün gerçekten çalışan şey
 
@@ -19,8 +19,8 @@ Son güncelleme: 2026-11-23 · Branch `main` @ `7154d48`
 - Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
 - **Purged expanding-window CV** (embargo dahil) ve kalibrasyon (Brier, log loss,
   ECE/MCE) var; hiçbir model promosyon kapısını geçmedi.
-- **Testler: 843 backend, 194 frontend** (`main` @ `7154d48`); ruff/mypy/eslint
-  temiz; Next build geçiyor.
+- **Testler: 1001 backend (+2 store-gated skip), 194 frontend** (`main` @ `2fb33c3`);
+  ruff/mypy/eslint temiz; Next build geçiyor.
 - **Ölçülen performans:** M1 `build_features` 168–173 s → **8.65 s**; `fvg` taraması
   149.5 s → **1.93 s**, çıktı bit-identical. Dil kararı: Python + TypeScript kalıyor.
 
@@ -55,6 +55,9 @@ Son güncelleme: 2026-11-23 · Branch `main` @ `7154d48`
 | Scheduler | 🟡 | İki arka plan döngüsü; konfigüre edilebilir scheduler yok |
 | Testler | ✅ | 843 backend + 194 frontend; ruff/mypy/eslint/build temiz |
 | Dokümantasyon | 🟡 | Zorunlu 15 dokümanın bir kısmı hazır; `docs/task-board.md` gerçek durumu izliyor |
+| Otonom strateji keşfi (Phase 16) | ❌ | Güvenli DSL/AST ve arama motoru dilimleri geliştiriliyor; henüz merge yok |
+| Bilgi ingestion (Phase 17) | ❌ | Doküman ingestion/index dilimi geliştiriliyor |
+| Otonom orchestrator (Phase 18) | ❌ | Registry + jobs var; tetikleme/kuyruk/crash recovery yok |
 | Kabul kriterleri | ❌ | Uçtan uca promote/reject → paper → monitor → rollback zinciri henüz yok |
 
 Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
@@ -69,19 +72,23 @@ Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
 - Purged CV fold'ları erken geçmişi paylaşır; ortalama/std bağımsız tahmin değildir.
 - Rejim kırılımı ve ensemble metrikleri tanımlayıcıdır, promosyon kapısı değildir.
 
-## Sıradaki işler (öncelik sırası)
+## Sıradaki işler (yeni otonom hedefe göre)
 
-1. **Faz 9 — ensemble/karar:** OOF stacking, oylama, disagreement, NO TRADE karar
-   kaydı; en iyi üye ile karşılaştırma.
-2. **Faz 10 — registry:** candidate → champion kapısı, drift, scheduler,
-   artefakt doğrulaması.
-3. **Faz 11 — risk/backtest:** Monte Carlo, parametre duyarlılığı, execution
-   delay, slippage limiti, data-quality trade block.
-4. **Faz 12 — paper:** API uçları, panel sayfası, MT5 demo iskeleti (kapalı).
-5. **Faz 13 — panel:** ML/NN/RL laboratuvarları, paper ve monitoring sayfaları;
-   her sayı API/artefakttan gelir.
-6. **Faz 14 — optimizasyon:** feature cache (#69), tek lazy plan (#70), global
-   PPO job slot (#71), metadata coverage (#72), label join (#73).
+1. **Phase 16 — strategy DSL + discovery:** güvenli AST, doğrulayıcı, kanonik
+   hash, compile, mutasyon; ardından bütçeli arama ve aday arşivi.
+2. **Phase 10 — champion governance:** candidate gate + drift (PR'da), sonra
+   orchestrator'ın çağıracağı promote/reject/rollback akışı.
+3. **Phase 17 — knowledge ingestion:** TXT/MD/HTML/DOCX, provenance, FTS index,
+   falsifiable hypothesis kayıtları; PDF ayrı dilim.
+4. **Phase 18 — orchestrator:** yeni veri/doküman/paper tetikleri, kalıcı job
+   kuyruğu, pause/resume/cancel, crash recovery, tek ağır iş.
+5. **Phase 19 — otonom paper acceptance:** insan stratejisi olmadan uçtan uca
+   kanıt; gerçek para kapalı.
+6. **Phase 13/14 — panel ve optimizasyon:** her sayı API/artefakttan; feature
+   cache (#69), tek lazy plan (#70), global PPO slot (#71).
+
+Model ailesi genişletmesi (TFT, SAC/TD3/DQN, Mamba, GNN) bu listenin sonunda ve
+yalnızca ölçülmüş bir araştırma sorusu varsa.
 
 Ağır eğitimler aynı anda çalışmaz; 8 GB RAM sınırı korunur.
 

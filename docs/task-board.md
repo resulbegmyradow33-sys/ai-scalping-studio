@@ -174,14 +174,14 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Emergency kill switch (equity below a fraction of initial balance; default off).
 - [x] Risk limits cannot be bypassed by a model (frozen at construction, no override).
 - [ ] Purged CV with embargo integrated in evaluation.
-- [ ] Monte Carlo trade-sequence analysis.
-- [ ] Parameter sensitivity.
+- [x] Monte Carlo trade-sequence analysis (shuffle + block bootstrap, ruin, DD).
+- [x] Parameter sensitivity (one-axis spread/slippage/commission grid).
 - [ ] Ablation runner.
 - [ ] Regime-specific reports.
 - [ ] Execution delay and rejected-order assumptions.
 - [ ] Partial fills only where data supports them.
-- [ ] `docs/risk-management.md`, `docs/backtesting-methodology.md`.
-- [ ] Tests: kill switch, embargo, Monte Carlo determinism.
+- [x] `docs/risk-management.md`, `docs/backtesting-methodology.md`.
+- [x] Tests: kill switch, embargo, Monte Carlo determinism.
 
 ## Phase 12 — Paper trading
 
