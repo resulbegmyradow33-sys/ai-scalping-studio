@@ -151,15 +151,17 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 10 — Autonomous learning and registry
 
-- [ ] PARTIAL: datasets/models/promotions/jobs var; experiments, backtests,
-      paper runs ve drift tabloları yok.
+- [ ] PARTIAL: SQLite schema — datasets/models/promotions/jobs var; experiments,
+      backtests ve paper runs tabloları yok.
 - [x] Dataset versioning and checksums (dataset_id + digest).
 - [x] Model versioning, champion pointer and rollback (scope'lu).
-- [ ] PARTIAL: gate var (trades, expectancy, PF, DD, ECE, cost stress, regime
-      coverage); champion metrikleriyle karşılaştırma yok.
+- [ ] PARTIAL: aday → şampiyon kapısı (trades, OOS, cost stress, regime coverage)
+      var; champion metrikleriyle karşılaştırma yok.
 - [x] Drift detection: features (PSI/KS), predictions and calibration (ECE).
-- [ ] Configurable scheduler with pause/resume/cancel.
-- [ ] PARTIAL: NN/ML job slot ve RAM guard var; PPO için global slot yok.
+- [ ] PARTIAL: konfigüre edilebilir scheduler — kalıcı kuyruk, pause/resume/cancel
+      var; zamanlayıcı thread/watcher yok.
+- [ ] PARTIAL: bir ağır iş/RAM bütçesi — NN/ML job slot ve RAM guard var; PPO
+      için global slot yok.
 - [ ] Failed training cannot stop paper replay.
 - [ ] Migrate nightly rule/RL jobs to the scheduler.
 - [x] `docs/local-learning-engine.md`.
@@ -199,7 +201,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 ## Phase 13 — Dashboard
 
 - [ ] Market Intelligence page.
-- [ ] Classical ML Lab.
+- [x] Classical ML Lab (`/labs/ml`, real API only).
 - [ ] Neural Network Lab.
 - [ ] RL Lab.
 - [ ] Strategy Intelligence by regime.
@@ -207,8 +209,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Backtesting (equity, DD, Monte Carlo, walk-forward).
 - [ ] Paper Trading.
 - [ ] System Monitoring (RAM/CPU/storage/jobs/data quality).
-- [ ] Every number comes from an API/artifact; no fake metrics.
-- [ ] Frontend tests and build.
+- [ ] PARTIAL: yeni ML Lab ve mevcut sayfalar API/boş-durum kullanıyor; diğer
+      lab sayfaları henüz yok.
+- [ ] PARTIAL: lint + tsc + 210 test + build yeşil; Phase 13 sayfalarının
+      tamamı gelmeden kutu kapanmaz.
 
 ## Phase 14 — Mac mini optimisation
 
@@ -256,22 +260,25 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 - [x] Confirm existing strategies are optional baselines only, not required
       owner-supplied rules or a fixed search menu (spec §28).
-- [ ] Define a safe, versioned strategy DSL/AST; generated strategies cannot
+- [x] Define a safe, versioned strategy DSL/AST; generated strategies cannot
       execute arbitrary Python or shell code.
-- [ ] PARTIAL: factory/mutation/crossover protokolleri ve arşiv var; DSL
-      primitifleri ayrı dilimde.
-- [ ] PARTIAL: bütçeli evolve döngüsü var (#95); gerçek DSL/evaluator bağlı değil.
-- [ ] PARTIAL: dedup, bütçe, seed, complexity cap ve stop var; DSL mutasyonu ayrı dilimde.
+- [x] Build candidate generation from reusable causal primitives, conditions,
+      lookback windows, entry/exit/holding logic and NO TRADE.
+- [ ] PARTIAL: bounded evolutionary/genetic or grammar-based search — bütçeli
+      evolve döngüsü var (#95); gerçek DSL/evaluator bağlantısı ayrı dilimde.
+- [x] Add candidate mutation, crossover, deduplication, complexity limits,
+      reproducible seeds, experiment budgets and cancellation.
 - [ ] Connect candidate evaluation to realistic simulator costs, risk controls,
       walk-forward validation and untouched OOS data.
-- [ ] PARTIAL: trial sayısı kalıcı kaydediliyor; düzeltme/ceza politikası yok.
+- [ ] PARTIAL: trial sayısı kalıcı kaydediliyor; data-snooping düzeltmesi/ceza
+      politikası yok.
 - [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
 - [x] Store full candidate lineage, dataset/code/config hashes and rejection
-      reasons (discovery archive).
+      reasons in the registry.
 - [ ] Compare candidates with simple baselines and champion; allow no candidate
       to win and allow NO TRADE.
-- [ ] PARTIAL: determinizm, lineage ve bütçe test edildi; DSL safety/no-trade/
-      cost sensitivity DSL ve evaluator dilimlerine bağlı.
+- [ ] PARTIAL: no-look-ahead, determinizm, lineage ve DSL safety testleri var;
+      overfit reddi, no-trade seçimi ve cost sensitivity evaluator diliminde.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
@@ -292,18 +299,23 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation
 
-- [ ] Detect new datasets/documents and completed paper sessions.
-- [ ] Route imports to validation, indexing, dataset and hypothesis pipelines.
-- [ ] Plan and queue eligible research, training, evaluation and drift jobs.
-- [ ] Persist jobs; support pause/resume/cancel/retry/crash recovery.
-- [ ] Enforce M2 RAM/CPU/disk budgets and one heavy job at a time.
+- [ ] PARTIAL: dosya tetikleyicisi (size+mtime+sha256, kalıcı cursor) var;
+      paper oturumu bitişi ve veri/doküman yönlendirmesi yok.
+- [ ] PARTIAL: ingestion/index pipeline'ları hazır; orchestrator bunları henüz
+      otomatik çağırmıyor.
+- [ ] PARTIAL: kalıcı kuyruk, dependency ve öncelik var; gerçek iş handler'ları
+      ve eligibility politikası henüz bağlı değil.
+- [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
+- [ ] PARTIAL: tek ağır iş kuralı ve ResourceGuard veto kancası var; gerçek
+      RAM/disk ölçen guard yok.
 - [ ] Keep paper execution isolated from training failures.
 - [ ] Connect strategy discovery, ML/DL/RL, model registry, champion gate and
       paper-trading feedback into one auditable lifecycle.
-- [ ] Log why every automated job was started, skipped, promoted or rejected.
-- [ ] Provide owner controls: pause, safe mode, disable research and rollback.
-- [ ] Tests: new-data trigger, job recovery, resource refusal, paper isolation,
-      promotion/rejection/rollback and full closed-loop integration.
+- [x] Log why every automated job was started, skipped, promoted or rejected
+      (append-only event tablosu).
+- [ ] PARTIAL: pause/safe mode/disable research var; rollback kontrolü yok.
+- [ ] PARTIAL: trigger, recovery, resource refusal ve kontrol testleri var;
+      paper isolation ve uçtan uca döngü yok.
 
 ## Phase 19 — Autonomous paper-trading acceptance
 
