@@ -17,7 +17,7 @@ import polars as pl
 from gymnasium import spaces
 
 from scalping.config import Settings
-from scalping.env.simulator import ArmSelector, Simulator, StepResult
+from scalping.env.simulator import N_ACTIONS, ArmSelector, Simulator, StepResult
 from scalping.features.build import FeatureFrame
 
 __all__ = ["TradingEnv"]
@@ -82,7 +82,7 @@ class TradingEnv(gym.Env):
             flow_thr=flow_thr,
             flow_obs=flow_obs,
         )
-        self.action_space = spaces.Discrete(4)
+        self.action_space = spaces.Discrete(N_ACTIONS)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)
         self._obs = np.zeros(self.sim.obs_dim, dtype=np.float32)
 
@@ -104,3 +104,20 @@ class TradingEnv(gym.Env):
         # corrupt the wrapper's own state.
         self._obs = result.obs.copy()
         return result
+
+    def action_masks(self) -> np.ndarray:
+        """Boolean mask of the actions the simulator will accept at this bar.
+
+        Forwarded from :meth:`Simulator.action_masks`; a mask-aware policy reads
+        this method on the unwrapped env (the shape ``sb3-contrib``'s
+        ``MaskablePPO`` expects). The result is validated here because a mask of
+        the wrong length or dtype would be misread silently, and it is copied so
+        a caller mutating the vector cannot reach simulator state.
+        """
+        mask = np.asarray(self.sim.action_masks())
+        expected = (N_ACTIONS,)
+        if mask.shape != expected:
+            raise ValueError(f"simulator action mask has shape {mask.shape}, expected {expected}")
+        if mask.dtype != np.bool_:
+            raise TypeError(f"action mask must be boolean, got {mask.dtype}")
+        return mask.copy()

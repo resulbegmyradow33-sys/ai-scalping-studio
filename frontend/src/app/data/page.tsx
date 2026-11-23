@@ -40,6 +40,14 @@ const FIELD_CLASS =
 
 const LABEL_CLASS = "text-xs text-slate-400";
 
+/**
+ * Mirrors `ImportFileName` in the API: a bare file name in `<data_root>/imports`,
+ * never a path. The input sends the trimmed value as the request's `path`.
+ */
+const CSV_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]*$";
+const CSV_NAME_MAX_LENGTH = 255;
+const CSV_NAME_RE = new RegExp(CSV_NAME_PATTERN);
+
 /** `YYYY-MM-DD` for a date input; `offset` is in days from today. */
 function isoDay(offset: number): string {
   const date = new Date();
@@ -61,7 +69,8 @@ export default function DataPage() {
   const [start, setStart] = useState("");
   const [end, setEnd] = useState("");
   const [seed, setSeed] = useState("7");
-  const [path, setPath] = useState("");
+  const [fileName, setFileName] = useState("");
+  const [fileNameTouched, setFileNameTouched] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [pending, setPending] = useState(false);
   const [lastRows, setLastRows] = useState<number | null>(null);
@@ -88,21 +97,35 @@ export default function DataPage() {
           : "bilinmeyen hata";
 
   const busy = pending;
-  const cleanPath = path.trim();
-  const missingPath = provider === "csv" && cleanPath === "";
-  const relativePath =
-    provider === "csv" && cleanPath !== "" && !cleanPath.startsWith("/");
+  const cleanFileName = fileName.trim();
+  const missingPath = provider === "csv" && cleanFileName === "";
+  const invalidPathName =
+    provider === "csv" &&
+    cleanFileName !== "" &&
+    (cleanFileName.length > CSV_NAME_MAX_LENGTH || !CSV_NAME_RE.test(cleanFileName));
+  // Errors appear after the field is left (or a bad value is submitted), never
+  // while the user is still typing; editing clears them until the next blur.
+  const pathError =
+    provider === "csv" && fileNameTouched && (missingPath || invalidPathName)
+      ? missingPath
+        ? "Dosya adı gerekli."
+        : "Yalnızca dosya adı girin (ör. xauusd_h1.csv); /, \\ ve .. kullanılamaz."
+      : null;
   const canSubmit =
     cleanSymbol !== "" &&
     start !== "" &&
     end !== "" &&
     !missingPath &&
-    !relativePath &&
+    !invalidPathName &&
     !busy;
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();
-    if (!canSubmit) return;
+    if (!canSubmit) {
+      // A blocked submit still explains the field, matching the blur path.
+      if (provider === "csv" && (missingPath || invalidPathName)) setFileNameTouched(true);
+      return;
+    }
 
     setPending(true);
     setPhase("running");
@@ -118,7 +141,7 @@ export default function DataPage() {
           start: `${start}T00:00:00Z`,
           end: `${end}T23:59:00Z`,
           seed: provider === "synthetic" && trimmedSeed !== "" ? Number(trimmedSeed) : null,
-          path: provider === "csv" ? cleanPath : null,
+          path: provider === "csv" ? cleanFileName : null,
         });
         setLastRows(result.rows);
         setPhase("done");
@@ -235,6 +258,7 @@ export default function DataPage() {
                 setProvider(next);
                 setLastRows(null);
                 setDownloadError(null);
+                setFileNameTouched(false);
                 // A pending request still owns the form; only an idle form
                 // resets its job state on a provider switch.
                 if (!pending) setPhase("idle");
@@ -309,25 +333,45 @@ export default function DataPage() {
           ) : provider === "csv" ? (
             <div className="flex flex-col gap-1 sm:col-span-2">
               <label htmlFor="data-path" className={LABEL_CLASS}>
-                CSV dosyası
+                CSV dosya adı
               </label>
+              <p id="data-path-hint" className="text-xs text-slate-500">
+                Dosyayı backend&apos;in veri kökündeki imports/ klasörüne koyun; alan
+                yalnızca dosya adını alır (ör. xauusd_h1.csv).
+              </p>
               <input
                 id="data-path"
-                value={path}
-                onChange={(event) => setPath(event.target.value)}
+                value={fileName}
+                onChange={(event) => {
+                  setFileName(event.target.value);
+                  // Editing clears the message; blur or submit re-checks it.
+                  if (fileNameTouched) setFileNameTouched(false);
+                }}
+                onBlur={() => setFileNameTouched(true)}
                 required
+                maxLength={CSV_NAME_MAX_LENGTH}
+                pattern={CSV_NAME_PATTERN}
                 autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
                 spellCheck={false}
-                placeholder="/yol/xauusd.csv"
-                aria-invalid={relativePath}
-                aria-describedby={relativePath ? "data-path-error" : undefined}
+                placeholder="xauusd_h1.csv"
+                aria-invalid={pathError !== null}
+                aria-describedby={
+                  pathError !== null ? "data-path-hint data-path-error" : "data-path-hint"
+                }
                 className={FIELD_CLASS}
               />
-              {relativePath && (
+              {pathError !== null && (
                 <p id="data-path-error" data-testid="path-error" className="text-xs text-rose-300">
-                  Mutlak bir yol girin (ör. /Users/adi/xauusd.csv).
+                  {pathError}
                 </p>
               )}
+              {/* One polite region for the field: a shown live region is not
+                  announced reliably, a changed one is. */}
+              <p className="sr-only" aria-live="polite">
+                {pathError ?? ""}
+              </p>
             </div>
           ) : (
             <p className="self-end pb-2 text-xs text-slate-400 sm:col-span-2">

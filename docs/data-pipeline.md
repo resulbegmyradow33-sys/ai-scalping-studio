@@ -52,6 +52,42 @@ features.
 provider frame. CSV exports without quotes are correctly reported as
 `real_quotes=False`, while the allowed spread model keeps `spread_*` usable.
 
+### Persisted dataset arrays
+
+`scalping/datasets/artifact.py` saves a built dataset once and reloads it
+without rebuilding from Parquet:
+
+```python
+from scalping.datasets.artifact import load_dataset_arrays, save_dataset_arrays
+
+save_dataset_arrays("../runs/datasets/xauusd-m1-h1", bundle)
+data = load_dataset_arrays("../runs/datasets/xauusd-m1-h1")   # X is a memmap
+```
+
+- Layout: `artifact.json` plus one `.npy` per array (`X`, `y_direction`,
+  `y_return`, `ts`, `split`). `artifact.json` is written last and acts as the
+  commit marker; arrays without it are not a dataset.
+- `X` loads as a read-only `np.memmap`, so a large matrix is not copied into
+  RAM. `mmap=False` returns ordinary arrays.
+- Each file has a blake2b checksum in the manifest, verified on load by
+  default. `verify=False` skips the read for a trusted artifact.
+- The manifest keeps the dataset id and the builder manifest, so a model run
+  can name the exact dataset it trained on. Shape/dtype mismatches and missing
+  files are errors, not silent gaps.
+- The manifest is untrusted input. Every `file` entry must be a plain file name,
+  and the resolved path must stay inside the artifact directory: absolute paths,
+  separators, `.`/`..` and symlinks that escape are rejected with
+  `ArtifactError`. A manifest missing `file`, `dtype`, `shape` or `checksum`, or
+  carrying invalid metadata, raises `ArtifactError` at parse time instead of
+  `KeyError`.
+- Saves are atomic and concurrency-safe. Each array and the manifest go to a
+  unique temp file in the artifact directory (`tempfile.mkstemp`) and are moved
+  into place with `os.replace`, so two saves cannot replace or unlink each
+  other's scratch file.
+
+This is the storage format; CLI/API wiring for "train from an artifact" lands
+with the model registry (Phase 10).
+
 ## Schema
 
 Every bar frame conforms to `scalping.data.base.BAR_SCHEMA`:
@@ -217,6 +253,33 @@ uv run python -m scalping.cli data csv \
   --path ../data-real-csv/XAUUSD_M1.csv --symbol XAUUSD --root ../data-real-store
 ```
 
+The HTTP endpoint takes a **file name**, not a path. Copy the export into
+`<data-root>/imports/` and name it in the body:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/data/download' \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"csv","symbol":"XAUUSD","path":"XAUUSD_M1.csv",
+       "start":"2024-10-01T00:00:00Z","end":"2024-10-09T00:00:00Z","tz_offset":3}'
+```
+
+The server lists that directory and opens the matching entry, so a name with a
+separator, an absolute path, `..`, or a symlink is a 422 and nothing outside
+`imports/` can be read. The CLI keeps unrestricted paths.
+
+The CSV provider parses the file in bounded chunks (100,000 rows) instead of
+reading it into one string and one record list. A multi-GB export therefore
+costs the frame plus one chunk, not several copies of the raw text. Source line
+numbers stay exact and duplicate detection spans chunk boundaries, because the
+"first seen" map is shared by every chunk. Pass `--tz-offset` explicitly; with
+no offset the documented `+3` broker default is assumed (the old DST heuristic
+only changed the log message, never the value).
+
+The final canonical frame is still materialised, and the store write plus the
+provenance checksum need it once; a fully streaming store import with a chunked
+checksum is Phase 14 work. JSON import is parsed as one document (no streaming
+JSON parser is a dependency).
+
 JSON array (new):
 
 ```bash
@@ -273,7 +336,7 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 | `GET /api/timeframes` | supported bar sizes and their resample rules |
 | `GET /api/data/status?symbol&timeframe` | rows, span, providers, provenance |
 | `GET /api/data/validate?symbol&timeframe` | structural report |
-| `POST /api/data/download` | synthetic/CSV/Dukascopy import |
+| `POST /api/data/download` | synthetic/CSV/Dukascopy import; CSV names a file in `<data_root>/imports` |
 
 ## Current limits
 
