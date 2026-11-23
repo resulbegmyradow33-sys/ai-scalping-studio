@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from scalping.api.app import create_app
@@ -19,7 +21,18 @@ def test_symbol_registry_lists_all_required_instruments() -> None:
     with TestClient(create_app()) as client:
         body = client.get("/api/symbols").json()
     names = {row["symbol"] for row in body}
-    assert {"XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NAS100", "US30", "USOIL", "BTCUSD"} <= names
+    assert {
+        "XAUUSD",
+        "XAGUSD",
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "AUDUSD",
+        "NAS100",
+        "US30",
+        "USOIL",
+        "BTCUSD",
+    } <= names
     gold = next(row for row in body if row["symbol"] == "XAUUSD")
     assert gold["contract_size"] == 100.0
     assert gold["price_precision"] == 2
@@ -54,3 +67,44 @@ def test_validate_reports_a_clean_synthetic_slice(tmp_path) -> None:
     assert report["rows"] > 0
     assert report["ok"] is True
     assert report["first_ts"] is not None
+
+
+def test_ids_are_validated_before_touching_the_filesystem(tmp_path) -> None:
+    """Query parameters become path segments, so traversal is a 422, not a read."""
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        for path in ("/api/data/status", "/api/data/validate", "/api/regime"):
+            bad_symbol = client.get(path, params={"symbol": "../../etc", "timeframe": "M1"})
+            assert bad_symbol.status_code == 422, path
+            bad_timeframe = client.get(path, params={"symbol": "XAUUSD", "timeframe": "../x"})
+            assert bad_timeframe.status_code == 422, path
+
+
+def test_csv_import_is_confined_to_the_imports_directory(tmp_path) -> None:
+    """The request names a file; it never names a path the server can open."""
+    fixture = Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv"
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "xauusd.csv").write_bytes(fixture.read_bytes())
+
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        accepted = client.post(
+            "/api/data/download",
+            json={**BODY, "provider": "csv", "path": "xauusd.csv", "tz_offset": 3},
+        )
+        absolute = client.post(
+            "/api/data/download",
+            json={**BODY, "provider": "csv", "path": str(imports / "xauusd.csv")},
+        )
+        traversal = client.post(
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "../xauusd.csv"}
+        )
+        missing = client.post(
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "absent.csv"}
+        )
+
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["rows"] > 0
+    assert absolute.status_code == 422
+    assert traversal.status_code == 422
+    assert missing.status_code == 422
+    assert "imports" in missing.json()["detail"]

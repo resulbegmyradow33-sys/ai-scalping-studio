@@ -81,6 +81,55 @@ uv run python -m scalping.cli ml train ... --evaluate-test
 Output is one JSON line with the dataset id, split counts, validation metrics,
 baseline, optional test metrics and artifact paths.
 
+## Purged cross-validation
+
+`ml cv` answers "is this model/spec stable across time?" without spending the
+validation or test rows. It builds the same dataset as `ml train`, then keeps
+only `split == 0` rows and cuts them into `n_splits + 1` contiguous blocks:
+
+- fold `k` tests block `k + 1`;
+- fold `k` fits on every earlier block (expanding window);
+- the last `max(purge_bars, spec.purge_bars, horizon)` training rows are
+  dropped, because their labels overlap the test block's future bars;
+- `embargo_bars` extra rows are dropped immediately before the test block;
+- a fold is rejected if the training window falls below `min_train_rows` or if
+  either side is empty.
+
+The gap is therefore `max(config.purge_bars, spec.purge_bars, horizon) +
+embargo_bars` bars, the same purge rule the dataset builder uses at its own
+boundaries plus any wider purge the caller set for `ml train`. Folds are
+chronological, contiguous and non-overlapping. At least two folds are required;
+one fold has no variance to report. Validation and test rows are never selected:
+they stay untouched for the one-shot final decision, and CV cannot inflate a
+score by reusing them.
+
+```bash
+cd backend
+uv run python -m scalping.cli ml cv \
+  --root ../data-ticks5-store \
+  --symbol XAUUSD --timeframe H1 \
+  --model logistic --horizon 5 \
+  --groups price,momentum,volatility \
+  --folds 5 --purge 5 --embargo 5 \
+  --min-train-rows 50
+```
+
+`--embargo` defaults to 5, matching `ml train`; `--include-flat` and
+`--min-train-rows` mirror the training knobs. Output is one JSON line: dataset
+id, `spec`, feature `columns`, split counts, every fold's boundaries and metrics
+(accuracy, balanced accuracy, log loss, Brier, ECE/MCE), and the mean/std of
+each metric across folds. `split_counts` uses the same kept-row semantics as
+`ml train`: train/validation/test exclude flat rows and `flat_dropped` is
+reported separately. `--out` optionally writes the full report; the `out` path
+itself only appears on stdout, so the file is a reproducible record. No model
+artifact is produced because CV selects, it does not promote.
+
+Honest limitations: there is no hyperparameter search yet, so CV compares a
+fixed spec rather than tuning it. Folds share their early history, so they are
+not independent samples; a small `min_train_rows` or few folds gives noisy
+mean/std. The module does not run the simulator and does not read the test
+split, so a good CV score is evidence about stability, not a trading result.
+
 ## Trading evaluation
 
 A classifier is not a strategy until it pays the simulator's costs. The
@@ -215,6 +264,6 @@ log loss alone did not.
 
 - No out-of-sample trading result yet: the simulator/cost-stress evaluation is
   the next Phase 5 task.
-- No hyperparameter search (Phase 16 of the brief), no purged cross-validation,
-  no reliability curve, no LightGBM/XGBoost.
+- No hyperparameter search (Phase 16 of the brief): purged CV compares a fixed
+  spec, it does not tune it, and it never reads the test split.
 - No promotion. A model in `runs/ml/` is an experiment, not the live strategy.

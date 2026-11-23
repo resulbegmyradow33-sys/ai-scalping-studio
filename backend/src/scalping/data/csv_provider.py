@@ -16,9 +16,9 @@ find in their file.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from itertools import pairwise
 from math import isfinite
 from pathlib import Path
 from typing import Final
@@ -58,9 +58,10 @@ _DEFAULT_CANONICAL: Final[dict[str, str]] = {"datetime": "ts"}
 _REQUIRED: Final[frozenset[str]] = frozenset({"ts", "open", "high", "low", "close", "volume"})
 _QUOTES: Final[frozenset[str]] = frozenset({"bid_close", "ask_close"})
 
-#: A DST spring-forward skips one wall-clock hour, so consecutive bars jump
-#: 61 minutes instead of 1. Anything in this band is read as that gap.
-_DST_GAP: Final[tuple[timedelta, timedelta]] = (timedelta(minutes=45), timedelta(minutes=75))
+#: Rows parsed per in-memory chunk. Parsing a multi-GB export as one string and
+#: one ``_Record`` list costs several times the final frame; the chunk bound
+#: keeps that overhead flat while the frame itself is still materialised.
+DEFAULT_CHUNK_ROWS: Final[int] = 100_000
 
 
 class DataError(ValueError):
@@ -165,16 +166,48 @@ class CsvProvider(DataProvider):
         symbol: str,
         start: datetime | None = None,
         end: datetime | None = None,
+        *,
+        chunk_rows: int = DEFAULT_CHUNK_ROWS,
     ) -> pl.DataFrame:
+        """Parse the file in bounded row chunks and return one canonical frame.
+
+        The broker offset is read from ``tz_offset_hours`` when given; otherwise
+        the documented ``+3`` default is used. The old DST-gap scan only ever
+        logged its finding — both branches returned the same default — so
+        skipping a second full-file pass changes no output.
+        """
         if not symbol:
             raise ValueError("symbol must be non-empty")
-        records = self._parse_records()
-        if not records:
+        if chunk_rows < 1:
+            raise ValueError(f"chunk_rows must be >= 1, got {chunk_rows!r}")
+        offset = (
+            int(self.tz_offset_hours)
+            if self.tz_offset_hours is not None
+            else DEFAULT_BROKER_OFFSET_HOURS
+        )
+        seen: dict[datetime, int] = {}
+        frames: list[pl.DataFrame] = []
+        buffer: list[_Record] = []
+        for record in self._iter_records(self._iter_lines()):
+            buffer.append(record)
+            if len(buffer) >= chunk_rows:
+                frames.append(self._build_frame(buffer, offset, seen))
+                buffer = []
+        if buffer:
+            frames.append(self._build_frame(buffer, offset, seen))
+        if not frames:
             return _empty()
+        if self.tz_offset_hours is None:
+            # Logged only after a successful parse: a missing/undecodable file
+            # must leave stderr to the CLI's single JSON error line.
+            # No file path in the message: CodeQL flags user-controlled paths in
+            # logs (log injection), and the CLI already names the file on error.
+            logger.warning(
+                "csv: no explicit --tz-offset; assuming broker offset %+d h",
+                DEFAULT_BROKER_OFFSET_HOURS,
+            )
 
-        offset = self._resolve_offset(records)
-        frame = self._build_frame(records, offset)
-
+        frame = pl.concat(frames)
         start, end = _as_utc(start), _as_utc(end)
         if start is not None and end is not None and start > end:
             return _empty()
@@ -205,15 +238,21 @@ class CsvProvider(DataProvider):
             raise DataError(line, "bid_close and ask_close must be mapped together")
         return mapped
 
+    def _iter_lines(self) -> Iterator[tuple[int, str]]:
+        """Yield ``(line_number, text)`` without loading the whole file."""
+        with self.path.open("r", encoding="utf-8") as handle:
+            for line_number, raw in enumerate(handle, start=1):
+                if raw.strip():
+                    yield line_number, raw.rstrip("\n")
+
     def _parse_records(self) -> list[_Record]:
-        text = self.path.read_text(encoding="utf-8")
-        records: list[_Record] = []
+        return list(self._iter_records(self._iter_lines()))
+
+    def _iter_records(self, lines: Iterable[tuple[int, str]]) -> Iterator[_Record]:
         columns: tuple[str, ...] | None = None
         width = 0
         layout_line = 0
-        for line_number, raw in enumerate(text.splitlines(), start=1):
-            if not raw.strip():
-                continue
+        for line_number, raw in lines:
             fields = [field.strip() for field in raw.split(",")]
             if columns is None:
                 # The first data row fixes the layout; later rows must match.
@@ -233,34 +272,22 @@ class CsvProvider(DataProvider):
                     record.volume = _parse_volume(value, line_number)
                 else:
                     record.prices[column] = _parse_float(value, line_number, column)
-            records.append(record)
-        return records
+            yield record
 
     # --- timezone ------------------------------------------------------
-    def _resolve_offset(self, records: list[_Record]) -> int:
-        if self.tz_offset_hours is not None:
-            return int(self.tz_offset_hours)
-        stamps = [record.ts for record in records]
-        low, high = _DST_GAP
-        for earlier, later in pairwise(stamps):
-            if low <= later - earlier <= high:
-                logger.info(
-                    "csv: DST spring-forward gap in %s; using %+d h broker offset",
-                    self.path,
-                    DEFAULT_BROKER_OFFSET_HOURS,
-                )
-                return DEFAULT_BROKER_OFFSET_HOURS
-        logger.warning(
-            "csv: no DST gap in %s; assuming broker offset %+d h",
-            self.path,
-            DEFAULT_BROKER_OFFSET_HOURS,
-        )
-        return DEFAULT_BROKER_OFFSET_HOURS
+    def _to_utc(
+        self,
+        records: list[_Record],
+        offset: int,
+        seen: dict[datetime, int] | None = None,
+    ) -> list[datetime]:
+        """Convert local stamps to UTC and reject duplicate minutes.
 
-    def _to_utc(self, records: list[_Record], offset: int) -> list[datetime]:
-        """Convert local stamps to UTC and reject duplicate minutes."""
+        ``seen`` is shared across chunks, so a duplicate split over a chunk
+        boundary is still reported against the first line that introduced it.
+        """
         shift = timedelta(hours=offset)
-        seen: dict[datetime, int] = {}
+        seen = {} if seen is None else seen
         stamps: list[datetime] = []
         for record in records:
             stamp = (record.ts - shift).replace(tzinfo=UTC)
@@ -275,8 +302,13 @@ class CsvProvider(DataProvider):
         return stamps
 
     # --- frame ---------------------------------------------------------
-    def _build_frame(self, records: list[_Record], offset: int) -> pl.DataFrame:
-        stamps = self._to_utc(records, offset)
+    def _build_frame(
+        self,
+        records: list[_Record],
+        offset: int,
+        seen: dict[datetime, int] | None = None,
+    ) -> pl.DataFrame:
+        stamps = self._to_utc(records, offset, seen)
         quoted = "ask_close" in records[0].prices
         closes = [record.prices["close"] for record in records]
 
