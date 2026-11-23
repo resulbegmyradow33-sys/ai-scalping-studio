@@ -110,7 +110,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Transformer encoder.
 - [x] Causal temporal Transformer.
 - [x] PatchTST-style patching.
-- [ ] iTransformer-style variate attention.
+- [x] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
 - [x] Config guard (d_model/layers/heads/sequence/batch).
 - [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.

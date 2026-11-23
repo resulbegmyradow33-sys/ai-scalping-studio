@@ -8,8 +8,10 @@ import torch
 from scalping.nn import build_model
 from scalping.nn.transformers import (
     CausalTransformer,
+    ITransformerClassifier,
     PatchTSTClassifier,
     TransformerConfig,
+    build_itransformer,
     build_patchtst,
 )
 
@@ -188,6 +190,48 @@ def test_patchtst_guard_rails() -> None:
 
 def test_patchtst_stays_small() -> None:
     model = build_patchtst(
+        n_features=59, window=60, n_classes=3, hidden=32, dropout=0.1
+    )
+    assert sum(value.numel() for value in model.parameters()) < 2_000_000
+
+
+def test_itransformer_uses_one_token_per_feature() -> None:
+    model = build_model(
+        "itransformer",
+        n_features=N_FEATURES,
+        window=WINDOW,
+        n_classes=N_CLASSES,
+        hidden=8,
+    ).eval()
+    assert isinstance(model, ITransformerClassifier)
+    assert model.n_tokens == N_FEATURES
+
+    with torch.no_grad():
+        logits = model(tensor())
+        sequence = model.forward_sequence(tensor())
+    assert logits.shape == (3, N_CLASSES)
+    assert sequence.shape == (3, N_FEATURES, 8)
+    assert torch.isfinite(logits).all()
+
+
+def test_itransformer_guard_rails() -> None:
+    with pytest.raises(ValueError, match="max_sequence"):
+        build_itransformer(
+            n_features=10,
+            window=8,
+            n_classes=2,
+            hidden=8,
+            config=TransformerConfig(max_sequence=8),
+        )
+    model = build_itransformer(
+        n_features=N_FEATURES, window=WINDOW, n_classes=2, hidden=8
+    )
+    with pytest.raises(ValueError, match="fixed window"):
+        model(tensor(12))
+
+
+def test_itransformer_stays_small() -> None:
+    model = build_itransformer(
         n_features=59, window=60, n_classes=3, hidden=32, dropout=0.1
     )
     assert sum(value.numel() for value in model.parameters()) < 2_000_000

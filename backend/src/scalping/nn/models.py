@@ -41,6 +41,7 @@ ModelName = Literal[
     "transformer",
     "causal_transformer",
     "patchtst",
+    "itransformer",
 ]
 
 MODEL_NAMES: Final[tuple[ModelName, ...]] = (
@@ -57,6 +58,7 @@ MODEL_NAMES: Final[tuple[ModelName, ...]] = (
     "transformer",
     "causal_transformer",
     "patchtst",
+    "itransformer",
 )
 
 
@@ -345,6 +347,16 @@ def build_model(
         from scalping.nn.transformers import build_patchtst
 
         return build_patchtst(
+            n_features=spec.n_features,
+            window=spec.window,
+            n_classes=spec.n_classes,
+            hidden=spec.hidden,
+            dropout=spec.dropout,
+        )
+    if name == "itransformer":
+        from scalping.nn.transformers import build_itransformer
+
+        return build_itransformer(
             n_features=spec.n_features,
             window=spec.window,
             n_classes=spec.n_classes,

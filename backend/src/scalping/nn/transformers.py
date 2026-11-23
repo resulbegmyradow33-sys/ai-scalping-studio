@@ -24,6 +24,7 @@ from torch import Tensor, nn
 
 __all__ = [
     "CausalTransformer",
+    "ITransformerClassifier",
     "PatchTSTClassifier",
     "TransformerClassifier",
     "TransformerConfig",
@@ -264,5 +265,81 @@ def build_patchtst(
         config=TransformerConfig() if config is None else config,
         patch_len=patch_len,
         stride=stride,
+    )
+
+class ITransformerClassifier(nn.Module):
+    """iTransformer-style variate attention: each feature is one token.
+
+    The input ``(batch, window, features)`` is transposed so every feature's
+    full window becomes a token embedding. Attention therefore models
+    cross-feature structure instead of time steps. There is no temporal
+    causality claim here: the window already ends at the prediction bar, and
+    the model deliberately mixes features.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        window: int,
+        n_classes: int,
+        hidden: int,
+        dropout: float,
+        config: TransformerConfig,
+    ) -> None:
+        super().__init__()
+        config.check(hidden=hidden, window=n_features)
+        self.n_features = n_features
+        self.window = window
+        self.n_tokens = n_features
+        self.embed = nn.Linear(window, hidden)
+        self.position = nn.Parameter(torch.zeros(1, n_features, hidden))
+        nn.init.normal_(self.position, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=config.n_heads,
+            dim_feedforward=hidden * config.ff_mult,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=config.n_layers, enable_nested_tensor=False
+        )
+        self.norm = nn.LayerNorm(hidden)
+        self.head = nn.Linear(hidden, n_classes)
+
+    def forward_sequence(self, x: Tensor) -> Tensor:
+        if x.ndim != 3 or x.shape[2] != self.n_features:
+            raise ValueError(
+                f"expected (batch, window, {self.n_features}), got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.window:
+            raise ValueError(f"expected a fixed window of {self.window}, got {x.shape[1]}")
+        # (batch, features, window) -> one token per feature
+        tokens = self.embed(x.transpose(1, 2)) + self.position
+        return self.norm(self.encoder(tokens))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.head(self.forward_sequence(x).mean(dim=1))
+
+
+def build_itransformer(
+    *,
+    n_features: int,
+    window: int,
+    n_classes: int,
+    hidden: int,
+    dropout: float = 0.1,
+    config: TransformerConfig | None = None,
+) -> nn.Module:
+    return ITransformerClassifier(
+        n_features=n_features,
+        window=window,
+        n_classes=n_classes,
+        hidden=hidden,
+        dropout=dropout,
+        config=TransformerConfig() if config is None else config,
     )
 

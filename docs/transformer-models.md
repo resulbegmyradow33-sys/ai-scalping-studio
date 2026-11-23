@@ -16,6 +16,7 @@ more than a large one that swaps.
 | `transformer` | bidirectional over the window | mean over steps | offline classification; the window ends at the prediction bar |
 | `causal_transformer` | upper-triangular mask | last token | streaming-safe representation; step `t` never reads `t + 1` |
 | `patchtst` | bidirectional over patches | mean over patches | PatchTST-style patching; attention sees a few tokens instead of every bar |
+| `itransformer` | bidirectional over variates | mean over variates | iTransformer-style; one token per feature, modelling cross-feature structure |
 
 Both prepend a learned positional embedding, use pre-norm encoder layers with
 GELU feed-forward blocks, and output logits. `forward_sequence` exposes the
@@ -60,6 +61,21 @@ uv run python -m scalping.cli nn train ... --model patchtst --window 60 --hidden
 With `window=60`, the default 8-bar patches give 7 tokens, which keeps the
 encoder tiny on the M2.
 
+### iTransformer-style variate attention
+
+`itransformer` transposes the input so every **feature** becomes one token: the
+token embedding is a linear projection of that feature's whole window. Attention
+then mixes features rather than bars. The model is deliberately **not** causal:
+the window already ends at the prediction bar, and the point of this variant is
+cross-feature structure.
+
+`max_sequence` caps the number of variate tokens (`n_features`), and the window
+is still fixed and checked on every call.
+
+```bash
+uv run python -m scalping.cli nn train ... --model itransformer --window 60 --hidden 32
+```
+
 ## 3. Causality
 
 `tests/test_transformers.py` mutates the input from step 10:
@@ -93,7 +109,6 @@ uv run python -m scalping.cli nn evaluate \
 Implemented: encoder, causal temporal encoder, config guard, causality tests,
 parameter-count smoke test, trainer/CLI/evaluator integration.
 
-Open in Phase 7: iTransformer-style variate attention, an optional TFT, and a
-measured benchmark table against GRU/TCN (latency and peak memory, not just
-parameters). No profitability claim is made from
+Open in Phase 7: an optional TFT and a measured benchmark table against
+GRU/TCN (latency and peak memory, not just parameters). No profitability claim is made from
 prediction accuracy; the simulator and cost stress remain the gate.

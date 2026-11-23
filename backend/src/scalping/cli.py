@@ -83,6 +83,7 @@ _NN_MODELS: Final[tuple[str, ...]] = (
     "transformer",
     "causal_transformer",
     "patchtst",
+    "itransformer",
 )
 
 #: Bars needed before the simulator has its first decision bar: the feature
