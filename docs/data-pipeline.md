@@ -253,6 +253,20 @@ uv run python -m scalping.cli data csv \
   --path ../data-real-csv/XAUUSD_M1.csv --symbol XAUUSD --root ../data-real-store
 ```
 
+The HTTP endpoint takes a **file name**, not a path. Copy the export into
+`<data-root>/imports/` and name it in the body:
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/data/download' \
+  -H 'Content-Type: application/json' \
+  -d '{"provider":"csv","symbol":"XAUUSD","path":"XAUUSD_M1.csv",
+       "start":"2024-10-01T00:00:00Z","end":"2024-10-09T00:00:00Z","tz_offset":3}'
+```
+
+The server lists that directory and opens the matching entry, so a name with a
+separator, an absolute path, `..`, or a symlink is a 422 and nothing outside
+`imports/` can be read. The CLI keeps unrestricted paths.
+
 The CSV provider parses the file in bounded chunks (100,000 rows) instead of
 reading it into one string and one record list. A multi-GB export therefore
 costs the frame plus one chunk, not several copies of the raw text. Source line
@@ -322,7 +336,7 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 | `GET /api/timeframes` | supported bar sizes and their resample rules |
 | `GET /api/data/status?symbol&timeframe` | rows, span, providers, provenance |
 | `GET /api/data/validate?symbol&timeframe` | structural report |
-| `POST /api/data/download` | synthetic/CSV/Dukascopy import |
+| `POST /api/data/download` | synthetic/CSV/Dukascopy import; CSV names a file in `<data_root>/imports` |
 
 ## Current limits
 

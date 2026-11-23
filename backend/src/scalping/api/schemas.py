@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, StringConstraints, model_validator
 from scalping.serialize import metrics_payload
 
 __all__ = [
+    "IMPORT_NAME_PATTERN",
     "SYMBOL_PATTERN",
     "BacktestRequest",
     "BacktestResponse",
@@ -29,6 +30,7 @@ __all__ = [
     "EvaluateResponse",
     "FoldSummary",
     "HealthResponse",
+    "ImportFileName",
     "OkResponse",
     "ProviderName",
     "RegimeCount",
@@ -76,6 +78,20 @@ SymbolId = Annotated[
     ),
 ]
 
+#: An HTTP CSV import names a file, never a path: one segment, no separators,
+#: no leading dot and no drive letter. The server looks the name up in
+#: ``<data_root>/imports`` and never joins it to anything.
+IMPORT_NAME_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+ImportFileName = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=255,
+        pattern=IMPORT_NAME_PATTERN,
+    ),
+]
+
 
 def is_symbol_id(value: str) -> bool:
     """Whether ``value`` is a safe single-segment symbol id.
@@ -111,18 +127,28 @@ class DataStatusResponse(BaseModel):
 
 
 class DownloadRequest(BaseModel):
+    """One synchronous provider fetch.
+
+    With ``provider='csv'``, ``path`` is a bare file **name**, not a filesystem
+    path: the export must already sit directly in ``<data_root>/imports`` and
+    the request names it there. The server looks the name up in that directory,
+    so the opened path is never built from request data.
+    """
+
     provider: ProviderName
     symbol: SymbolId
     start: datetime
     end: datetime
     seed: int | None = None
-    path: str | None = None
+    path: ImportFileName | None = None
     tz_offset: int | None = None
 
     @model_validator(mode="after")
     def _csv_needs_a_path(self) -> DownloadRequest:
         if self.provider == "csv" and not self.path:
-            raise ValueError("path is required when provider is 'csv'")
+            raise ValueError(
+                "path (a file name in <data_root>/imports) is required when provider is 'csv'"
+            )
         return self
 
 

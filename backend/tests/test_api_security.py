@@ -62,49 +62,73 @@ def test_symbol_shape_is_enforced_for_query_parameters(tmp_path, symbol) -> None
     assert response.status_code == 422, response.text
 
 
-def test_csv_import_rejects_a_symlinked_directory_that_escapes(tmp_path) -> None:
-    """``data/link -> /tmp`` must not pass a lexical prefix check."""
+def test_csv_import_rejects_a_directory_symlink_name(tmp_path) -> None:
+    """A symlink to a directory is not a file entry, so the name is a 422."""
     root = tmp_path / "data"
-    root.mkdir()
+    imports = root / "imports"
+    imports.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "xauusd.csv").write_bytes(FIXTURE.read_bytes())
-    (root / "link").symlink_to(outside, target_is_directory=True)
+    (imports / "link").symlink_to(outside, target_is_directory=True)
 
     with TestClient(create_app(data_root=root)) as client:
         response = client.post(
             "/api/data/download",
-            json={**BODY, "provider": "csv", "path": "link/xauusd.csv", "tz_offset": 3},
+            json={**BODY, "provider": "csv", "path": "link", "tz_offset": 3},
         )
 
     assert response.status_code == 422, response.text
-    assert "data root" in response.json()["detail"]
 
 
 def test_csv_import_rejects_a_symlinked_file_that_escapes(tmp_path) -> None:
-    """A symlinked file inside the root is resolved too, not just its parent."""
+    """A symlink in ``imports`` pointing outside is skipped by the allowlist."""
     root = tmp_path / "data"
-    root.mkdir()
+    imports = root / "imports"
+    imports.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
     target = outside / "xauusd.csv"
     target.write_bytes(FIXTURE.read_bytes())
-    (root / "escape.csv").symlink_to(target)
+    (imports / "escape.csv").symlink_to(target)
 
     with TestClient(create_app(data_root=root)) as client:
         response = client.post(
             "/api/data/download",
-            json={**BODY, "provider": "csv", "path": str(root / "escape.csv"), "tz_offset": 3},
+            json={**BODY, "provider": "csv", "path": "escape.csv", "tz_offset": 3},
+        )
+
+    assert response.status_code == 422, response.text
+    assert "imports" in response.json()["detail"]
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["/etc/passwd", "../outside.csv", "sub/xauusd.csv", "..\\outside.csv", ".hidden"],
+)
+def test_csv_import_rejects_path_shaped_names(tmp_path, path) -> None:
+    """A separator, absolute path or dot name is a 422 before any lookup."""
+    root = tmp_path / "data"
+    imports = root / "imports"
+    imports.mkdir(parents=True)
+    (imports / "xauusd.csv").write_bytes(FIXTURE.read_bytes())
+    (tmp_path / "outside.csv").write_bytes(FIXTURE.read_bytes())
+
+    with TestClient(create_app(data_root=root)) as client:
+        response = client.post(
+            "/api/data/download",
+            json={**BODY, "provider": "csv", "path": path, "tz_offset": 3},
         )
 
     assert response.status_code == 422, response.text
 
 
-def test_valid_symbols_and_in_root_csv_paths_still_work(tmp_path) -> None:
-    """The constraint admits registry symbols and dotted ids, and a relative path."""
+def test_valid_symbols_and_imported_files_still_work(tmp_path) -> None:
+    """The constraints admit registry symbols, dotted ids and a bare file name."""
     root = tmp_path / "data"
-    root.mkdir()
-    (root / "xauusd.csv").write_bytes(FIXTURE.read_bytes())
+    imports = root / "imports"
+    imports.mkdir(parents=True)
+    (imports / "xauusd.csv").write_bytes(FIXTURE.read_bytes())
 
     with TestClient(create_app(data_root=root)) as client:
         synthetic = client.post("/api/data/download", json=BODY)

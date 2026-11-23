@@ -21,7 +21,18 @@ def test_symbol_registry_lists_all_required_instruments() -> None:
     with TestClient(create_app()) as client:
         body = client.get("/api/symbols").json()
     names = {row["symbol"] for row in body}
-    assert {"XAUUSD", "XAGUSD", "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "NAS100", "US30", "USOIL", "BTCUSD"} <= names
+    assert {
+        "XAUUSD",
+        "XAGUSD",
+        "EURUSD",
+        "GBPUSD",
+        "USDJPY",
+        "AUDUSD",
+        "NAS100",
+        "US30",
+        "USOIL",
+        "BTCUSD",
+    } <= names
     gold = next(row for row in body if row["symbol"] == "XAUUSD")
     assert gold["contract_size"] == 100.0
     assert gold["price_precision"] == 2
@@ -68,25 +79,32 @@ def test_ids_are_validated_before_touching_the_filesystem(tmp_path) -> None:
             assert bad_timeframe.status_code == 422, path
 
 
-def test_csv_import_is_confined_to_the_data_root(tmp_path) -> None:
+def test_csv_import_is_confined_to_the_imports_directory(tmp_path) -> None:
+    """The request names a file; it never names a path the server can open."""
     fixture = Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv"
-    imported = tmp_path / "xauusd.csv"
-    imported.write_bytes(fixture.read_bytes())
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "xauusd.csv").write_bytes(fixture.read_bytes())
 
     with TestClient(create_app(data_root=tmp_path)) as client:
         accepted = client.post(
             "/api/data/download",
-            json={**BODY, "provider": "csv", "path": str(imported), "tz_offset": 3},
+            json={**BODY, "provider": "csv", "path": "xauusd.csv", "tz_offset": 3},
         )
-        escaped = client.post(
-            "/api/data/download", json={**BODY, "provider": "csv", "path": "/etc/passwd"}
+        absolute = client.post(
+            "/api/data/download",
+            json={**BODY, "provider": "csv", "path": str(imports / "xauusd.csv")},
         )
         traversal = client.post(
-            "/api/data/download", json={**BODY, "provider": "csv", "path": "../outside.csv"}
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "../xauusd.csv"}
+        )
+        missing = client.post(
+            "/api/data/download", json={**BODY, "provider": "csv", "path": "absent.csv"}
         )
 
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["rows"] > 0
-    assert escaped.status_code == 422
+    assert absolute.status_code == 422
     assert traversal.status_code == 422
-    assert "data root" in escaped.json()["detail"]
+    assert missing.status_code == 422
+    assert "imports" in missing.json()["detail"]
