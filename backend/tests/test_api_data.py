@@ -54,3 +54,13 @@ def test_validate_reports_a_clean_synthetic_slice(tmp_path) -> None:
     assert report["rows"] > 0
     assert report["ok"] is True
     assert report["first_ts"] is not None
+
+
+def test_ids_are_validated_before_touching_the_filesystem(tmp_path) -> None:
+    """Query parameters become path segments, so traversal is a 422, not a read."""
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        for path in ("/api/data/status", "/api/data/validate", "/api/regime"):
+            bad_symbol = client.get(path, params={"symbol": "../../etc", "timeframe": "M1"})
+            assert bad_symbol.status_code == 422, path
+            bad_timeframe = client.get(path, params={"symbol": "XAUUSD", "timeframe": "../x"})
+            assert bad_timeframe.status_code == 422, path

@@ -110,7 +110,28 @@ def build_provenance(
     )
 
 
+def _segment(value: str, what: str) -> str:
+    """One path segment only: no separators, no dot-only names."""
+    if not value or value in {".", ".."} or "/" in value or "\\" in value:
+        raise ValueError(f"{what} must be a single path segment, got {value!r}")
+    return value
+
+
 def provenance_path(root: str | Path, symbol: str, timeframe: str) -> Path:
+    """Sidecar path for one slice, refused when it would leave ``root``.
+
+    ``symbol`` and ``timeframe`` arrive from HTTP query parameters and end up as
+    path segments, so both are checked as single segments and the resolved path
+    is compared with the resolved root before anything reads or writes it.
+    """
+    base = Path(root).resolve()
+    target = (
+        base / "_meta" / _segment(symbol, "symbol") / f"{_segment(timeframe, 'timeframe')}.json"
+    ).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError(
+            f"provenance path escapes {base}: symbol={symbol!r} timeframe={timeframe!r}"
+        )
     return Path(root) / "_meta" / symbol / f"{timeframe}.json"
 
 

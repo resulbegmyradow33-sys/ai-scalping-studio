@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import polars as pl
 from anyio import ClosedResourceError
@@ -122,8 +123,22 @@ def timeframe_registry() -> list[TimeframeSpec]:
     return [TimeframeSpec(timeframe=name, rule=rule) for name, rule in TIMEFRAMES.items()]
 
 
+#: Symbol and timeframe values end up as filesystem path segments, so they are
+#: validated at the HTTP boundary before any store or provenance path is built.
+_SAFE_SYMBOL: Final[re.Pattern[str]] = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,31}")
+
+
+def _checked_ids(symbol: str, timeframe: str) -> None:
+    """Reject ids that could leave the data root; 422, never a silent rewrite."""
+    if ".." in symbol or not _SAFE_SYMBOL.fullmatch(symbol):
+        raise HTTPException(status_code=422, detail=f"invalid symbol {symbol!r}")
+    if timeframe not in TIMEFRAMES:
+        raise HTTPException(status_code=422, detail=f"unknown timeframe {timeframe!r}")
+
+
 @router.get("/api/data/status", response_model=DataStatusResponse)
 def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> DataStatusResponse:
+    _checked_ids(symbol, timeframe)
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     provenance = load_provenance(store.root, symbol, timeframe)
@@ -155,6 +170,7 @@ def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> Da
 @router.get("/api/data/validate")
 def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> dict[str, Any]:
     """Structural validation report; explicit because it reads the full slice."""
+    _checked_ids(symbol, timeframe)
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
@@ -174,6 +190,7 @@ def market_regime(
     label, matching ``/api/data/status``. These labels describe the past path
     and are not a price forecast.
     """
+    _checked_ids(symbol, timeframe)
     frame = request.app.state.store.read(symbol, timeframe)
     labels = classify(frame)
     if labels.is_empty():
@@ -224,7 +241,6 @@ def market_regime(
             for row in labels.tail(limit).to_dicts()
         ],
     )
-
 
 
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:
@@ -365,7 +381,9 @@ async def backtest(body: BacktestRequest, request: Request) -> BacktestResponse:
 async def evaluate(body: EvaluateRequest, request: Request) -> EvaluateResponse:
     """Walk-forward and cost-stress a finished run on out-of-sample bars."""
     try:
-        result = await asyncio.to_thread(_trains(request).evaluate, body.run_id, body.symbol, body.folds)
+        result = await asyncio.to_thread(
+            _trains(request).evaluate, body.run_id, body.symbol, body.folds
+        )
     except UnknownRunError as exc:
         raise HTTPException(status_code=404, detail=f"unknown run: {body.run_id}") from exc
     except TrainError as exc:
