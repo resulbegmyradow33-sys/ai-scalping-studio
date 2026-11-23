@@ -125,13 +125,55 @@ Shared choices:
 Determinism, shapes, the input contract, the receptive-field formula and the
 TCN prefix test live in `backend/tests/test_nn_models.py`.
 
-## 6. Limits and next slices
+## 6. Trainer
+
+`scalping.nn.train_classifier(data, config, checkpoint=..., control=..., resume_from=...)`
+fits one model and writes a resumable checkpoint.
+
+| Setting | Default | Notes |
+|---|---|---|
+| `model` | `gru` | any name from the model zoo |
+| `epochs` | 20 | hard cap |
+| `batch_size` | 64 | seeded permutation each epoch |
+| `learning_rate` | 1e-3 | AdamW |
+| `weight_decay` | 1e-4 | |
+| `grad_clip` | 1.0 | `clip_grad_norm_` before every step |
+| `patience` | 5 | early stop when validation loss stalls |
+| `min_delta` | 1e-4 | minimum improvement counted |
+| `hidden` / `dropout` | 64 / 0.1 | model width and regularisation |
+| `device` | `auto` | MPS when available, else CPU |
+| `checkpoint_every` | 1 | epochs between atomic saves |
+| `max_minutes` | unset | optional wall-clock budget |
+
+Resource and safety rules:
+
+- **one job per process** — a non-blocking `JobSlot` rejects a second training
+  call with `TrainError`, so two runs cannot fight over RAM or the MPS device;
+- **explicit MPS** — `device="auto"` prefers MPS and falls back to CPU;
+  `device="mps"` on a machine without it is an error, never a silent CPU run;
+- **cancellation** — call `JobControl.cancel()`; the flag is checked every batch
+  and the last complete checkpoint remains loadable. A cancelled run reports
+  `stopped="cancelled"`;
+- **atomic checkpoints** — `torch.save` goes to a temp file and is moved onto
+  the target, so an interrupt cannot leave a truncated `.pt`;
+- **no invented classes** — validation labels absent from training are an
+  error instead of an always-wrong class the model can never predict.
+
+Checkpoint payload: model name, config, classes, `n_features`, `window`,
+`dataset_id`, history, best epoch/loss/accuracy, `model_state` (last epoch),
+`best_state` (best validation epoch) and the optimizer state. `resume_from`
+requires the same model name, feature count and window, then continues from the
+next epoch.
+
+The best weights are stored, but evaluation is the next slice: a trainer
+result is a validation-loss curve, not a trading result.
+
+## 7. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
   loader (Phase 14). Do not silently reduce `window` to make RAM fit — record
   the choice.
 - The dataset alone says nothing about profitability. Model scores are
   prediction metrics; the simulator + cost stress decides.
-- Next slices: trainer (MPS with CPU fallback, early stopping, checkpoints,
-  cancellation, one-job policy) and the shared evaluator against Phase 5 and
-  the rule.
+- Next slice: the shared evaluator against Phase 5 and the rule (simulator +
+  cost stress), plus the CLI/API wiring for training runs.

@@ -16,15 +16,33 @@ from scalping.nn.models import (
     build_model,
     model_names,
 )
+from scalping.nn.train import (
+    JobControl,
+    JobSlot,
+    TrainConfig,
+    TrainError,
+    TrainResult,
+    load_checkpoint,
+    select_device,
+    train_classifier,
+)
 
 __all__ = [
     "MODEL_NAMES",
     "CausalTCN",
+    "JobControl",
+    "JobSlot",
     "ModelSpec",
+    "TrainConfig",
+    "TrainError",
+    "TrainResult",
     "WindowConfig",
     "WindowError",
     "WindowedDataset",
     "build_model",
     "build_windowed_dataset",
+    "load_checkpoint",
     "model_names",
+    "select_device",
+    "train_classifier",
 ]
