@@ -6,7 +6,14 @@ import pytest
 import torch
 
 from scalping.nn import build_model
-from scalping.nn.transformers import CausalTransformer, TransformerConfig
+from scalping.nn.transformers import (
+    CausalTransformer,
+    ITransformerClassifier,
+    PatchTSTClassifier,
+    TransformerConfig,
+    build_itransformer,
+    build_patchtst,
+)
 
 N_FEATURES = 5
 WINDOW = 24
@@ -109,3 +116,122 @@ def test_default_model_stays_small() -> None:
     parameters = sum(value.numel() for value in model.parameters())
 
     assert parameters < 2_000_000
+
+
+def test_patchtst_patch_math_and_output() -> None:
+    model = build_model(
+        "patchtst",
+        n_features=N_FEATURES,
+        window=24,
+        n_classes=N_CLASSES,
+        hidden=8,
+    ).eval()
+    assert isinstance(model, PatchTSTClassifier)
+    assert (model.patch_len, model.stride, model.n_patches) == (8, 8, 3)
+
+    with torch.no_grad():
+        logits = model(tensor(24))
+    assert logits.shape == (3, N_CLASSES)
+    assert torch.isfinite(logits).all()
+
+    strided = build_patchtst(
+        n_features=N_FEATURES,
+        window=24,
+        n_classes=N_CLASSES,
+        hidden=8,
+        patch_len=8,
+        stride=4,
+    )
+    assert strided.n_patches == 5
+
+
+def test_patchtst_drops_a_trailing_partial_patch() -> None:
+    model = build_patchtst(
+        n_features=N_FEATURES,
+        window=25,
+        n_classes=N_CLASSES,
+        hidden=8,
+        patch_len=8,
+    ).eval()
+
+    assert model.n_patches == 3  # bars 24 is not a full patch and is not padded
+    with torch.no_grad():
+        assert model(tensor(25)).shape == (3, N_CLASSES)
+
+
+def test_patchtst_guard_rails() -> None:
+    with pytest.raises(ValueError, match="shorter than patch_len"):
+        build_patchtst(
+            n_features=N_FEATURES, window=4, n_classes=2, hidden=8, patch_len=8
+        )
+    with pytest.raises(ValueError, match="patch_len"):
+        build_patchtst(
+            n_features=N_FEATURES, window=8, n_classes=2, hidden=8, patch_len=0
+        )
+    with pytest.raises(ValueError, match="stride"):
+        build_patchtst(
+            n_features=N_FEATURES, window=8, n_classes=2, hidden=8, stride=0
+        )
+    with pytest.raises(ValueError, match="max_sequence"):
+        build_patchtst(
+            n_features=N_FEATURES,
+            window=100,
+            n_classes=2,
+            hidden=8,
+            patch_len=10,
+            config=TransformerConfig(max_sequence=8),
+        )
+    model = build_patchtst(
+        n_features=N_FEATURES, window=16, n_classes=2, hidden=8
+    )
+    with pytest.raises(ValueError, match="fixed window"):
+        model(tensor(24))
+
+
+def test_patchtst_stays_small() -> None:
+    model = build_patchtst(
+        n_features=59, window=60, n_classes=3, hidden=32, dropout=0.1
+    )
+    assert sum(value.numel() for value in model.parameters()) < 2_000_000
+
+
+def test_itransformer_uses_one_token_per_feature() -> None:
+    model = build_model(
+        "itransformer",
+        n_features=N_FEATURES,
+        window=WINDOW,
+        n_classes=N_CLASSES,
+        hidden=8,
+    ).eval()
+    assert isinstance(model, ITransformerClassifier)
+    assert model.n_tokens == N_FEATURES
+
+    with torch.no_grad():
+        logits = model(tensor())
+        sequence = model.forward_sequence(tensor())
+    assert logits.shape == (3, N_CLASSES)
+    assert sequence.shape == (3, N_FEATURES, 8)
+    assert torch.isfinite(logits).all()
+
+
+def test_itransformer_guard_rails() -> None:
+    with pytest.raises(ValueError, match="max_sequence"):
+        build_itransformer(
+            n_features=10,
+            window=8,
+            n_classes=2,
+            hidden=8,
+            config=TransformerConfig(max_sequence=8),
+        )
+    model = build_itransformer(
+        n_features=N_FEATURES, window=WINDOW, n_classes=2, hidden=8
+    )
+    with pytest.raises(ValueError, match="fixed window"):
+        model(tensor(12))
+
+
+def test_itransformer_stays_small() -> None:
+    model = build_itransformer(
+        n_features=59, window=60, n_classes=3, hidden=32, dropout=0.1
+    )
+    assert sum(value.numel() for value in model.parameters()) < 2_000_000
