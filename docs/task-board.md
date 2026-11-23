@@ -155,14 +155,15 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       paper runs ve drift tabloları yok.
 - [x] Dataset versioning and checksums (dataset_id + digest).
 - [x] Model versioning, champion pointer and rollback (scope'lu).
-- [ ] Candidate → champion gate (trades, OOS, cost stress, regime coverage).
-- [ ] Drift detection: features, predictions, calibration.
+- [ ] PARTIAL: gate var (trades, expectancy, PF, DD, ECE, cost stress, regime
+      coverage); champion metrikleriyle karşılaştırma yok.
+- [x] Drift detection: features (PSI/KS), predictions and calibration (ECE).
 - [ ] Configurable scheduler with pause/resume/cancel.
-- [ ] One heavy job/RAM budget enforcement.
+- [ ] PARTIAL: NN/ML job slot ve RAM guard var; PPO için global slot yok.
 - [ ] Failed training cannot stop paper replay.
 - [ ] Migrate nightly rule/RL jobs to the scheduler.
-- [ ] `docs/local-learning-engine.md`.
-- [ ] Tests: promote, reject, rollback, drift, cancel.
+- [x] `docs/local-learning-engine.md`.
+- [x] Tests: promote, reject, rollback, drift, cancel.
 
 ## Phase 11 — Risk and backtesting
 
@@ -253,43 +254,40 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 16 — Autonomous strategy discovery (CORE OBJECTIVE)
 
-- [ ] Confirm existing strategies are optional baselines only, not required
-      owner-supplied rules or a fixed search menu.
+- [x] Confirm existing strategies are optional baselines only, not required
+      owner-supplied rules or a fixed search menu (spec §28).
 - [ ] Define a safe, versioned strategy DSL/AST; generated strategies cannot
       execute arbitrary Python or shell code.
-- [ ] Build candidate generation from reusable causal primitives, conditions,
-      lookback windows, entry/exit/holding logic and NO TRADE.
-- [ ] Implement bounded evolutionary/genetic or grammar-based search; add
-      Bayesian/random search only where justified.
-- [ ] Add candidate mutation, crossover, deduplication, complexity limits,
-      reproducible seeds, experiment budgets and cancellation.
+- [ ] PARTIAL: factory/mutation/crossover protokolleri ve arşiv var; DSL
+      primitifleri ayrı dilimde.
+- [ ] PARTIAL: bütçeli evolve döngüsü var (#95); gerçek DSL/evaluator bağlı değil.
+- [ ] PARTIAL: dedup, bütçe, seed, complexity cap ve stop var; DSL mutasyonu ayrı dilimde.
 - [ ] Connect candidate evaluation to realistic simulator costs, risk controls,
       walk-forward validation and untouched OOS data.
-- [ ] Track trial count and control data-snooping/multiple-testing risk.
+- [ ] PARTIAL: trial sayısı kalıcı kaydediliyor; düzeltme/ceza politikası yok.
 - [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
-- [ ] Store full candidate lineage, dataset/code/config hashes and rejection
-      reasons in the registry.
+- [x] Store full candidate lineage, dataset/code/config hashes and rejection
+      reasons (discovery archive).
 - [ ] Compare candidates with simple baselines and champion; allow no candidate
       to win and allow NO TRADE.
-- [ ] Tests: no look-ahead, deterministic replay, DSL safety, overfit rejection,
-      candidate lineage, no-trade selection and cost sensitivity.
+- [ ] PARTIAL: determinizm, lineage ve bütçe test edildi; DSL safety/no-trade/
+      cost sensitivity DSL ve evaluator dilimlerine bağlı.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
-- [ ] Local import for PDF, TXT, Markdown, HTML and DOCX where supported;
-      CSV/JSON/Parquet remain market-data paths.
-- [ ] Preserve originals, checksums, source metadata, parser versions and
+- [ ] PARTIAL: TXT/MD/HTML/DOCX var; PDF kasten desteklenmiyor (opsiyonel parser).
+- [x] Preserve originals, checksums, source metadata, parser versions and
       page/section references.
-- [ ] Extract text/tables and report OCR/scanned-document limitations.
-- [ ] Build a local searchable document index with source citations.
+- [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı ve OCR yok.
+- [x] Build a local searchable document index with source citations (FTS5/LIKE).
 - [ ] Classify claims, concepts, examples, opinions and empirical observations.
-- [ ] Convert document ideas into structured, falsifiable research hypotheses.
-- [ ] Link each hypothesis to source passages and experiment outcomes.
+- [ ] PARTIAL: hypothesis kaydı ve kaynak bağı var; otomatik çıkarım yok.
+- [x] Link each hypothesis to source passages and experiment outcomes.
 - [ ] Route hypotheses to strategy discovery; never treat prose as proven alpha.
 - [ ] Ingest completed backtests, paper logs and broker exports as feedback.
-- [ ] Tests: parser errors, provenance, source traceability, duplicate imports,
+- [x] Tests: parser errors, provenance, source traceability, duplicate imports,
       hypothesis schema and no direct document-to-order path.
-- [ ] Explicit capability note: no mandatory LLM; document extraction is not
+- [x] Explicit capability note: no mandatory LLM; document extraction is not
       equivalent to training a language model or human-level book comprehension.
 
 ## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation

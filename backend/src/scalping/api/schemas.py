@@ -17,6 +17,7 @@ from scalping.serialize import metrics_payload
 
 __all__ = [
     "IMPORT_NAME_PATTERN",
+    "ML_RUN_ID_PATTERN",
     "PAPER_SESSION_PATTERN",
     "SYMBOL_PATTERN",
     "BacktestRequest",
@@ -32,6 +33,16 @@ __all__ = [
     "FoldSummary",
     "HealthResponse",
     "ImportFileName",
+    "MLCalibration",
+    "MLControlRequest",
+    "MLEvaluateRequest",
+    "MLEvaluateResponse",
+    "MLRunDetail",
+    "MLRunId",
+    "MLRunSummary",
+    "MLTimeframe",
+    "MLTrainRequest",
+    "MLTrainResponse",
     "OkResponse",
     "PaperEquityPage",
     "PaperEquityPoint",
@@ -64,6 +75,7 @@ __all__ = [
     "TrainRequest",
     "TrainResponse",
     "TrainingPoint",
+    "is_ml_run_id",
     "is_symbol_id",
     "metrics_payload",
 ]
@@ -124,6 +136,30 @@ PaperSessionId = Annotated[
 
 #: Bar sizes a paper session may be opened on; mirrors ``data/registry.py``.
 PaperTimeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
+#: An ML run id is an opaque token, never a path: alphanumeric only, bounded.
+#: The runner resolves it under ``runs/ml`` and the routes reject anything else
+#: before a filesystem lookup, so a separator or ``..`` cannot be expressed.
+ML_RUN_ID_PATTERN: Final[str] = r"^[A-Za-z0-9]{1,64}$"
+
+_ML_RUN_ID_RE: Final[re.Pattern[str]] = re.compile(ML_RUN_ID_PATTERN)
+
+MLRunId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=64,
+        pattern=ML_RUN_ID_PATTERN,
+    ),
+]
+
+#: Bar sizes an ML run may be trained on; mirrors ``data/registry.py``.
+MLTimeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
+
+def is_ml_run_id(value: str) -> bool:
+    """Whether ``value`` is a safe, opaque run token (no path component)."""
+    return len(value) <= 64 and _ML_RUN_ID_RE.fullmatch(value) is not None
 
 
 def is_symbol_id(value: str) -> bool:
@@ -364,6 +400,131 @@ class EvaluateResponse(BaseModel):
     overfit_warning: bool
     stress: list[StressSummary]
     method: str = "walk_forward"
+
+
+# --- classical ML API --------------------------------------------------------
+#
+# A training request names a model and a stored slice; it never names a path or
+# a run directory. The server generates the opaque run id. Metrics stay as
+# dicts: the ML report contains nested precision/recall/confusion/calibration
+# tables whose shape is owned by :mod:`scalping.ml.train`, not by this model.
+
+
+class MLTrainRequest(BaseModel):
+    """One classical classifier run and the trading evaluation it includes.
+
+    ``groups=None`` means every registered feature group. ``stress`` is a list
+    of cost multipliers for the optional stress table; ``regime`` adds the
+    per-regime breakdown of the base evaluation.
+    """
+
+    symbol: SymbolId
+    timeframe: MLTimeframe = "H1"
+    model: str = Field(default="logistic", min_length=1, max_length=32)
+    horizon: int = Field(default=5, ge=1, le=1000)
+    groups: list[str] | None = Field(default=None, max_length=16)
+    train_fraction: float = Field(default=0.70, gt=0.0, lt=1.0)
+    validation_fraction: float = Field(default=0.15, ge=0.0, lt=1.0)
+    purge_bars: int = Field(default=5, ge=0, le=100_000)
+    embargo_bars: int = Field(default=5, ge=0, le=100_000)
+    seed: int = Field(default=0, ge=0)
+    evaluate_test: bool = False
+    include_flat: bool = False
+    split: Literal["train", "validation", "test"] = "validation"
+    threshold: float = Field(default=0.55, ge=0.5, lt=1.0)
+    exit_threshold: float = Field(default=0.55, ge=0.5, le=1.0)
+    window: int = Field(default=60, ge=1, le=600)
+    stress: list[Annotated[float, Field(gt=0.0, le=10.0)]] = Field(
+        default_factory=list, max_length=5
+    )
+    regime: bool = True
+
+    @model_validator(mode="after")
+    def _fractions_fit(self) -> MLTrainRequest:
+        if self.train_fraction + self.validation_fraction >= 1.0:
+            raise ValueError("train_fraction + validation_fraction must be < 1")
+        return self
+
+
+class MLTrainResponse(BaseModel):
+    run_id: str
+
+
+class MLRunSummary(BaseModel):
+    """One row of ``runs/ml``, as a run list shows it."""
+
+    run_id: str
+    status: str
+    created_at: str | None = None
+    model: str | None = None
+    symbol: str | None = None
+    timeframe: str | None = None
+    dataset_id: str | None = None
+
+
+class MLCalibration(BaseModel):
+    """Flattened calibration of the validation split."""
+
+    brier: float | None = None
+    log_loss: float | None = None
+    ece: float | None = None
+    mce: float | None = None
+
+
+class MLRunDetail(BaseModel):
+    """Everything the panel reads about one run; predictions, not trading."""
+
+    run_id: str
+    status: str
+    created_at: str | None = None
+    finished_at: str | None = None
+    model: str | None = None
+    symbol: str | None = None
+    timeframe: str | None = None
+    dataset_id: str | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    spec: dict[str, Any] = Field(default_factory=dict)
+    columns: list[str] = Field(default_factory=list)
+    validation: dict[str, Any] | None = None
+    test: dict[str, Any] | None = None
+    baseline: dict[str, Any] | None = None
+    split_counts: dict[str, int] = Field(default_factory=dict)
+    calibration: MLCalibration | None = None
+    error: str | None = None
+
+
+class MLControlRequest(BaseModel):
+    action: Literal["cancel"]
+
+
+class MLEvaluateRequest(BaseModel):
+    """Trade a finished run's artefact on one split; no symbol or path field."""
+
+    run_id: MLRunId
+    split: Literal["train", "validation", "test"] = "validation"
+    threshold: float = Field(default=0.55, ge=0.5, lt=1.0)
+    exit_threshold: float = Field(default=0.55, ge=0.5, le=1.0)
+    window: int = Field(default=60, ge=1, le=600)
+    stress: list[Annotated[float, Field(gt=0.0, le=10.0)]] = Field(
+        default_factory=list, max_length=5
+    )
+    regime: bool = True
+
+
+class MLEvaluateResponse(BaseModel):
+    """Headline, hold baseline, cost stress and the descriptive regime table."""
+
+    run_id: str
+    symbol: str
+    timeframe: str
+    dataset_id: str
+    split: str
+    threshold: float
+    exit_threshold: float
+    metrics: dict[str, Any]
+    hold: dict[str, Any]
+    stress: dict[str, dict[str, Any]]
+    regime: dict[str, Any]
 
 
 class CalibrateRequest(BaseModel):
