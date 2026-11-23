@@ -261,8 +261,9 @@ after it, and between evaluation stages, and only then writes the terminal
 
 Limits: the API refuses a stored slice above 400 000 bars or a selection above
 128 feature columns instead of materialising an unbounded float32 matrix. There
-are no dataset or feature caches in this slice; a run holds one feature frame
-while it works.
+is no dataset cache; a run holds one feature frame while it works, but the
+**feature matrix** is reused from `<runs_root>/.feature-cache` when the bars,
+costs and registry match. See [feature-cache.md](feature-cache.md).
 
 ### What the API does not decide
 

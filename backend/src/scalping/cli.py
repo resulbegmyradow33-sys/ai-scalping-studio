@@ -49,7 +49,8 @@ from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.env.simulator import WINDOW
-from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame, build_features
+from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
+from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
 from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
@@ -66,6 +67,9 @@ DEFAULT_ROOT: Final[Path] = Path("data")
 
 #: Symbol used when the caller does not name one.
 DEFAULT_SYMBOL: Final[str] = "XAUUSD"
+
+#: Help text of the repeated ``--no-cache`` flag (dataset, ML and backtest paths).
+_NO_CACHE_HELP: Final[str] = "rebuild the feature matrix instead of reusing <root>/.feature-cache"
 
 _POLICY_HOLD: Final[str] = "hold"
 _POLICY_RULE: Final[str] = "rule"
@@ -390,13 +394,33 @@ def _cmd_nn_evaluate(args: argparse.Namespace) -> None:
     )
 
 
+def _feature_cache(args: argparse.Namespace) -> FeatureCache | None:
+    """The disk feature cache for this command, or ``None`` with ``--no-cache``."""
+    if getattr(args, "no_cache", False):
+        return None
+    return FeatureCache(Path(args.root) / FEATURE_CACHE_DIRNAME)
+
+
+def _features_for(
+    args: argparse.Namespace, frame: pl.DataFrame, symbol: str, timeframe: str
+) -> FeatureFrame:
+    """Build the matrix through the cache; a hit is bit-identical to a build."""
+    return cached_build_features(
+        _feature_cache(args),
+        symbol=symbol,
+        timeframe=timeframe,
+        frame=frame,
+        settings=Settings(),
+    )
+
+
 def _cmd_dataset_build(args: argparse.Namespace) -> None:
     """Build a chronological, purged dataset manifest from a stored symbol."""
     store = ParquetStore(args.root)
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = build_features(frame, Settings().costs)
+    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         None
         if args.groups == "all"
@@ -434,7 +458,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = build_features(frame, Settings().costs)
+    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
@@ -482,7 +506,7 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = build_features(frame, Settings().costs)
+    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
@@ -528,7 +552,7 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
     frame = store.read(result.symbol, result.timeframe)
     if frame.is_empty():
         raise CliError(f"no {result.symbol} {result.timeframe} bars under {args.root}")
-    features = build_features(frame, Settings().costs)
+    features = _features_for(args, frame, result.symbol, result.timeframe)
     multipliers = tuple(float(value) for value in args.stress.split(",") if value)
     regime_labels = None
     if args.regime_labels:
@@ -610,7 +634,13 @@ def _backtest_inputs(args: argparse.Namespace) -> tuple[Settings, FeatureFrame]:
             f"need {_MIN_BARS} bars, have {frame.height}"
         )
     settings = Settings()
-    return settings, build_features(frame, settings.costs)
+    return settings, cached_build_features(
+        _feature_cache(args),
+        symbol=args.symbol,
+        timeframe=TIMEFRAME,
+        frame=frame,
+        settings=settings,
+    )
 
 
 def _cmd_backtest(args: argparse.Namespace) -> None:
@@ -865,6 +895,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
+    ml_train.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_train.set_defaults(handler=_cmd_ml_train)
 
     ml_cv = ml_commands.add_parser(
@@ -894,6 +925,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ml_cv.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_cv.add_argument("--out", default=None, help="optional full report path")
+    ml_cv.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_cv.set_defaults(handler=_cmd_ml_cv)
 
     ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
@@ -916,6 +948,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default="",
         help="parquet with ts + regime columns; overrides --regime labels",
     )
+    ml_evaluate.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_evaluate.set_defaults(handler=_cmd_ml_evaluate)
 
     dataset = commands.add_parser("dataset", help="build leakage-safe datasets")
@@ -931,6 +964,7 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--embargo", type=int, default=0, help="extra bars after the purge")
     build.add_argument("--root", default=str(DEFAULT_ROOT))
     build.add_argument("--out", required=True, help="manifest JSON path")
+    build.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     build.set_defaults(handler=_cmd_dataset_build)
 
     nn_parser = commands.add_parser("nn", help="train and evaluate sequence models")
@@ -981,6 +1015,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     backtest.add_argument("--root", default=str(DEFAULT_ROOT))
     backtest.add_argument("--out", default=None, help="path of the JSON report")
+    backtest.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     backtest.set_defaults(handler=_cmd_backtest)
 
     backtest_commands = backtest.add_subparsers(dest="backtest_command", required=False)
@@ -1017,6 +1052,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     mc.add_argument("--root", default=str(DEFAULT_ROOT))
     mc.add_argument("--out", default=None, help="optional full report path")
+    mc.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     mc.set_defaults(handler=_cmd_backtest_montecarlo)
 
     sensitivity = backtest_commands.add_parser(
@@ -1043,6 +1079,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sensitivity.add_argument("--root", default=str(DEFAULT_ROOT))
     sensitivity.add_argument("--out", default=None, help="optional full report path")
+    sensitivity.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     sensitivity.set_defaults(handler=_cmd_backtest_sensitivity)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
