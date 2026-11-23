@@ -14,8 +14,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 from anyio import ClosedResourceError
-from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from scalping import __version__
 from scalping.api.runner import (
@@ -36,6 +37,10 @@ from scalping.api.schemas import (
     EvaluateResponse,
     HealthResponse,
     OkResponse,
+    RegimeCount,
+    RegimeCurrent,
+    RegimePoint,
+    RegimeResponse,
     RunControlRequest,
     RunDetail,
     RunSummary,
@@ -58,6 +63,7 @@ from scalping.data.provenance import build_provenance, load_provenance, save_pro
 from scalping.data.registry import SYMBOLS, TIMEFRAMES
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
+from scalping.regime import classify
 from scalping.strategy.calibrate import calibrate, card_from_report
 from scalping.strategy.card import save_card
 from scalping.strategy.flow import flow_series
@@ -152,6 +158,73 @@ def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> 
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
+
+
+@router.get("/api/regime", response_model=RegimeResponse)
+def market_regime(
+    request: Request,
+    symbol: str,
+    timeframe: str = TIMEFRAME,
+    limit: int = Query(default=500, ge=1, le=5000, description="timeline bars to return"),
+) -> RegimeResponse:
+    """Descriptive regime labels for one stored slice.
+
+    The summary counts cover every stored bar; only the timeline is capped by
+    ``limit``. An empty slice is a normal 200 with ``rows: 0`` and no current
+    label, matching ``/api/data/status``. These labels describe the past path
+    and are not a price forecast.
+    """
+    frame = request.app.state.store.read(symbol, timeframe)
+    labels = classify(frame)
+    if labels.is_empty():
+        return RegimeResponse(
+            symbol=symbol,
+            timeframe=timeframe,
+            rows=0,
+            current=None,
+            counts=[],
+            series=[],
+        )
+
+    last = labels.tail(1).to_dicts()[0]
+    grouped = (
+        labels.group_by("regime")
+        .agg(pl.len().alias("bars"))
+        .sort(["bars", "regime"], descending=[True, False])
+    )
+    return RegimeResponse(
+        symbol=symbol,
+        timeframe=timeframe,
+        rows=labels.height,
+        current=RegimeCurrent(
+            ts=last["ts"].isoformat(),
+            trend=last["trend"],
+            trend_strength=last["trend_strength"],
+            volatility=last["volatility"],
+            expansion=last["expansion"],
+            breakout=last["breakout"],
+            unusual=bool(last["unusual"]),
+            regime=last["regime"],
+        ),
+        counts=[
+            RegimeCount(
+                regime=str(row["regime"]),
+                bars=int(row["bars"]),
+                share=int(row["bars"]) / labels.height,
+            )
+            for row in grouped.to_dicts()
+        ],
+        series=[
+            RegimePoint(
+                ts=row["ts"].isoformat(),
+                regime=row["regime"],
+                trend=row["trend"],
+                volatility=row["volatility"],
+            )
+            for row in labels.tail(limit).to_dicts()
+        ],
+    )
+
 
 
 def _provider(body: DownloadRequest, data_root: Path) -> DataProvider:

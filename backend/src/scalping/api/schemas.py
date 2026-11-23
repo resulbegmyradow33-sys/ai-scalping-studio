@@ -29,6 +29,10 @@ __all__ = [
     "HealthResponse",
     "OkResponse",
     "ProviderName",
+    "RegimeCount",
+    "RegimeCurrent",
+    "RegimePoint",
+    "RegimeResponse",
     "RunControlRequest",
     "RunDetail",
     "RunSummary",
@@ -83,6 +87,47 @@ class DownloadRequest(BaseModel):
         if self.provider == "csv" and not self.path:
             raise ValueError("path is required when provider is 'csv'")
         return self
+
+
+class RegimePoint(BaseModel):
+    """One bar on the regime timeline."""
+
+    ts: str
+    regime: str
+    trend: str
+    volatility: str
+
+
+class RegimeCount(BaseModel):
+    """Bars spent in one summary regime."""
+
+    regime: str
+    bars: int
+    share: float
+
+
+class RegimeCurrent(BaseModel):
+    """The latest bar's axes; every field comes from the rule classifier."""
+
+    ts: str
+    trend: str
+    trend_strength: str
+    volatility: str
+    expansion: str
+    breakout: str
+    unusual: bool
+    regime: str
+
+
+class RegimeResponse(BaseModel):
+    """Descriptive regime state for one stored slice, never a forecast."""
+
+    symbol: str
+    timeframe: str
+    rows: int
+    current: RegimeCurrent | None
+    counts: list[RegimeCount]
+    series: list[RegimePoint]
 
 
 class DownloadResponse(BaseModel):
