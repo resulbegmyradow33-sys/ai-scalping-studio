@@ -21,7 +21,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from scalping import __version__
+from scalping.api.ml_runner import MLRunner
 from scalping.api.routes import router
+from scalping.api.routes_ml import router as ml_router
 from scalping.api.routes_paper import router as paper_router
 from scalping.api.runner import SimulationRunner
 from scalping.api.train_runner import TrainRunner
@@ -58,8 +60,9 @@ ALLOWED_ORIGINS = (
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Let the app finish serving, then stop and join training threads."""
+    """Let the app finish serving, then stop and join ML and training threads."""
     yield
+    app.state.ml.shutdown()
     app.state.trains.shutdown()
 
 
@@ -104,7 +107,10 @@ def create_app(
     # Training threads belong to this app: the runner map is per factory call
     # and the lifespan stops and joins them before the process exits.
     app.state.trains = TrainRunner(app.state.store, settings, runs)
+    # Classical ML runs live under ``<runs_root>/ml`` and share one slot.
+    app.state.ml = MLRunner(app.state.store, settings, runs)
     app.include_router(router)
+    app.include_router(ml_router)
     app.include_router(paper_router)
     return app
 
