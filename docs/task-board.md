@@ -97,10 +97,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] PyTorch trainer: MPS when reliable, CPU fallback.
 - [ ] Gradient clipping, early stopping, checkpoints, resume, cancellation.
 - [ ] RAM guard and one-job policy.
-- [ ] MLP, deep MLP, residual MLP.
-- [ ] Vanilla RNN, LSTM, GRU.
-- [ ] 1D CNN, dilated CNN, CNN-LSTM.
-- [ ] Causal TCN with configurable receptive field.
+- [x] MLP, deep MLP, residual MLP.
+- [x] Vanilla RNN, LSTM, GRU.
+- [x] 1D CNN, dilated CNN, CNN-LSTM.
+- [x] Causal TCN with configurable receptive field.
 - [ ] Shared evaluator against classical ML and the rule.
 - [ ] Checkpoint round-trip and causality tests.
 - [ ] `docs/neural-network-research.md`.
