@@ -162,14 +162,18 @@ def test_download_rejects_unknown_provider(client):
     assert client.post("/api/data/download", json=body).status_code == 422
 
 
-def test_csv_download_uses_the_given_offset(client):
-    path = Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv"
+def test_csv_download_uses_the_given_offset(client, tmp_path):
+    imports = tmp_path / "imports"
+    imports.mkdir()
+    (imports / "xauusd.csv").write_bytes(
+        (Path(__file__).parent / "fixtures" / "xauusd_gmt3.csv").read_bytes()
+    )
     body = {
         "provider": "csv",
         "symbol": "XAUUSD",
         "start": "2026-01-05T00:00:00Z",
         "end": "2026-01-06T00:00:00Z",
-        "path": str(path),
+        "path": "xauusd.csv",
         "tz_offset": 3,
     }
     r = client.post("/api/data/download", json=body)
@@ -220,17 +224,18 @@ def test_start_rejects_short_history(tmp_path):
     assert r.json()["detail"] == "not enough bars: need 120"
 
 
-def test_csv_download_missing_file_is_400(client, tmp_path):
+def test_csv_download_unknown_name_is_422(client, tmp_path):
+    """A name that is not in ``<data_root>/imports`` is a 422, never a path lookup."""
     body = {
         "provider": "csv",
         "symbol": "XAUUSD",
         "start": "2026-01-05T00:00:00Z",
         "end": "2026-01-06T00:00:00Z",
-        "path": str(tmp_path / "missing.csv"),
+        "path": "missing.csv",
     }
     r = client.post("/api/data/download", json=body)
-    assert r.status_code == 400
-    assert "cannot read data source" in r.json()["detail"]
+    assert r.status_code == 422
+    assert "imports" in r.json()["detail"]
 
 
 def test_dukascopy_unknown_symbol_is_400(client):
@@ -432,13 +437,17 @@ def test_cors_has_no_wildcard_for_other_origins():
 
 def test_sim_start_accepts_a_store_written_from_a_no_spread_csv(tmp_path, nospread_csv):
     """CSV is the realistic path (spec 5.1): a 6-column export must start."""
-    app = create_app(data_root=tmp_path / "data")
+    root = tmp_path / "data"
+    imports = root / "imports"
+    imports.mkdir(parents=True)
+    (imports / "nospread.csv").write_bytes(Path(nospread_csv).read_bytes())
+    app = create_app(data_root=root)
     body = {
         "provider": "csv",
         "symbol": "XAUUSD",
         "start": "2026-01-05T00:00:00Z",
         "end": "2026-01-06T00:00:00Z",
-        "path": str(nospread_csv),
+        "path": "nospread.csv",
         "tz_offset": 0,
     }
     with TestClient(app) as client:
@@ -509,4 +518,3 @@ def test_metrics_payload_maps_non_finite_values_to_null():
     assert payload["profit_factor"] is None
     assert payload["trades"] == 1
     assert json.loads(json.dumps(payload, allow_nan=False)) == payload
-

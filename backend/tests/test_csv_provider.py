@@ -161,3 +161,57 @@ def test_crossed_quotes_are_rejected(tmp_path):
     with pytest.raises(DataError, match="line 1") as info:
         CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", None, None)
     assert info.value.column == "spread"
+
+
+def _write(path: Path, rows: int) -> Path:
+    lines = [
+        f"2026.01.{5 + index // 1440:02d} {(index % 1440) // 60:02d}:{index % 60:02d},"
+        f"{100 + index * 0.01},{101 + index * 0.01},{99 + index * 0.01},"
+        f"{100.5 + index * 0.01},10"
+        for index in range(rows)
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def test_chunked_read_matches_a_single_pass(tmp_path):
+    path = _write(tmp_path / "many.csv", 500)
+
+    whole = CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=100_000)
+    tiny = CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=1)
+    uneven = CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=137)
+
+    assert whole.height == 500
+    assert whole.equals(tiny)
+    assert whole.equals(uneven)
+
+
+def test_duplicate_across_a_chunk_boundary_keeps_the_first_line(tmp_path):
+    path = tmp_path / "dup.csv"
+    path.write_text(
+        "2026.01.05 10:00,1,2,0.5,1.5,10\n"
+        "2026.01.05 10:01,1,2,0.5,1.5,10\n"
+        "2026.01.05 10:01,1,2,0.5,1.5,10\n"
+    )
+
+    with pytest.raises(DataError, match="line 3") as info:
+        CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=2)
+    assert "first seen on line 2" in info.value.reason
+
+
+def test_line_numbers_survive_chunking(tmp_path):
+    path = tmp_path / "short.csv"
+    path.write_text(
+        "2026.01.05 10:00,1,2,0.5,1.5,10\n"
+        "2026.01.05 10:01,1,2,0.5,1.5,10\n"
+        "2026.01.05 10:02,1,2,0.5\n"
+    )
+
+    with pytest.raises(DataError, match="line 3") as info:
+        CsvProvider(path, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=2)
+    assert info.value.column is None
+
+
+def test_chunk_rows_must_be_positive(tmp_path):
+    with pytest.raises(ValueError, match="chunk_rows"):
+        CsvProvider(FIX, tz_offset_hours=3).fetch("XAUUSD", chunk_rows=0)

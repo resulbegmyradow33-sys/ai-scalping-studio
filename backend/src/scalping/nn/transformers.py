@@ -22,7 +22,13 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-__all__ = ["CausalTransformer", "TransformerClassifier", "TransformerConfig"]
+__all__ = [
+    "CausalTransformer",
+    "ITransformerClassifier",
+    "PatchTSTClassifier",
+    "TransformerClassifier",
+    "TransformerConfig",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,3 +167,179 @@ def build_transformer(
         dropout=dropout,
         config=cfg,
     )
+
+class PatchTSTClassifier(nn.Module):
+    """PatchTST-style patching: each patch becomes one encoder token.
+
+    The window is split into non-overlapping (or strided) patches; every patch
+    is flattened to ``patch_len * features`` and projected to the model width.
+    Attention runs over patches, then mean pooling feeds the classifier.
+
+    A trailing partial patch is dropped: ``n_patches = (window - patch_len) //
+    stride + 1``. That is visible in ``n_patches`` rather than silently padded
+    with fabricated bars.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        window: int,
+        n_classes: int,
+        hidden: int,
+        dropout: float,
+        config: TransformerConfig,
+        patch_len: int = 8,
+        stride: int | None = None,
+    ) -> None:
+        super().__init__()
+        if patch_len < 1:
+            raise ValueError("patch_len must be >= 1")
+        step = patch_len if stride is None else stride
+        if step < 1:
+            raise ValueError("stride must be >= 1")
+        if window < patch_len:
+            raise ValueError(f"window ({window}) is shorter than patch_len ({patch_len})")
+        n_patches = (window - patch_len) // step + 1
+        # For PatchTST the sequence that attention sees is made of patches.
+        config.check(hidden=hidden, window=n_patches)
+        self.n_features = n_features
+        self.window = window
+        self.patch_len = patch_len
+        self.stride = step
+        self.n_patches = n_patches
+        self.input = nn.Linear(patch_len * n_features, hidden)
+        self.position = nn.Parameter(torch.zeros(1, n_patches, hidden))
+        nn.init.normal_(self.position, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=config.n_heads,
+            dim_feedforward=hidden * config.ff_mult,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=config.n_layers, enable_nested_tensor=False
+        )
+        self.norm = nn.LayerNorm(hidden)
+        self.head = nn.Linear(hidden, n_classes)
+
+    def _patches(self, x: Tensor) -> Tensor:
+        if x.ndim != 3 or x.shape[2] != self.n_features:
+            raise ValueError(
+                f"expected (batch, window, {self.n_features}), got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.window:
+            raise ValueError(f"expected a fixed window of {self.window}, got {x.shape[1]}")
+        # (batch, features, patches, patch_len) -> (batch, patches, features*patch_len)
+        patches = x.transpose(1, 2).unfold(2, self.patch_len, self.stride)
+        return patches.permute(0, 2, 1, 3).reshape(x.shape[0], self.n_patches, -1)
+
+    def forward_sequence(self, x: Tensor) -> Tensor:
+        tokens = self.input(self._patches(x)) + self.position
+        return self.norm(self.encoder(tokens))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.head(self.forward_sequence(x).mean(dim=1))
+
+
+def build_patchtst(
+    *,
+    n_features: int,
+    window: int,
+    n_classes: int,
+    hidden: int,
+    dropout: float = 0.1,
+    patch_len: int = 8,
+    stride: int | None = None,
+    config: TransformerConfig | None = None,
+) -> nn.Module:
+    return PatchTSTClassifier(
+        n_features=n_features,
+        window=window,
+        n_classes=n_classes,
+        hidden=hidden,
+        dropout=dropout,
+        config=TransformerConfig() if config is None else config,
+        patch_len=patch_len,
+        stride=stride,
+    )
+
+class ITransformerClassifier(nn.Module):
+    """iTransformer-style variate attention: each feature is one token.
+
+    The input ``(batch, window, features)`` is transposed so every feature's
+    full window becomes a token embedding. Attention therefore models
+    cross-feature structure instead of time steps. There is no temporal
+    causality claim here: the window already ends at the prediction bar, and
+    the model deliberately mixes features.
+    """
+
+    def __init__(
+        self,
+        *,
+        n_features: int,
+        window: int,
+        n_classes: int,
+        hidden: int,
+        dropout: float,
+        config: TransformerConfig,
+    ) -> None:
+        super().__init__()
+        config.check(hidden=hidden, window=n_features)
+        self.n_features = n_features
+        self.window = window
+        self.n_tokens = n_features
+        self.embed = nn.Linear(window, hidden)
+        self.position = nn.Parameter(torch.zeros(1, n_features, hidden))
+        nn.init.normal_(self.position, std=0.02)
+        layer = nn.TransformerEncoderLayer(
+            d_model=hidden,
+            nhead=config.n_heads,
+            dim_feedforward=hidden * config.ff_mult,
+            dropout=dropout,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.encoder = nn.TransformerEncoder(
+            layer, num_layers=config.n_layers, enable_nested_tensor=False
+        )
+        self.norm = nn.LayerNorm(hidden)
+        self.head = nn.Linear(hidden, n_classes)
+
+    def forward_sequence(self, x: Tensor) -> Tensor:
+        if x.ndim != 3 or x.shape[2] != self.n_features:
+            raise ValueError(
+                f"expected (batch, window, {self.n_features}), got {tuple(x.shape)}"
+            )
+        if x.shape[1] != self.window:
+            raise ValueError(f"expected a fixed window of {self.window}, got {x.shape[1]}")
+        # (batch, features, window) -> one token per feature
+        tokens = self.embed(x.transpose(1, 2)) + self.position
+        return self.norm(self.encoder(tokens))
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.head(self.forward_sequence(x).mean(dim=1))
+
+
+def build_itransformer(
+    *,
+    n_features: int,
+    window: int,
+    n_classes: int,
+    hidden: int,
+    dropout: float = 0.1,
+    config: TransformerConfig | None = None,
+) -> nn.Module:
+    return ITransformerClassifier(
+        n_features=n_features,
+        window=window,
+        n_classes=n_classes,
+        hidden=hidden,
+        dropout=dropout,
+        config=TransformerConfig() if config is None else config,
+    )
+
