@@ -48,6 +48,7 @@ __all__ = [
 
 DeviceRequest = Literal["auto", "cpu", "mps"]
 
+
 class TrainError(ValueError):
     """The request cannot be trained (bad config, busy slot, bad checkpoint)."""
 
@@ -307,9 +308,7 @@ def train_classifier(
             best_val_accuracy = float(payload.get("best_val_accuracy", 0.0))
             best_state = payload.get("best_state")
 
-        deadline = (
-            None if cfg.max_minutes is None else time.monotonic() + cfg.max_minutes * 60.0
-        )
+        deadline = None if cfg.max_minutes is None else time.monotonic() + cfg.max_minutes * 60.0
         generator = torch.Generator().manual_seed(cfg.seed)
         epochs_run = start_epoch
         stopped = "epochs"
@@ -357,8 +356,7 @@ def train_classifier(
                 best_epoch = epoch + 1
                 best_val_accuracy = val_accuracy
                 best_state = {
-                    key: value.detach().cpu().clone()
-                    for key, value in model.state_dict().items()
+                    key: value.detach().cpu().clone() for key, value in model.state_dict().items()
                 }
 
             if epochs_run % cfg.checkpoint_every == 0 or control.cancelled():
@@ -427,7 +425,7 @@ def load_checkpoint(path: str | Path) -> dict[str, Any]:
     source = Path(path)
     if not source.exists():
         raise TrainError(f"checkpoint not found: {source}")
-    payload = torch.load(source, map_location="cpu")
+    payload = torch.load(source, map_location="cpu", weights_only=True)
     if not isinstance(payload, dict) or "model_state" not in payload:
         raise TrainError(f"not a training checkpoint: {source}")
     return payload
