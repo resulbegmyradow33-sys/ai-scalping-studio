@@ -22,15 +22,19 @@ out-of-sample test forever.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
 
 from scalping.config import RiskConfig, Settings
 from scalping.strategy.card import (
+    CARD_CLASSIFICATION,
     PolicyCard,
     RuleMetrics,
     RuleParams,
@@ -41,13 +45,18 @@ from scalping.strategy.labeling import label_events
 from scalping.strategy.signals import strategy_signals
 
 __all__ = [
+    "AUDIT_FILENAME",
     "DEFAULT_RISK_OPTIONS",
     "CalibrationReport",
     "Candidate",
     "calibrate",
     "evaluate_params",
+    "record_calibration",
     "summarise",
 ]
+
+#: Append-only audit next to the card. One JSON object per calibration attempt.
+AUDIT_FILENAME: str = "strategy_calibration_audit.jsonl"
 
 #: ``(sl_atr_mult, tp_atr_mult, max_bars_in_trade)`` candidates.
 DEFAULT_RISK_OPTIONS: tuple[tuple[float, float, int], ...] = (
@@ -108,13 +117,17 @@ class CalibrationReport:
         }
 
 
-def summarise(r_multiples: Iterable[float] | np.ndarray, risk: float = _RISK_PER_TRADE) -> RuleMetrics:
+def summarise(
+    r_multiples: Iterable[float] | np.ndarray, risk: float = _RISK_PER_TRADE
+) -> RuleMetrics:
     """Turn a sequence of realised R into the panel's metrics.
 
     Drawdown uses equal-fraction compounding at ``risk`` per trade, matching
     the way the labels were priced, so a card's DD is comparable across runs.
     """
-    values = np.asarray(list(r_multiples) if not isinstance(r_multiples, np.ndarray) else r_multiples)
+    values = np.asarray(
+        list(r_multiples) if not isinstance(r_multiples, np.ndarray) else r_multiples
+    )
     values = values[np.isfinite(values)]
     trades = int(values.size)
     if trades == 0:
@@ -181,9 +194,7 @@ def _apply_gate(
     gate = pl.DataFrame(
         {
             "ts": frame["ts"],
-            "gate": np.isfinite(flow)
-            & np.isfinite(threshold)
-            & (np.abs(flow) > threshold),
+            "gate": np.isfinite(flow) & np.isfinite(threshold) & (np.abs(flow) > threshold),
         }
     )
     return (
@@ -304,7 +315,10 @@ def calibrate(
         reason = f"holdout trades {best.holdout.trades} < {min_holdout_trades}"
     elif best.holdout.expectancy_r <= 0.0:
         reason = f"holdout expectancy {best.holdout.expectancy_r:+.4f}R is not positive"
-    elif incumbent_metrics is not None and best.holdout.expectancy_r <= incumbent_metrics.expectancy_r:
+    elif (
+        incumbent_metrics is not None
+        and best.holdout.expectancy_r <= incumbent_metrics.expectancy_r
+    ):
         reason = (
             f"holdout {best.holdout.expectancy_r:+.4f}R does not beat "
             f"incumbent {incumbent_metrics.expectancy_r:+.4f}R"
@@ -340,3 +354,43 @@ def card_from_report(
         symbol=symbol,
         note=note,
     )
+
+
+def record_calibration(
+    path: str | Path,
+    *,
+    actor: str,
+    dry_run: bool,
+    report: CalibrationReport,
+    symbol: str,
+    timeframe: str,
+    card_written: bool,
+    card_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Append one audit record for a calibration attempt and return it.
+
+    The record is the answer to "who ran what, and what happened": actor, UTC
+    timestamp, ``dry_run`` and the report. It is written for rejected and
+    dry-run attempts too, because the decision not to promote is evidence as
+    well. ``report.to_dict`` is embedded under ``result`` rather than copied
+    into the top level so a future report field cannot collide with the audit
+    envelope.
+    """
+    row: dict[str, Any] = {
+        "event": "calibration",
+        "at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "actor": actor,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "dry_run": bool(dry_run),
+        "promoted": bool(report.promoted),
+        "result": report.to_dict(),
+        "card_written": bool(card_written),
+        "card_path": None if card_path is None else str(card_path),
+        "classification": CARD_CLASSIFICATION,
+    }
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+    return row

@@ -83,6 +83,8 @@ def create_app(
     paper_ledger: Path | None = None,
     orchestrator_db: Path | None = None,
     discovery_archive: Path | None = None,
+    *,
+    legacy_fallback: bool = True,
 ) -> FastAPI:
     """Build an app whose store, settings and runner belong to this call only.
 
@@ -92,6 +94,10 @@ def create_app(
     None of the three is created here: the paper router opens the ledger on the
     first write and the autonomy router opens every store read-only, so importing
     this module has no filesystem side effect.
+
+    ``legacy_fallback`` keeps the historical M1 momentum replay when no strategy
+    card applies (default during migration). Set it false to make that path
+    NO TRADE with a reason instead.
     """
     root = Path(data_root) if data_root is not None else DEFAULT_DATA_ROOT
     runs = Path(runs_root) if runs_root is not None else DEFAULT_RUNS_ROOT
@@ -126,6 +132,7 @@ def create_app(
         settings,
         flow_root=flow_root,
         card_path=runs / "strategy_card.json",
+        allow_legacy_fallback=legacy_fallback,
     )
     # Training threads belong to this app: the runner map is per factory call
     # and the lifespan stops and joins them before the process exits.

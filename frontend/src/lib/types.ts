@@ -240,6 +240,12 @@ export interface DecisionPayload {
   action: DecisionAction;
   strategy: string;
   blocked: string | null;
+  /** What produced the strategy label: legacy card, DSL champion or fallback. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** True when the runner refused to trade because the legacy fallback is off. */
+  no_trade?: boolean;
+  /** Safe reason code for a NO TRADE decision. */
+  reason?: string;
 }
 
 export interface EquityPayload {
@@ -276,7 +282,7 @@ export type SimMessageType = SimMessage["type"];
 
 // --- strategy card -----------------------------------------------------------
 
-/** Parameters the promoted flow-momentum rule replays. */
+/** Parameters the legacy flow-momentum rule replays. */
 export interface RuleParams {
   timeframe: string;
   flow_quantile: number;
@@ -312,6 +318,16 @@ export interface ForwardResult {
 export interface StrategyCard {
   active: boolean;
   strategy: string;
+  /** What actually ran: legacy card, a DSL champion, or the fallback path. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** Never a validation claim; the legacy path reports `legacy-heuristic`. */
+  validation?: string;
+  /** Safe reason code when `classification` is `fallback`. */
+  fallback_reason?: string;
+  /** Whether the M1 momentum fallback is enabled in this process. */
+  legacy_fallback?: boolean;
+  /** The rule that actually produced the stream, e.g. `flow_momentum`. */
+  active_rule?: string;
   timeframe?: string;
   symbol?: string;
   params?: RuleParams;

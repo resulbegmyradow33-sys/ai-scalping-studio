@@ -12,6 +12,7 @@ import Link from "next/link";
 import { useState } from "react";
 import useSWR from "swr";
 
+import { LegacyBadge } from "@/components/legacy-badge";
 import { LineChart } from "@/components/line-chart";
 import { RunStatusChip, RunTable } from "@/components/run-table";
 import { api } from "@/lib/api";
@@ -239,9 +240,12 @@ export default function TrainingPage() {
             </section>
 
             <section aria-labelledby="bandit-heading" className="min-w-0">
-              <h2 id="bandit-heading" className="mb-2 text-sm font-semibold text-slate-100">
-                Bandit ağırlıkları
-              </h2>
+              <div className="mb-2 flex flex-wrap items-center gap-2">
+                <h2 id="bandit-heading" className="text-sm font-semibold text-slate-100">
+                  Bandit ağırlıkları
+                </h2>
+                <LegacyBadge testId="bandit-legacy" />
+              </div>
               <div
                 role="region"
                 aria-label="Bandit ağırlıkları"
@@ -252,7 +256,9 @@ export default function TrainingPage() {
                   data-testid="bandit-weights"
                   className="w-full min-w-[18rem] border-collapse text-left text-xs"
                 >
-                  <caption className="sr-only">Bandit strateji ağırlıkları</caption>
+                  <caption className="sr-only">
+                    Bandit strateji ağırlıkları (legacy baseline)
+                  </caption>
                   <thead className="bg-slate-900/60 text-slate-400">
                     <tr>
                       <th scope="col" className="px-2 py-1.5 font-medium">Strateji</th>

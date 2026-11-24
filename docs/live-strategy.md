@@ -1,10 +1,20 @@
 # Canlı strateji ve gece kalibrasyonu
 
+# Legacy baseline: canlı strateji ve gece kalibrasyonu
+
+> **Sınıflandırma: legacy baseline.** Bu belge eski panelin `flow_momentum`
+> kartını ve gece kalibrasyon döngüsünü anlatır. Otonom keşif motorunun
+> şampiyonu değildir; panel hâlâ bu yolu oynatır ve arayüz bunu "legacy
+> baseline" olarak işaretler (issue #139). DSL şampiyonu yoksa otonom paper yolu
+> NO TRADE üretir; bu dokümandaki kart yalnızca panel/benchmark yoludur.
+
 Bu belge, panelin hangi kuralı oynattığını ve "sürekli öğrenme"nin bu projede
 nasıl uygulandığını anlatır. Araştırma sonucu netti: beş yıllık gerçek spread
-testinde ayakta kalan şey bir **kural**, PPO politikası değil. Bu yüzden canlı
-sistem kuralı çalıştırır; öğrenme, kuralın serbest parametrelerinin gece
-yeniden seçilip bir holdout kapısından geçirilmesiyle olur.
+testinde ayakta kalan şey bir **kural**, PPO politikası değil. Bu yüzden eski
+panel kuralı çalıştırır; öğrenme, kuralın serbest parametrelerinin gece yeniden
+seçilip bir holdout kapısından geçirilmesiyle olur. Bu yol legacy incumbent ve
+historik benchmark olarak korunur; DSL arama şablonu veya varsayılan şampiyon
+değildir.
 
 ## Kural
 
@@ -31,6 +41,14 @@ okur; yeni kart için süreç yeniden başlatılmaz.
    karttan daha iyi holdout R'si.
 5. Terfi etmezse hiçbir şey yazılmaz; rapor `runs/strategy_history.jsonl`'e
    eklenir.
+
+Her deneme, kabul edilsin ya da edilmesin, `runs/strategy_calibration_audit.jsonl`
+dosyasına bir satır yazar: `at`, `actor` (API ise `api:<istemci>`, script ise
+`nightly_calibrate`), `dry_run`, `promoted`, `result` (raporun tamamı),
+`card_written` ve `classification: "legacy"`. Aynı yardımcı
+(`strategy.calibrate.record_calibration`) hem HTTP rotasında hem gece
+script'inde kullanılır; `--audit` ile yol değiştirilebilir, varsayılan kartın
+yanındaki dosyadır.
 
 Bu kapı dürüst bir sonsuz out-of-sample testi değildir: her gece veri uzasa da
 aynı tarihsel holdout tekrar görülür. Kartın `note` alanı bunu kaydeder.
@@ -78,9 +96,24 @@ uv run python -m scalping.cli serve \
   --port 8000
 ```
 
-`--flow-root` yoksa veya kartın zaman diliminde bar yoksa panel sessizce eski
-M1 momentumuna döner; bunu `GET /api/strategy/card` (`active: false`) ve
-sunucu logu gösterir.
+`--flow-root` yoksa veya kartın zaman diliminde bar yoksa panel legacy M1
+momentumuna döner. Bu artık sessiz değildir:
+
+- `GET /api/strategy/card` her durumda `classification` ve `validation`
+  döndürür: kart çalışıyorsa `classification: "legacy"`, aksi hâlde
+  `classification: "fallback"`; `validation` her zaman `"legacy-heuristic"`dır
+  ve doğrulanmış bir strateji iddiası taşımaz.
+- Kart dosyada olsa bile uygulanamıyorsa `active: false` ve
+  `fallback_reason: "strategy_card_not_buildable"` döner; eski `active: true`
+  yanlış raporu kaldırılmıştır. Kart yoksa sebep `"no_strategy_card"`dır.
+- Legacy geri dönüşü kapatmak için sunucuyu `--no-legacy-fallback` ile
+  başlatın. Bu modda kart yoksa/uygulanamıyorsa panel `momentum` yerine
+  `no_trade` etiketiyle HOLD üretir ve karar mesajında
+  `reason: "legacy_fallback_disabled"` taşır. Varsayılan (`--legacy-fallback`)
+  geçiş süresince mevcut davranışı korur.
+- Panel, strateji kartını, ana ekrandaki strateji değerini, bandit ağırlık
+  tablosunu ve paper oturumlarındaki `flow_momentum` etiketlerini görünür bir
+  "legacy baseline" rozetiyle işaretler.
 
 ## Doğrulanmış sonuç (22 Kasım 2026)
 
