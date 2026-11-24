@@ -219,14 +219,20 @@ later extension, not silently assumed.
 
 - **The locked final OOS call.** This slice never reads the test split, so the
   final holdout is still untouched; evaluating it once is a later, explicit
-  decision that must not be used for tuning.
+  decision that must not be used for tuning. The promotion policy therefore
+  defaults `require_locked_oos=False`; setting it `True` rejects every bundle
+  until a locked-OOS section exists. That rejection is honest, not a bug.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
-  but no deflated metric, false-discovery control or complexity penalty is
-  applied here. Those belong to the promotion policy.
+  and `scalping.discovery.promotion.PROMOTION_V1` caps both, but no deflated
+  metric or false-discovery control is applied here. A policy pass bounds the
+  exposure; it does not undo it.
 - **Parameter-neighbourhood and cross-symbol stability.** One spec on one
   dataset build is measured; a sensitivity sweep is not.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
-  the legacy incumbent and the current champion are not run by this module.
+  the legacy incumbent and the current champion are not run by this module. The
+  promotion policy compares a candidate with a champion *bundle* only when both
+  name the same dataset id/checksum, code version and fold boundaries; it cannot
+  fill in a missing champion measurement.
 - **A block bootstrap.** Iid intervals are stated as a simplification.
 - **Any paper or live claim.** The bundle contains historical simulation
   evidence only.

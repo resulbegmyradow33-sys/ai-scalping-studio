@@ -264,7 +264,7 @@ reason, the archive path and the decision row id.
 ### Decision semantics
 
 `run_discovery` never writes `promoted`: a run ends at a recorded hypothesis.
-Promotion is a separate, explicit `DiscoveryArchive.promote` call after review
+Promotion is a separate, explicit `promote_with_evidence` call after review
 (see [Champion governance](#champion-governance)); the registry gate continues to
 own *model* promotion. The run's vocabulary is:
 
@@ -305,9 +305,9 @@ still holds. The four `stop_reason` values are the search loop's
 ## Champion governance
 
 A discovered candidate becomes the paper-trading champion through the archive,
-not through a hand-written strategy file. Three methods own the lifecycle:
-`promote`, `rollback` and the read side (`champion`, `champion_history`,
-`compare_to_champion`). `run_discovery` stops at a recorded decision; a
+not through a hand-written strategy file. `promote_with_evidence` (policy
+decision), `promote_exploratory` (research only), `rollback` and the read side
+(`champion`, `champion_history`, `compare_to_champion`) own the lifecycle. `run_discovery` stops at a recorded decision; a
 `rejected` row hands the candidate over, and promoting it is this explicit call.
 
 ### Scope
@@ -323,17 +323,50 @@ not qualify.
 
 ### Promotion
 
+Production promotion requires a policy decision over a walk-forward evidence
+bundle; it is not a metric comparison:
+
 ```python
-archive.promote(
+from scalping.discovery.promotion import (
+    PROMOTION_V1,
+    evaluate_promotion,
+    promote_with_evidence,
+)
+
+decision = evaluate_promotion(
+    evidence,                     # CandidateEvidence
+    PROMOTION_V1,                 # named, versioned, fail-closed
+    champion_evidence=champion_evidence,
+    champion_spec_hash=champion_id,
+)
+champion = promote_with_evidence(
+    archive,
+    candidate_id,
+    decision,
+    scope="XAUUSD:M5",
+    reason="passed promotion-v1 on identical folds",
+)
+```
+
+`promote_with_evidence` refuses a rejected decision and writes the policy
+id/version and the evidence checksum into the audit detail. The history row
+stores no metric (`metric`/`value` are NULL); `detail_json.mode` is `"evidence"`.
+The policy, its thresholds and every rejection code are documented in
+`docs/local-learning-engine.md`.
+
+The older one-metric path remains for research only:
+
+```python
+archive.promote_exploratory(
     candidate_id,
     scope="XAUUSD:M5",
-    reason="beats the champion on validation expectancy",
+    reason="exploratory ablation, never the paper champion",
     metric="expectancy_r",   # default
     force=False,             # default
 )
 ```
 
-`promote` runs in `BEGIN IMMEDIATE` and refuses, writing nothing:
+`promote_exploratory` runs in `BEGIN IMMEDIATE` and refuses, writing nothing:
 
 | Refusal | Exception | Forceable? |
 |---|---|---|
@@ -411,8 +444,9 @@ imported from `scalping.discovery`, so the dependency stays one-way.
   champion's metrics on a schedule, queues a re-test or rolls back on its own.
   `compare_to_champion` and `rollback` are the tools; the trigger is a human or a
   later orchestrator slice.
-- **One metric, higher is better.** A lower-is-better metric such as drawdown
-  must not be passed to `promote`; it would invert the rule.
+- **One metric, higher is better, in the exploratory path.** A lower-is-better
+  metric such as drawdown must not be passed to `promote_exploratory`; it would
+  invert the rule. Production promotion reads the policy bundle instead.
 - **`force` hides nothing but it does override policy.** The audit trail records
   `forced:` and the numbers that were rejected, which is exactly why the flag
   exists; it is not evidence that the candidate is good.
@@ -566,12 +600,14 @@ for wins without losses, and a gate that requires it then rejects with
 - **Nested validation inside the evaluator.** It runs one candidate on one
   frame. Chronological folds, purge/embargo geometry and the locked final test
   are a caller/orchestrator concern; the evaluator only refuses a holdout id.
-  `scalping.discovery.evidence` supplies the multi-fold builder; wiring it into
-  promotion policy and the orchestrator is a later slice.
+  `scalping.discovery.evidence` supplies the multi-fold builder and
+  `scalping.discovery.promotion` judges it; wiring both into the orchestrator is
+  a later slice.
 - **Out-of-sample and forward testing.** No test-slice access and no paper
   period. Those are later gates.
 - **Automatic champion monitoring.** `champion`, `compare_to_champion`,
-  `promote` and `rollback` are explicit calls with an audit trail. Nothing
+  `promote_with_evidence` and `rollback` are explicit calls with an audit
+  trail. Nothing
   schedules a comparison, watches the champion's live paper results or rolls
   back because a metric moved. `run_discovery` itself compares only against
   `hold` and `ret_5` and never promotes; the incumbent comparison is the

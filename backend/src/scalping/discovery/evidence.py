@@ -98,6 +98,7 @@ __all__ = [
     "StressEvidence",
     "bootstrap_ci",
     "build_evidence",
+    "evidence_checksum",
     "verify_evidence",
 ]
 
@@ -826,6 +827,18 @@ def _checksum_payload(payload: Mapping[str, Any]) -> str:
     body.pop("checksum", None)
     body.pop("created_at", None)
     return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
+
+
+def evidence_checksum(evidence: CandidateEvidence) -> str:
+    """Recompute the canonical checksum of ``evidence`` without trusting its stamp.
+
+    The promotion policy uses this to re-derive the identity before reading a
+    metric, so a bundle whose stored ``checksum`` was overwritten is caught
+    instead of being believed. ``verify_evidence`` uses the same function.
+    """
+    if not isinstance(evidence, CandidateEvidence):
+        raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
+    return _checksum_payload(evidence.to_dict())
 
 
 def verify_evidence(

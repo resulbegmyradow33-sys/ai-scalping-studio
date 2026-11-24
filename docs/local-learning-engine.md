@@ -3,7 +3,8 @@
 Phase 10 turns ad-hoc training runs into a registry-backed loop: a candidate is
 trained, measured, gated, and only then promoted; the previous champion stays
 recoverable and the samples are compared for drift. This page covers slice 2 —
-the candidate → champion gate (`scalping.registry.gate`) and drift diagnostics
+the candidate → champion gate (`scalping.registry.gate`), the discovery
+promotion policy (`scalping.discovery.promotion`) and drift diagnostics
 (`scalping.registry.drift`). The SQLite registry itself is described by its
 module docstring and `docs/data-pipeline.md`; the scheduler is a later slice.
 
@@ -100,7 +101,8 @@ explicit governance call.
 
 | Call | Purpose |
 |---|---|
-| `promote(candidate_id, *, scope, reason, force=False, metric="expectancy_r")` | make a candidate the champion of a scope, recording the numbers and a `promoted` decision |
+| `promote_exploratory(candidate_id, *, scope, reason, force=False, metric="expectancy_r")` | research/ablation only: one-metric comparison, never the paper champion |
+| `promote_evidence(candidate_id, *, scope, reason, policy_id, policy_version, evidence_checksum, dataset_id, candidate_spec_hash, ...)` | archive primitive for the production path: requires a named/versioned policy identity and an evidence checksum, stores no metric |
 | `champion(scope)` | current candidate, canonical spec, newest accepted metrics, promotion id/time/reason |
 | `champion_history(scope)` | every promotion and rollback of the scope, oldest first |
 | `compare_to_champion(candidate_id, scope, metric)` | candidate value, champion value, delta, `better` |
@@ -113,13 +115,138 @@ contains every scope token. Each promotion and rollback runs in
 `BEGIN IMMEDIATE` and writes the pointer, the history row and the decision in one
 transaction, so the live champion and the audit trail cannot disagree.
 
-Promotion refuses, writing nothing: an unknown candidate, a candidate with no
-trial on the scope's dataset, a candidate with no **accepted** trial there, and —
-unless `force` — a candidate without a measured metric or without a strict
-improvement over the champion's newest accepted value. The evidence gate is not
-forceable: `force` overrides the comparison only, requires a reason, and prefixes
-the stored reason with `forced: `. Rollback only restores a candidate that was
-champion of that scope before; a candidate that never won is promoted instead.
+`promote_exploratory` refuses, writing nothing: an unknown candidate, a candidate
+with no trial on the scope's dataset, a candidate with no **accepted** trial
+there, and — unless `force` — a candidate without a measured metric or without a
+strict improvement over the champion's newest accepted value. The evidence gate
+is not forceable: `force` overrides the comparison only, requires a reason, and
+prefixes the stored reason with `forced: `. Rollback only restores a candidate
+that was champion of that scope before; a candidate that never won is promoted
+instead.
+
+There is no `promote` method. The metric-only path was renamed to
+`promote_exploratory` on purpose: a name that looks like the production call must
+not hide a one-metric comparison. Production promotion is
+`promote_with_evidence`, described below.
+
+## Promotion policy (P2)
+
+`scalping.discovery.promotion` separates **exploratory search** from **production
+promotion**. Search ranks candidates on validation fitness. Promotion reads a
+:class:`scalping.discovery.evidence.CandidateEvidence` bundle — folds, cost
+stress, regimes, bootstrap intervals, trial exposure — and returns a
+`PromotionDecision`.
+
+`PromotionPolicy` is a frozen dataclass with no usable default. The constructor
+refuses an empty or degenerate policy: a non-empty `policy_id` that is not the
+reserved `manual-override`, `version >= 1`, at least three folds, positive sample
+and complexity/trial caps, a profit factor above 1, fractions in `(0, 1]`, and at
+least one cost-stress multiplier above 1. `PROMOTION_V1` is the documented
+starting policy:
+
+| Field | `PROMOTION_V1` | Why |
+|---|---|---|
+| `policy_id` / `version` | `promotion-v1` / `1` | every decision is attributable to a named, versioned policy |
+| `min_folds` | `3` | fewer folds say nothing about stability |
+| `min_trades` | `60` | about 20 pooled trades per fold |
+| `min_expectancy_r` | `0.05` | a margin over a cost-paying break-even, not a rounding error |
+| `min_profit_factor` | `1.20` | losses may not nearly match wins |
+| `max_drawdown` | `0.25` | worst fold's peak-to-equity drop, a policy cap, not a survival claim |
+| `min_positive_fold_fraction` | `2/3` | a majority of chronological windows must pay |
+| `min_regime_coverage` | `0.85` | almost every trade must be attributable to a regime |
+| `min_ci_lower_r` | `0.0`, strict | the 95% bootstrap lower bound must **exceed** the floor |
+| `require_cost_stress` | `1.5, 2.0` | each multiplier must exist in every fold's stress rows |
+| `max_complexity` | `40` | structural node cap |
+| `max_trials` | `500` | caps the candidate's trial count and the search budget |
+| `min_improvement_r` | `0.05` | a challenger must improve on the champion by at least this much |
+| `require_locked_oos` | `False` | the bundle has no locked-OOS section yet; `True` rejects everything until it does |
+
+`evaluate_promotion(evidence, policy, *, champion_evidence=None,
+champion_spec_hash=None)` runs the checks in a fixed order and returns
+`accepted`, a tuple of `PromotionRejection(code, message, observed, required)`,
+the policy id/version, the re-derived evidence checksum and the champion
+checksum. A decision is accepted only when the rejection list is empty and the
+checksum re-derives. Any missing, stale, edited or mismatched input is a
+rejection; there is no `force` parameter.
+
+### Rejection codes
+
+| Code | Meaning |
+|---|---|
+| `missing_evidence` / `invalid_evidence` | no bundle, or an object of the wrong type |
+| `checksum_mismatch` | the stored checksum does not re-derive from the payload |
+| `schema_unsupported` | the bundle layout version is not the one the policy reads |
+| `missing_section` | empty identity field, absent aggregate, no evidence policy or bootstrap section |
+| `inconsistent_evidence` | fold numbering/gaps, aggregate trade or positive-fold counts disagree with the folds |
+| `insufficient_folds` / `insufficient_trades` | below the policy minimum |
+| `min_expectancy_r` / `min_profit_factor` / `max_drawdown` | metric outside the policy |
+| `min_positive_fold_fraction` / `min_regime_coverage` | too few paying folds, or too many unattributed trades |
+| `min_ci_lower_r` | bootstrap lower bound does not exceed the policy floor |
+| `missing_cost_stress` | a required multiplier is absent from a fold's stress rows |
+| `max_complexity` | structural complexity above the cap |
+| `trial_exposure` / `search_exposure` | candidate trials or the recorded search budget exceed `max_trials` |
+| `missing_locked_oos` | `require_locked_oos=True` and the bundle has no locked-OOS section |
+| `champion_evidence_missing` / `champion_identity_missing` | a champion was named without its bundle or without a spec hash |
+| `champion_checksum_mismatch` | the champion bundle was edited |
+| `champion_spec_mismatch` / `champion_same_spec` | the champion bundle is for another spec, or the candidate *is* the champion |
+| `champion_dataset_mismatch` / `champion_dataset_checksum_mismatch` | different dataset id or build |
+| `champion_code_version_mismatch` / `champion_scope_mismatch` | different code version, symbol or timeframe |
+| `champion_folds_mismatch` | fold boundaries are not identical, so the comparison is not same-window |
+| `champion_improvement` | expectancy improvement is below `min_improvement_r`, or cannot be measured |
+
+The champion comparison is deliberately strict. Comparing a 3-fold bundle with a
+5-fold champion, or the same folds built from another dataset checksum, is a
+rejection rather than a normalisation problem. The `>= min_improvement_r`
+boundary carries a 1e-9R tolerance only because floats cannot represent
+`0.25 - 0.20` exactly; a tie still fails.
+
+### Production promotion path
+
+`promote_with_evidence(archive, candidate_id, decision, *, scope, reason)` is the
+only production call:
+
+- it refuses a rejected decision and any object that is not a `PromotionDecision`;
+- it requires `decision.candidate_spec_hash == candidate_id`, so evidence cannot
+  be detached from the spec it measured;
+- it writes the champion pointer, the history row and a `promoted` decision in
+  one transaction through `archive.promote_evidence`;
+- the history row stores **no metric** (`metric`/`value` are NULL) and the
+  decision detail records the policy id/version, the evidence checksum, the
+  champion checksum, the candidate spec hash and the dataset id.
+
+An evidence promotion is therefore distinguishable from an exploratory one by
+inspection: `metric IS NULL` and `detail_json.mode == "evidence"` mark the
+production path, while `promote_exploratory` always stores its metric.
+
+### Manual override is not evidence
+
+`manual_override(evidence, policy, *, reason, owner)` records a human decision in
+a separate `ManualOverride` object. It requires a non-empty reason and owner,
+re-evaluates the policy, copies the original `PromotionRejection` tuple verbatim,
+fixes `policy_id` to `"manual-override"` and keeps the original policy id/version
+beside it. It has no `accepted` field, `is_policy_evidence` is always `False`, and
+`promote_with_evidence` raises `TypeError` if handed one. An override on evidence
+the policy already accepts is refused: there is nothing to override.
+
+The rule is simple: an override can be stored for audit, but it can never be
+mistaken for a passed policy, and the next promotion decision must not cite it as
+validation.
+
+### What acceptance means
+
+Acceptance is **policy compliance**, not proof of an edge. The bundle contains
+historical simulation evidence; a policy pass says the measured sample, stability,
+cost stress, interval, complexity and search exposure cleared the checks this
+project chose. None of that predicts future profitability, and none of it
+replaces the still-missing locked final OOS evaluation.
+
+Two structural limits are worth stating. The bundle records its fold/CI
+`EvidencePolicy` but not the promotion policy id/version, so the decision and the
+archive row are what attribute a promotion to `promotion-v1`; the checksum binds
+the numbers, not the policy. And the audit trail is local SQLite, not a signed
+ledger: it proves what this process wrote, not that a different process could not
+have written something else.
+
 
 `scalping.discovery.champion.ChampionProvider` reads the champion and returns a
 `StrategySpec` that has passed `validate()` and whose recomputed hash still
@@ -130,13 +257,16 @@ archive and the DSL only; `scalping.paper` is never imported from
 
 ### Honest limits
 
-- The compared numbers come from validation trials. No walk-forward, untouched
-  test-slice or cost-stress rule is part of `promote`; if the search touched the
-  validation split, the promotion inherits that data-snooping risk.
-- One metric, higher is better. A lower-is-better metric such as drawdown must
-  not be passed to `promote`.
-- Promotion is policy, not proof: passing one comparison rule says the candidate
-  beat the incumbent on one metric in one dataset.
+- The exploratory `promote_exploratory` numbers come from validation trials. No
+  walk-forward, untouched test-slice or cost-stress rule is part of it; if the
+  search touched the validation split, the promotion inherits that data-snooping
+  risk. That is why it is not the production path.
+- `promote_evidence` checks a walk-forward evidence bundle, but the locked final
+  OOS split is still unread. Acceptance cannot substitute for that evaluation.
+- One metric, higher is better, in the exploratory path. A lower-is-better metric
+  such as drawdown must not be passed to it.
+- Promotion is policy, not proof: passing the policy says the candidate cleared
+  the checks this project chose on historical folds, nothing about the future.
 - Drift and decay monitoring is not automatic. Nothing re-tests the champion on a
   schedule or rolls back on its own; `compare_to_champion` and `rollback` are
   tools a human or a later orchestrator slice has to call.
@@ -178,8 +308,12 @@ anything by themselves.
 
 - Scheduler and job cancellation, one-heavy-job enforcement, RAM budget.
 - Champion-vs-candidate metric comparison inside the *model* gate; the strategy
-  counterpart lives in `scalping.discovery.archive` (previous section).
+  counterpart is the discovery promotion policy (previous section).
+- A locked final OOS section in the evidence bundle. `require_locked_oos=True`
+  rejects until it exists; producing it is the next evidence slice.
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels
   exist, not that performance is stable inside each regime.
+- An orchestrator that calls `promote_with_evidence` on its own. Promotion is
+  still an explicit governance call; nothing in this slice schedules it.
