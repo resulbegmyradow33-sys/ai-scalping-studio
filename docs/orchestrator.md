@@ -589,7 +589,7 @@ register_default_handlers(orchestrator, context)
 | `knowledge.ingest` | document → index → drafts | `document_path` (required), `market_scope`, `timeframe_scope`, `max_hypotheses` | `doc_id`, `checksum`, `status`, `sections`, `drafts`, `skipped`, `scanned_sentences`, `duplicate`, `stored_path`, `index` |
 | `dataset.build` | stored bars → cached features → manifest | `symbol`, `timeframe` (required), `horizon`, `train_fraction`, `validation_fraction`, `purge_bars`, `embargo_bars`, `notes` | Manifest document plus `bars_rows`, `purged_rows`, `manifest_path` |
 | `discovery.run` | bounded search → recorded decision | `symbol`, `timeframe`, `max_trials`, `seed`, `gate` (all required), `stress`, `population`, `generations`, `patience`, `horizon` | `decision`, `reason`, `promoted: false`, `trials`, `accepted`, `best_candidate_id`, `dataset_id`, `decision_id`, `stop_reason`, `seed`, `code_version`, `archive` |
-| `paper.advance` | champion → autonomous DSL paper run | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `spec_hash`, `session_id`, bar/trade counts, ledger path |
+| `paper.advance` | champion → continuous DSL paper advance | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `mode: "continuous"`, `spec_hash`, `session_id`, `bars_advanced`, `bars_processed`, `last_bar_ts`, trade counts, ledger path |
 | `paper.analyse` | ledger → closed-trade summary | `symbol`, `timeframe`, `max_sessions` (all optional) | Counts, P&L, R, win rate, `open_positions_excluded`, per-session attribution |
 
 ### Payload contract
@@ -608,14 +608,24 @@ disabled. An empty gate is exploratory search policy, not promotion evidence,
 and writing it down makes that visible in the job payload. `stress` defaults to
 `[1.5, 2.0]` but is always passed to `DiscoveryRunConfig` explicitly.
 
+`paper.advance` keeps `bars` as its validated budget field and as the natural
+dedupe-key component. The continuous runner's contract is to advance every
+newly closed stored bar, so one call is not capped at `bars`: the result reports
+the work that actually ran in `bars_advanced` (alias `bars_this_call`) and the
+durable total in `bars_processed`. A caller that needs a smaller unit of work
+should enqueue after a smaller ingestion batch, not expect the handler to slice
+the stored range.
+
 ### Failure classification
 
 | Class | Example | Queue behaviour |
 |---|---|---|
 | Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
+| Permanent advance refusal (`paper.advance`) | `bar_order:` duplicate/unsorted stored bars, `session_conflict:` incompatible or unreplayable ledger session, `continuous_refused:` finished or inconsistent session | `failed` on the first attempt with the typed prefix in `jobs.error` |
+| Retryable advance refusal (`paper.advance`) | `bar_gap:` a bar is missing in the pending range | retryable with backoff; a later ingestion may close the gap |
 | Retryable (any other exception) | SQLite busy, I/O error, unexpected bug | bounded retry with exponential backoff |
 | No handler | kind not registered | `failed`, permanent, `no_handler` event |
-| NO TRADE | no champion, invalid champion payload | `succeeded`; the result document says `action: "no_trade"` and why |
+| NO TRADE | no champion, evidence-free champion, invalid champion payload | `succeeded`; the result document says `action: "no_trade"` and why |
 
 NO TRADE is never a failure. A retry would not change a missing champion, so it
 must not consume attempts.
@@ -632,11 +642,13 @@ must not consume attempts.
 - `discovery.run` deduplicates candidates by canonical hash in the archive; a
   rerun on the same dataset/seed evaluates no new trials and records
   `no_change`.
-- `paper.advance` is idempotent at the queue, not at the handler: the dedupe key
-  is what prevents a second advance. Advancing is a step, so calling the same
-  handler twice with different keys intentionally advances twice. Use
-  `paper.advance:{symbol}:{timeframe}:{bars}` (or a bar-range key) as the dedupe
-  key.
+- `paper.advance` is idempotent at the ledger cursor, not only at the queue. The
+  continuous runner derives one session id from symbol, timeframe and the
+  canonical spec hash, and the newest recorded signal is the cursor, so a second
+  job with a different dedupe key cannot append a bar that is already recorded.
+  With no new stored bars it succeeds with `bars_advanced: 0`. The queue dedupe
+  key still saves the work of running it, so use
+  `paper.advance:{symbol}:{timeframe}:{bars}` (or a bar-range key).
 - `paper.analyse` only reads; a rerun returns the same summary unless the ledger
   changed.
 
@@ -647,7 +659,12 @@ and `DiscoveryRunResult` raises if asked. The handler also checks the returned
 decision before storing its result. Promotion stays an explicit, reviewed call:
 `promote_with_evidence` for production, `promote_exploratory` for research, and
 `rollback` to restore a previous champion. `paper.advance` selects the champion of
-`symbol:timeframe` through `ChampionProvider`. If the archive is absent, has no
+`symbol:timeframe` through `ChampionProvider` and hands it to
+`ContinuousPaperRunner`. A Phase-12 slice session is resumed only when its
+symbol, timeframe, strategy, spec hash, window and settings match and its
+recorded signals still land on the stored decision bars; that session's newest
+signal is its cursor, so no migration is needed. Any other pre-existing session
+is a permanent `session_conflict` failure. If the archive is absent, has no
 champion, the champion is exploratory/manual (`NoEvidenceChampion`), or the
 stored payload fails DSL validation or hashes inconsistently, the job records NO
 TRADE and the handler opens no ledger, writes no order and never falls back to
@@ -673,7 +690,10 @@ spanning more than 31 days is not read at all and reports
 - The resource guard still does not measure anything. `HEAVY_HANDLER_KINDS`
   names `dataset.build` and `discovery.run` for the caller's `heavy_kinds`, but
   peak RAM/CPU/disk on the M2 are unproven here.
-- `paper.advance` is dedupe-key idempotent, not replay-idempotent.
+- `paper.advance` advances every newly closed stored bar in one call; `bars` is
+  validated and recorded but is not a per-call cap, so a job can outgrow its
+  requested budget when a large slice accumulated. `bars_advanced` reports the
+  real number.
 - Outcome analysis is descriptive: counts, P&L and R. It does not test a
   hypothesis, enqueue the next discovery cycle or train anything.
 - `discovery.run` still evaluates on one validation slice. It is not
@@ -889,10 +909,12 @@ job terminal, the v1→v2 deferral migration, event-log completeness,
 restart. The handler tests cover a real
 ingest/index/extract round trip, checksum idempotency, dataset manifest
 reproducibility, an unknown symbol refusal, a real bounded discovery run that
-records no promotion, a no-champion NO TRADE that writes nothing, a governed
-champion paper advance with queue dedupe, an invalid champion payload, closed-
-only outcome analysis with an open position excluded, and permanent failure for
-invalid payloads with the retry budget untouched.
+records no promotion, a no-champion NO TRADE that writes nothing, continuous
+champion advances that are append-only across calls and a process restart, a
+no-new-bar scan that writes nothing, typed `bar_gap`/`bar_order` refusals, a
+resumed and an incompatible legacy slice session, an invalid champion payload,
+closed-only outcome analysis with an open position excluded, and permanent
+failure for invalid payloads with the retry budget untouched.
 
 The measured-guard tests cover: disabled limits allow; each limit refuses at its
 boundary and allows just inside it; reasons carry the limit and the measured
@@ -977,11 +999,11 @@ Proven by that file:
 
 Not proven by it:
 
-- **`paper.advance` still uses the slice runner.** The handler calls
-  `AutonomousPaperRunner` (`paper/autonomous.py`), not
-  `ContinuousPaperRunner` (`paper/continuous.py`). The queue path is proven for
-  the slice runner only; continuous cadence, gap and resume semantics are not
-  reachable from `paper.advance` yet.
+- **`paper.advance` is wired but unproven on real data.** The queue path reaches
+  `ContinuousPaperRunner` and pins append-only advance, restart, gap/order
+  refusal and legacy-session resume. It does not prove a live feed cadence, a
+  real ledger, or concurrent access to one ledger from two processes; the
+  handler's `bars` budget is not a per-call slice (see the payload contract).
 - **`tick(now=...)` does not reach crash recovery.** `Orchestrator.start()` has
   no `now` parameter, so `recover_interrupted` stamps a requeued row with the
   wall clock. The integration test therefore drives the daemon with the wall

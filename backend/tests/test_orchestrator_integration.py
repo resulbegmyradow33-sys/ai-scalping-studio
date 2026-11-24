@@ -23,16 +23,12 @@ them fails here instead of only in production:
 * the flow imports no holdout or real-money module and the evaluator only ever
   sees the validation slice.
 
-Known wiring gap, asserted around instead of hidden
----------------------------------------------------
 ``paper.advance`` is handled by
-:class:`~scalping.paper.autonomous.AutonomousPaperRunner` (the slice runner from
-Phase 12), not by :class:`~scalping.paper.continuous.ContinuousPaperRunner`.
-This file therefore proves that a queue-driven paper job advances through the
-slice runner and records a NO TRADE when no champion exists; it does **not**
-prove that the continuous runner's cadence/gap semantics are reachable from the
-queue. That remains an open wiring gap for a later slice, and the assertions
-below only claim what runs.
+:class:`~scalping.paper.continuous.ContinuousPaperRunner`; this file proves that
+a queue-driven paper job records NO TRADE when no champion exists. The
+handler-level suite (`test_orchestrator_handlers.py`) proves the continuous
+cadence, restart, gap/order refusal and legacy-session resumption; this file does
+not repeat those cases, and its no-champion assertions only claim what runs.
 
 One test seam is worth naming: ``Orchestrator.start()`` has no ``now``
 parameter, so crash recovery stamps a requeued row with the wall clock. The

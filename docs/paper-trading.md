@@ -31,7 +31,8 @@ Implemented:
   hand-written policy; see “Autonomous DSL runner”.
 - `scalping.paper.continuous.ContinuousPaperRunner` — advances the same session
   as new bars are stored, refuses gaps and ordering defects, and exposes
-  `matured_outcomes` / `outcome_fingerprint` for the research loop; see
+  `matured_outcomes` / `outcome_fingerprint` for the research loop. The
+  orchestrator's `paper.advance` job is the wired entry point; see
   “Continuous operation”.
 - Restart safety: reopening a ledger and resuming a session replays the
   recorded actions, verifies the account against the stored state and only then
@@ -295,6 +296,14 @@ with PaperLedger("var/paper/autonomous.db") as ledger:
 matrix, resumes the session and appends only new decisions. The call is
 caller-driven: there is no polling thread, daemon or scheduler in this slice.
 
+The normal entry point is now the orchestrator's `paper.advance` job. The
+handler resolves the evidence-mode champion through `ChampionProvider`, builds
+one `ContinuousPaperRunner`, calls `advance()` once and records
+`mode: "continuous"`, `bars_advanced`, `bars_processed`, `last_bar_ts` and the
+session id in the job result. The payload's `bars` is validated and recorded,
+but the continuous contract advances every newly closed stored bar, so it is a
+budget label, not a per-call cap.
+
 ### Idempotency rule
 
 The ledger is the cursor. The last processed timestamp is the newest signal in
@@ -311,7 +320,11 @@ signal.
 The session id remains `auto-<symbol>-<timeframe>-<hash prefix>`. A session
 created by the autonomous runner is resumed if symbol, timeframe, strategy hash,
 window, seed and contract/risk/cost settings match; a mismatch raises
-`SessionMismatchError` rather than silently replaying a different account.
+`SessionMismatchError` rather than silently replaying a different account, and a
+ledger mark the replay cannot reproduce raises `ResumeError`. From the
+orchestrator either refusal is a permanent `session_conflict` job failure. A
+legacy slice session needs no cursor migration: its newest recorded signal is
+the cursor, provided the signals still land on the stored decision bars.
 `scope` (default `<symbol>:<timeframe>`) is recorded for audit and does not
 change the id.
 
@@ -512,11 +525,12 @@ integration:
 - A demo or live MT5 integration. `Mt5DemoAdapter` refuses every call.
 - Session scheduler and a long-running process separate from training; the API
   records a session but nothing steps it.
-- API/CLI wiring for `AutonomousPaperRunner`. It is constructed in-process; the
-  next slice adds the endpoint/command that selects a discovered spec, runs it
-  and exposes the summary.
+- A direct HTTP/CLI entry point that constructs a runner. The orchestrator's
+  `paper.advance` job reaches `ContinuousPaperRunner` with champion gating; there
+  is no endpoint or command that selects a spec and runs a session in-process.
 - A scheduler or daemon for continuous operation. `advance()` is caller-driven;
-  nothing polls the store, sleeps or retries, and no endpoint starts a loop.
+  nothing polls the store, sleeps or retries on new bars, and no endpoint starts
+  a loop.
 - Limit orders and partial fills. `orders.status` already has `pending`, and
   `resume` reports pending rows, but the runner only sends market orders.
 - Exit fills in `fills`. The broker settles exits as `trades`; the exit price
