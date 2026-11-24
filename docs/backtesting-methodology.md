@@ -225,19 +225,142 @@ later extension, not silently assumed.
 | `schema_mismatch` | the bundle schema version is not the current one |
 | `checksum_mismatch` / `missing_section` | a bundle was edited or is incomplete |
 
+## Locked final holdout (one-shot)
+
+`scalping.discovery.holdout` turns the final test split into a spend-once
+resource. The protocol is deliberately separate from search and from the
+promotion policy: search never sees test rows, the policy decides whether a
+candidate deserves a holdout, and this module records the one time that
+decision is acted on.
+
+### Ledger and identity
+
+`HoldoutLedger(path)` is a small SQLite ledger (WAL, foreign keys, schema
+version, `busy_timeout`, `synchronous = NORMAL`, matching the discovery
+archive). Two tables matter:
+
+| Table | Purpose |
+|---|---|
+| `holdouts` | one row per `(dataset_id, dataset_checksum)`, with `status` (`sealed`/`spent`), the sealed `spec_hash`, `symbol`, `timeframe`, `code_version`, `settings_digest`, the unlocking `policy_id`/`policy_version`/`evidence_checksum`, `spent_at`, and the immutable `result_json`/`result_checksum`. |
+| `access_log` | append-only rows with timestamp, action (`seal`/`unlock`/`evaluate`), outcome (`granted`/`refused`), dataset identity, actor, reason and detail. SQLite triggers reject `UPDATE` and `DELETE`, so a refusal cannot be quietly erased. |
+
+A `HoldoutSpec` carries the identity that is sealed. A new independent dataset
+version/checksum is a new key and therefore a new seal. You cannot re-seal a
+spent `(dataset_id, dataset_checksum)` for a different spec: the same data
+build is the same holdout.
+
+### Protocol
+
+1. **Seal.** `ledger.seal(HoldoutSpec(...))` records the identity while the test
+   rows remain untouched. Re-sealing the same identity is idempotent; a
+   conflicting identity for the same dataset build is refused.
+2. **Unlock.** `ledger.unlock(spec, decision=..., policy=...)` requires an
+   accepted `PromotionDecision` from the supplied policy version. The decision's
+   dataset id/checksum, spec hash, code version and settings digest must match
+   the sealed identity. A rejected decision, a mismatched identity or a policy
+   version mismatch leaves the row `sealed`. The transition `sealed -> spent`
+   is one conditional `UPDATE`, so concurrent unlock attempts produce exactly
+   one winner. A second unlock for the same `(dataset_id, dataset_checksum)`
+   raises `HoldoutSpent`, even when it names a different spec.
+
+   The decision must be **sealed** by `evaluate_promotion`; a hand-constructed
+   or mutated decision is refused. `policy` is the **target production policy**
+   the holdout is being spent for and must be in
+   `scalping.discovery.promotion.PRODUCTION_POLICIES`. Because `PROMOTION_V1`
+   requires the `locked_oos` section that does not exist before the spend, the
+   eligibility decision comes from a named non-production policy with
+   `require_locked_oos=False`. `unlock` records the target policy's id, version
+   and digest in the holdout row/token/result, so the final promotion sees a
+   matching section and re-evaluates the attached bundle with `PROMOTION_V1`
+   (`require_locked_oos=True`). The eligibility decision is preserved in
+   `decision_json`, so the audit distinguishes the two checks.
+3. **Evaluate once.** `evaluate_holdout(features_or_bundle, spec, config,
+   ledger=..., unlock_token=...)` validates the single-use token, claims the one
+   evaluation slot, slices the manifest's final test rows, and runs the existing
+   `DslEvaluator` with the configured costs and stress multipliers. The result
+   records trades, net profit, profit factor, win rate, expectancy in R, total
+   R, max drawdown, per-regime rows, per-stress rows and iid bootstrap intervals.
+   It is written to `holdouts.result_json` in the same transaction that clears
+   the token. Re-running the same token, or the same holdout with any other
+   token, raises `holdout_result_exists`; the result is never recomputed.
+4. **Verify.** `verify_holdout_result(result, evidence)` re-derives the result
+   checksum and checks the dataset id/checksum, spec hash, code version,
+   settings digest, symbol and timeframe against the evidence identity.
+5. **Attach.** `attach_holdout(evidence, result)` returns a **new, type-exact**
+   `CandidateEvidence` with a frozen `LockedOOSEvidence` section; the input
+   bundle is not mutated. The section's `checksum` is the canonical
+   `locked_oos_checksum(section)`, and its `evidence_checksum` is the
+   pre-attachment evidence bundle's checksum. The test range must equal
+   `splits.test_start_row/end_row`, start at or after
+   `splits.validation_end_row`, and carry ordered timestamps after the last
+   validation fold. The section is what `require_locked_oos=True` recognises.
+   Attaching the same result twice is idempotent, and a result unlocked by a
+   different evidence checksum cannot be attached.
+
+Nothing reads the test rows before unlock. A refused unlock never receives a
+feature frame; `evaluate_holdout` validates the token and claims the evaluation
+before slicing. If the process dies after the claim but before the result is
+stored, the holdout stays `spent` with no result. That is the one-shot rule:
+losing an evaluation is safer than silently repeating it.
+
+### Refusal codes
+
+`HoldoutError` carries a stable `code`. `HoldoutSpent` is the specific
+already-spent refusal.
+
+| Code | Meaning |
+|---|---|
+| `holdout_not_sealed` | no sealed row exists for this dataset build |
+| `holdout_conflict` | a different identity is already sealed for the same dataset build |
+| `decision_rejected` | the promotion decision was not accepted |
+| `decision_policy_mismatch` | the decision's policy id/version is not the supplied policy |
+| `decision_identity_mismatch` | the decision's dataset/spec/code/settings identity differs from the seal |
+| `holdout_identity_mismatch` | the requested spec/code/settings differs from the sealed row |
+| `holdout_spent` | the dataset build already consumed its one evaluation |
+| `holdout_invalid_token` | the token is unknown, belongs elsewhere or was already consumed |
+| `holdout_evaluation_in_progress` | another caller claimed the evaluation slot |
+| `holdout_result_exists` | a result is already stored and cannot be recomputed |
+| `holdout_evaluation_failed` | the one simulation failed after the slot was claimed |
+| `non_finite_holdout` | a stored metric, R multiple or CI bound is not finite |
+| `stale_*` / `checksum_mismatch` | verification identity or result checksum differs |
+| `evidence_checksum_mismatch` | the result was unlocked by a different evidence bundle |
+| `locked_oos_conflict` / `locked_oos_mismatch` | the evidence already carries a different holdout section |
+
+### What a new holdout requires
+
+A genuinely new holdout needs a new independent dataset version with a new
+`dataset_checksum` (new data or a separately frozen build), a new `HoldoutSpec`
+seal, its own accepted promotion decision, and its own single evaluation. A new
+candidate on the same dataset build is **not** a new holdout: the spent key
+stays spent forever. This is the point of the ledger, not an inconvenience.
+
+### Honest limits
+
+One holdout result is still one sample. The protocol prevents reuse and records
+who spent it; it does not make the sample large, add a multiple-testing
+correction, or remove selection bias that happened during search. A single
+holdout pass can be unlucky in either direction, one symbol/timeframe is not a
+cross-market validation, and an iid bootstrap interval ignores serial
+dependence. A passing holdout is not a profitability claim and not paper
+trading. Reusing the same data under another name, or "just checking" a variation
+after seeing the result, destroys the property this ledger exists to protect.
+
 ### What is still missing
 
-- **The locked final OOS call.** This slice never reads the test split, so the
-  final holdout is still untouched; evaluating it once is a later, explicit
-  decision that must not be used for tuning. The production policy sets
-  `require_locked_oos=True`, so every bundle without a valid `LockedOOSEvidence`
-  field rejects with `missing_locked_oos`. That rejection is honest and expected,
-  not a bug: the holdout slice attaches the section.
+- **Wire the holdout into the autonomous path.** The protocol, ledger and
+  evidence attachment exist and are tested, but discovery/orchestration do not
+  yet call them, and no real XAUUSD holdout has been spent. The production policy
+  sets `require_locked_oos=True`, so every bundle without a valid frozen
+  `LockedOOSEvidence` field rejects with `missing_locked_oos`; that rejection is
+  honest and expected, not a bug. The holdout slice attaches the section, after
+  which the policy can evaluate the complete evidence bundle.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
-  folds may overlap the validation/selection window, but no deflated metric or
-  false-discovery control is applied here. A policy pass bounds the exposure; it
-  does not undo it.
+  folds may overlap the validation/selection window. The screening control in
+  `scalping.discovery.selection` now applies a Bonferroni/Sidak-adjusted mean-R
+  test and a deflated effect floor, but no evidence bundle or promotion policy
+  consumes its report automatically. A policy pass bounds the exposure; it does
+  not undo it.
 - **Parameter-neighbourhood and cross-symbol stability.** One spec on one
   dataset build is measured; a sensitivity sweep is not.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
@@ -258,6 +381,168 @@ policy accept it, not `paper-traded` until the exact spec runs in the paper
 engine, and never a profitability claim. Discovery produces candidates; a
 bundle is not a promotion, and a validation winner after N trials is a
 multiple-testing warning rather than evidence of a durable edge.
+
+## Multiple-testing and data-snooping control (discovery)
+
+`scalping.discovery.selection` answers one narrow question: after a search
+scored `m` candidates and kept the best, is the winner's mean R still above a
+threshold that accounts for the search? It is a screening control. It never
+promotes, never selects and never writes the archive.
+
+### Inputs
+
+| Config field | Default | Meaning |
+|---|---|---|
+| `trial_count` | `1` | candidates actually scored before this winner, including rejected ones |
+| `search_budget` | `100` | the run's declared cap; a trial count above it is an inconsistent record |
+| `family_alpha` | `0.05` | family-wise error rate, not a per-test rate; must be in `(0, 0.5)` |
+| `min_effect` | `0.0` | economically meaningful mean R before deflation; a floor, never a target |
+| `complexity` | `0` | the candidate's structural cost; only a logarithm enters the penalty |
+| `folds` | `3` | contiguous chunks used for the minimum-sample check, not an OOS split |
+| `seed` | `0` | makes the naive percentile bootstrap reproducible |
+
+`selection_report(trades, config)` reads each closed trade's `r_multiple`
+(already net of costs) in chronological order. It refuses, with a stable
+`SelectionError` code:
+
+- `trial_count < 1`, a non-positive or above-`1 000 000` `search_budget`, or
+  `trial_count > search_budget`;
+- a non-finite `r_multiple`, `family_alpha`, `min_effect` or computed statistic;
+- fewer than `max(folds * 5, 10)` trades;
+- a zero-variance sample, where the standard error is zero and a t-test would
+  be undefined.
+
+The fold count is a diagnostic, not walk-forward evidence: the ordered trades
+are cut into contiguous chunks and every chunk must hold at least five trades.
+Balanced chunking makes that automatic once the total floor is met. The
+implementation also bounds `folds` to `1..100`, `complexity` to `1 000 000` and
+`seed` to `2**63 - 1`, so a nonsense integer cannot make the arithmetic or the
+RNG call undefined.
+
+### Family-wise significance
+
+The test is one-sided over the mean R multiple:
+
+```text
+t      = mean_r / (s / sqrt(n))          with n - 1 degrees of freedom
+p      = P(T > t)                        one-sided, unadjusted
+alpha_B = family_alpha / m               Bonferroni per-test rate
+alpha_S = 1 - (1 - family_alpha) ** (1/m)   Sidak per-test rate
+alpha*  = min(alpha_B, alpha_S)           the value that gates
+t*      = t quantile at 1 - alpha*
+threshold_r = t* * s / sqrt(n)
+```
+
+Bonferroni is always at most Sidak for `m > 1`, and Bonferroni controls the
+family-wise error rate without assuming independent trials. Sidak is reported
+for reference only. The report also exposes the equivalent
+`bonferroni_p_value = min(1, m * p)`.
+
+With one trial and `family_alpha = 0.05`, this reduces to the ordinary
+one-sided 95% t-test. With `m` trials it is not the ordinary test repeated: the
+critical value moves with `m`, and `threshold_r` grows.
+
+### Deflated effect floor
+
+Significance alone is not economic substance, and the winner of many trials is
+biased upward even when the null is true. The required mean R is raised by a
+penalty scaled by the standard error:
+
+```text
+search_term     = sqrt(2 * ln(max(m, 1)))
+complexity_term = 0.25 * ln(1 + complexity)
+penalty_r       = min(1.0, 0.5 * se * (search_term + complexity_term))
+deflated_r      = max(min_effect, threshold_r + penalty_r)
+```
+
+`sqrt(2 ln m)` is the leading order of the expected maximum of `m` independent
+standard normals, the intuition shared with a deflated Sharpe ratio. The
+complexity term charges for a larger hypothesis space. The `0.5` factor keeps
+the penalty from double-counting the critical value. The `1.0 R` cap prevents
+an extreme trial count from producing an unbounded requirement. These
+coefficients are stated heuristics, not calibrated constants; no decimal of the
+deflated threshold should be read as precision.
+
+The report passes only when both conditions hold:
+
+```text
+mean_r >= deflated_r
+bonferroni_p_value <= family_alpha
+```
+
+The second condition is arithmetically implied by the first up to floating-point
+rounding; it is checked so the threshold and p-value cannot disagree silently.
+
+### Naive interval
+
+`naive_ci` is a seeded percentile bootstrap of the mean, 1 000 resamples,
+two-sided at `1 - family_alpha`. It is called naive because it ignores the
+number of trials and the selection of this candidate. It is iid by
+construction: it destroys streak clustering and can look tighter than a
+chronological trade sequence supports. A block bootstrap is not implemented.
+
+### Promotion advice
+
+`promotion_advice(report)` returns a recommendation and reasons, never a
+promotion:
+
+| Recommendation | When |
+|---|---|
+| `accept` | the report passed the adjusted threshold and deflated floor |
+| `reject` | the report failed **and** the naive interval's upper bound is below `min_effect`, so the required effect is ruled out |
+| `insufficient_evidence` | the report failed but the interval still leaves the required effect possible, or the supplied sample is below a stricter `min_trades` floor |
+
+Statistical non-significance is reported as insufficient evidence, not as
+proof of no edge. `accept` means only "this screening control did not stop the
+candidate". The named, versioned promotion policy still judges identity, fold
+geometry, locked out-of-sample evidence, cost stress, regime coverage and the
+champion comparison. The advice object has no policy authority and cannot be
+passed to the archive or the promotion path.
+
+### Limits
+
+- **The trial count must be truthful.** Unrecorded trials, a changed search
+  space, discarded candidates or adaptive stopping all invalidate the
+  correction. The module cannot detect them.
+- **No look-elsewhere guarantee.** The correction covers the finite number of
+  trials the caller declares. It says nothing about an unbounded or uncountable
+  search space, and it is not a p-hacking panacea: a lucky result can still
+  pass, and a manipulated search can still produce a report that looks honest.
+- **iid and normal-ish assumptions.** A t-test and an iid bootstrap assume
+  trade R multiples are sufficiently independent and similarly distributed.
+  Serial dependence, regime shifts, cost changes and path-dependent sizing can
+  make both the p-value and the interval optimistic.
+- **The deflated penalty is a heuristic.** It is bounded, monotonic in trials
+  and complexity, and deliberately coarse. It is not a posterior probability,
+  a false-discovery rate or a calibrated expected maximum.
+- **No parameter-neighbourhood, cross-symbol or out-of-sample evidence.** One
+  candidate's trade list is screened. Parameter stability and the locked
+  holdout are separate gates.
+- **Not a promotion.** A passing report is a candidate for independent
+  evidence, never a champion and never a profitability claim.
+
+```python
+from scalping.discovery.selection import (
+    SelectionConfig,
+    promotion_advice,
+    selection_report,
+)
+
+report = selection_report(
+    trades,
+    SelectionConfig(
+        trial_count=42,
+        search_budget=100,
+        complexity=12,
+        min_effect=0.05,
+        folds=3,
+        seed=7,
+    ),
+)
+advice = promotion_advice(report)
+print(report.to_dict())
+print(advice.recommendation, advice.reasons)
+```
 
 ## Reproducing a candidate experiment (discovery)
 
