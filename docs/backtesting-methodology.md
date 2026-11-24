@@ -132,6 +132,114 @@ feeds the risk sizing, so a worse run can size differently and open a different
 number of trades. The grid reports that honestly instead of holding the trade
 set fixed.
 
+## Candidate evidence bundle (discovery)
+
+`scalping.discovery.evidence` builds an immutable `CandidateEvidence` for one
+DSL spec on one dataset build. It is the promotion-grade evidence input, not a
+promotion: it records folds, stress and intervals so a separate policy can
+judge them. A bundle on its own proves that the measurements were made
+correctly, never that the candidate has an edge.
+
+### What the bundle contains
+
+| Section | Fields |
+|---|---|
+| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `seed`, `trial_count`, `search_budget` |
+| policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
+| folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
+| aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
+| stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
+
+Every number is finite or the build fails. A profit factor of `inf` (wins with
+no losses) is rejected rather than clamped: the fold has no loss evidence. The
+identity is part of the checksum, so a stale dataset, spec or code version is
+detectable before a policy reads a metric.
+
+### Fold geometry
+
+Rows are `DatasetBundle` positions. The discovery timeline starts at the first
+train row and ends at the manifest's validation end; the final test rows are
+never sliced or named to an evaluator. It is cut into `folds + 1` contiguous
+blocks. Block 0 is initial history; block `k` is fold `k`'s test block.
+
+```text
+train: [0, test_start - gap)      expanding
+gap:   purge + embargo bars       immediately before the test block
+test:  [test_start, test_end)     no overlap with another fold
+```
+
+`gap = max(config.purge_bars, manifest.purge_bars) +
+max(config.embargo_bars, manifest.embargo_bars)`. The manifest purge is already
+at least the label horizon. The DSL policy has no fitted parameters, so the
+training range is recorded for provenance rather than refitted; "expanding"
+means every later fold's recorded history includes the earlier test blocks.
+
+Each test block is simulated by the same `DslEvaluator` the search uses: same
+costs, risk engine, weekly session and bar order. The first `window - 1` bars of
+a fold are warm-up inside the block, so a fold needs more than `window` rows.
+Regime labels come from the causal rule engine on that fold slice and are
+attached to trades at their entry timestamp; an unlabelled entry is `unknown`
+and counts against coverage.
+
+### Confidence intervals
+
+Two 95% percentile intervals are reported from pooled per-trade `r_multiple`
+values: one for mean R (expectancy) and one for total R. The bootstrap is iid
+with replacement, `bootstrap_samples` draws and one fixed seed. It is
+deterministic for identical inputs. Trade R values are already net of costs and
+are not re-priced. Iid resampling destroys streak clustering, so an interval
+can look tighter than a chronological sequence supports; a block bootstrap is a
+later extension, not silently assumed.
+
+### Fail-closed codes
+
+`build_evidence` and `verify_evidence` raise `EvidenceError` with a stable
+`code`; no partial bundle is returned.
+
+| Code | Trigger |
+|---|---|
+| `insufficient_folds` | fewer than 3 folds, or too few rows to fill the blocks |
+| `fold_geometry` | empty train/test range, overlapping test blocks, test rows inside the timeline |
+| `fold_too_small` | a test block is no longer than the observation window |
+| `fold_trades_below_minimum` | a fold closes fewer trades than the policy minimum |
+| `missing_cost_stress` | no multiplier configured, or a fold is missing a configured row |
+| `missing_regime_evidence` | the rule engine returned no labels |
+| `regime_coverage_below_minimum` | too few trades have a regime at entry |
+| `non_finite_evidence` | any stored metric, R multiple or CI bound is not finite |
+| `holdout_dataset` | the manifest id names a test/holdout split |
+| `symbol_mismatch` / `timeframe_mismatch` | config and manifest scope disagree |
+| `complexity_mismatch` | the configured complexity differs from the spec |
+| `invalid_trial_context` | `trial_count` exceeds `search_budget` |
+| `frame_mismatch` | the supplied feature frame is not the bundle's source frame |
+| `invalid_spec` | the DSL spec fails validation |
+| `stale_dataset` / `stale_spec` / `stale_code_version` | verification identity differs |
+| `checksum_mismatch` / `missing_section` | a bundle was edited or is incomplete |
+
+### What is still missing
+
+- **The locked final OOS call.** This slice never reads the test split, so the
+  final holdout is still untouched; evaluating it once is a later, explicit
+  decision that must not be used for tuning.
+- **Multiple-testing correction.** Trial count and search budget are recorded,
+  but no deflated metric, false-discovery control or complexity penalty is
+  applied here. Those belong to the promotion policy.
+- **Parameter-neighbourhood and cross-symbol stability.** One spec on one
+  dataset build is measured; a sensitivity sweep is not.
+- **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
+  the legacy incumbent and the current champion are not run by this module.
+- **A block bootstrap.** Iid intervals are stated as a simplification.
+- **Any paper or live claim.** The bundle contains historical simulation
+  evidence only.
+
+### Evidence vocabulary
+
+A bundle is `implemented` when the code runs and its tests pass. It is not
+`validated` until an independent chronological OOS protocol and a promotion
+policy accept it, not `paper-traded` until the exact spec runs in the paper
+engine, and never a profitability claim. Discovery produces candidates; a
+bundle is not a promotion, and a validation winner after N trials is a
+multiple-testing warning rather than evidence of a durable edge.
+
 ## Commands
 
 Both commands reuse the stored M1 frame, build features once and run the same
