@@ -28,9 +28,18 @@ from scalping.discovery.protocols import (
     canonical_digest,
     canonical_json,
 )
+from scalping.discovery.run import (
+    BASELINES,
+    DiscoveryRunConfig,
+    DiscoveryRunError,
+    DiscoveryRunResult,
+    decide,
+    run_discovery,
+)
 from scalping.discovery.search import STOP_REASONS, SearchConfig, SearchResult, evolve
 
 __all__ = [
+    "BASELINES",
     "DECISIONS",
     "DEFAULT_SCOPE",
     "SCHEMA_VERSION",
@@ -43,6 +52,9 @@ __all__ = [
     "ChampionRecord",
     "DecisionRecord",
     "DiscoveryArchive",
+    "DiscoveryRunConfig",
+    "DiscoveryRunError",
+    "DiscoveryRunResult",
     "Evaluator",
     "Factory",
     "SearchConfig",
@@ -52,5 +64,7 @@ __all__ = [
     "UnknownCandidateError",
     "canonical_digest",
     "canonical_json",
+    "decide",
     "evolve",
+    "run_discovery",
 ]

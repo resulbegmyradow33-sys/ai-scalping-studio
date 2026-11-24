@@ -6,11 +6,13 @@ rules or named strategies. Slice A built the candidate contract, the archive
 that holds the evidence and a bounded search loop. Slice B added the
 DSL/AST and its interpreter (`docs/strategy-dsl.md`). Slice C wires that DSL to
 the simulator in `scalping.discovery.evaluate.DslEvaluator`, so a candidate now
-produces real net-of-cost trial metrics. Phase 19 slice B adds strategy champion
-governance to the archive: a discovered spec can be promoted to the paper
-champion, compared, replaced or rolled back, and `ChampionProvider` hands the
-stored spec to the paper runner. The protocol seam is unchanged: the loop still
-knows nothing about strategy semantics.
+produces real net-of-cost trial metrics. Slice D adds
+`scalping.discovery.run`: stored bars go in, a validation-only search runs, and
+a no-change/no-trade/rejected decision is written to the archive. Phase 19 slice
+B adds strategy champion governance: a discovered spec can be promoted to the
+paper champion, compared, replaced or rolled back with an audit trail, and
+`ChampionProvider` hands the stored spec to the paper runner. The protocol seam
+is unchanged: the loop still knows nothing about strategy semantics.
 
 Nothing in the discovery package executes generated code. A candidate is data:
 canonical JSON, a sha256 id and a structural cost. The evaluator interprets
@@ -49,7 +51,7 @@ configuration, because ranking needs a numeric key.
 `DiscoveryArchive` is one SQLite file with WAL, `busy_timeout`, connection-scoped
 foreign keys and a versioned schema, following `scalping.registry.db`. Schema
 version 1 created four domain tables plus `schema_version`; version 2 adds
-strategy champion governance (`champion_promotions`, `champions`), a
+strategy champion governance (`champion_promotions`, `champions`), the
 `rolled_back` outcome and a JSON `detail_json` on `decisions`. The migration is
 idempotent and keeps every existing candidate, trial, lineage edge and decision.
 
@@ -178,12 +180,135 @@ sequence. Ties in ranking always break on the candidate id, never on dictionary
 iteration. The trial seed is derived from the search RNG, so a single evaluation
 can be replayed from its row even without re-running the search.
 
+## Run contract: `discovery run`
+
+`scalping.discovery.run.run_discovery(config, root=..., should_stop=...)` is the
+end-to-end entry point. It reads the Parquet store at `root`, builds the causal
+feature matrix through `<root>/.feature-cache` (bypassed with
+`use_cache=False`), cuts a chronological dataset, keeps only the validation
+split, scores the baselines on that slice, runs the evolutionary search and
+records one decision.
+
+```
+store.read(symbol, timeframe)
+  → cached_build_features(...)
+  → build_dataset(...)                  # purge/embargo geometry only
+  → frame = features[validation.start:validation.end]
+  → DslEvaluator(frame, gate, window, stress)
+  → run_backtest(hold), run_backtest(ret_5)
+  → evolve(StrategyFactory, evaluator, DiscoveryArchive)
+  → decision
+```
+
+**Split discipline.** The test rows are never copied, never scored and never
+named to an evaluator. The dataset id is `validation:` plus the manifest id, so
+`DslEvaluator` accepts it and any other id is refused. A build whose validation
+split is empty is an error ("a manifest whose only rows are in test" cannot
+drive discovery), and a validation split no longer than the observation window
+is an error too, because the simulator would have no decision bar. The tests
+mutate every bar after `validation.end` and assert bit-identical candidate
+metrics: if a run leaked test rows, that test moves.
+
+**Cost parity.** Candidates and both baselines run on the same slice, with the
+same `Settings`, the same observation `window` and the same weekly session gate.
+`hold` never trades; `ret_5` buys while the last bar's 5-bar momentum is
+positive and carries the CLI's `rule:ret_5-baseline` label. A strategy that
+"beats hold" only because the baseline paid different costs has beaten nothing.
+
+`DiscoveryRunConfig` defaults (CLI names in parentheses):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `symbol` (`--symbol`) | `XAUUSD` | stored symbol |
+| `timeframe` (`--timeframe`) | `M1` | stored timeframe |
+| `max_trials` (`--max-trials`) | `100` (`24` in the CLI) | attempt cap, duplicates and invalid trees included |
+| `population` (`--population`) | `16` (`8`) | proposals per generation |
+| `generations` (`--generations`) | `5` (`4`) | generation cap |
+| `seed` (`--seed`) | `0` | search RNG seed, also the replay key |
+| `mutation_rate` (`--mutation-rate`) | `0.3` | per-slot mutation probability |
+| `crossover_rate` (`--crossover-rate`) | `0.2` | per-slot crossover probability |
+| `complexity_cap` (`--complexity-cap`) | `40` | maximum structural cost |
+| `archive` (`--archive`) | `runs/discovery/discovery.sqlite` | SQLite evidence file |
+| `use_cache` (`--no-cache`) | `True` | feature cache on |
+| `stress` (`--stress`) | `(1.5, 2.0)` | simulator cost multipliers |
+| `gate` (`--min-trades`, `--require-stress`, ...) | empty | acceptance criteria |
+| `baselines` (`--baseline`) | `hold,ret_5` | ordered comparison table |
+| `horizon`, `--train-fraction`, `--validation-fraction`, `--purge`, `--embargo` | `1`, `0.70`, `0.15`, `0`, `0` | split geometry |
+| `window` (`--window`) | `60` | observation warm-up |
+| `patience` (`--patience`) | `5` (`3`) | generations without a new best |
+| `max_lookback` / `max_depth` | `20` / `3` | DSL generation bounds |
+| `code_version` | source digest | recorded on every candidate and trial |
+
+```bash
+cd backend
+uv run python -m scalping.cli discovery run \
+  --root data --symbol XAUUSD --timeframe M1 \
+  --max-trials 24 --population 8 --generations 4 --seed 0 \
+  --archive runs/discovery/discovery.sqlite --out runs/discovery/last.json
+```
+
+The default CLI budget is a smoke budget: it proves the wiring in seconds.
+A real search needs thousands of trials, and the trial count is the honest
+denominator for every later claim (see
+[Trial accounting and multiple testing](#trial-accounting-and-multiple-testing)).
+`--stress ""` disables cost stress; the gate only rejects for a multiplier it
+was given and that was actually run (`missing_cost_stress` otherwise).
+
+`DiscoveryRunResult.to_dict()` is JSON-safe with no NaN or Infinity and carries
+the dataset id, the validation range (`start`, `end`, `rows`, first/last
+timestamp), the seed, the code version, the trial/skip/accepted counts and stop
+reason, the best accepted candidate's hash, canonical spec and metrics, the
+baseline table, the comparison numbers the decision used, the decision with its
+reason, the archive path and the decision row id.
+
+### Decision semantics
+
+`run_discovery` never writes `promoted`: a run ends at a recorded hypothesis.
+Promotion is a separate, explicit `DiscoveryArchive.promote` call after review
+(see [Champion governance](#champion-governance)); the registry gate continues to
+own *model* promotion. The run's vocabulary is:
+
+| Decision | When | Meaning |
+|---|---|---|
+| `no_trade` | the gate rejected every trial, or the best accepted candidate is flat (0 closed trades) | standing aside is the result, not a failure |
+| `no_change` | no accepted candidate beat the best baseline | the champion (or the baseline) stands |
+| `rejected` | an accepted candidate strictly beat the best baseline | an improving candidate exists; the run hands it to the champion governor instead of promoting it |
+
+The order is part of the contract and is implemented by the pure function
+`decide(...)`. A baseline that did not publish the selection metric is not
+"beaten"; a candidate that did not publish it cannot be compared. Every
+decision is persisted with `record_decision` under the best candidate of the
+run (or the archive's best when a rerun added no trials), and the reason string
+carries the numbers: the selection metric, the candidate value, the best
+baseline's name and value, and the trial count.
+
+**A validation winner after N trials is not evidence of a durable edge.** The
+decision only says what happened on one validation slice at a chosen cost
+level; it does not say the candidate will survive the untouched test split, a
+forward period, another symbol or another cost regime. `rejected` is a handoff
+to the champion governor, not a promotion, and `no_change`/`no_trade` are
+complete, honest outcomes.
+
+### Reproducibility and deduplication
+
+The dataset id comes from the manifest digest, the trial seeds from the search
+RNG and the code version from a digest of the modules that change arithmetic.
+Same store slice, seed, code version and an empty archive therefore reproduce
+the same candidate hashes and metrics. A second run on the same archive never
+re-tries a `(candidate, dataset, code version)` triple: repeats are counted as
+`duplicate` and reported as `deduped`. Because a skipped proposal does not draw
+a trial seed, the RNG stream diverges after a repeat, so a rerun explores new
+candidates instead of replaying the first run; `trials + skipped <= max_trials`
+still holds. The four `stop_reason` values are the search loop's
+(budget, patience, exhausted, stopped), reported verbatim.
+
 ## Champion governance
 
 A discovered candidate becomes the paper-trading champion through the archive,
 not through a hand-written strategy file. Three methods own the lifecycle:
 `promote`, `rollback` and the read side (`champion`, `champion_history`,
-`compare_to_champion`).
+`compare_to_champion`). `run_discovery` stops at a recorded decision; a
+`rejected` row hands the candidate over, and promoting it is this explicit call.
 
 ### Scope
 
@@ -326,7 +451,9 @@ training set, and no later gate can undo that.
 Purge and embargo geometry is not reimplemented. The caller builds the
 validation frame — reusing `scalping.ml.cv.fold_geometry` and the dataset
 builder's purge/embargo rules — and hands that one frame to the evaluator. The
-evaluator does not split, fold or embargo on its own.
+evaluator does not split, fold or embargo on its own. `run_discovery` is the
+caller that does this today: it slices the validation split out of the
+manifest and never touches the test slice.
 
 ## DSL evaluator: `DslEvaluator`
 
@@ -433,10 +560,12 @@ for wins without losses, and a gate that requires it then rejects with
   are a caller/orchestrator concern; the evaluator only refuses a holdout id.
 - **Out-of-sample and forward testing.** No test-slice access and no paper
   period. Those are later gates.
-- **Automatic champion comparison.** `champion`, `compare_to_champion` and
-  `promote` are explicit calls with an audit trail. Nothing runs them on a
-  schedule, watches the champion's live paper results, or rolls back because a
-  metric moved; that trigger belongs to the orchestrator and a later slice.
+- **Automatic champion monitoring.** `champion`, `compare_to_champion`,
+  `promote` and `rollback` are explicit calls with an audit trail. Nothing
+  schedules a comparison, watches the champion's live paper results or rolls
+  back because a metric moved. `run_discovery` itself compares only against
+  `hold` and `ret_5` and never promotes; the incumbent comparison is the
+  governor's job, and its trigger belongs to the orchestrator.
 - **Symbol, timeframe, regime and cost sweeps.** One run evaluates one dataset
   id. Cross-condition stability needs a caller that runs several and compares.
 - **Scheduler cancellation.** `should_stop` is the hook; connecting it to a job
@@ -450,12 +579,14 @@ for wins without losses, and a gate that requires it then rejects with
 
 ## Honest note
 
-This slice proves a search process wired to a cost-aware simulator, not a
-trading edge. It shows that candidates can be generated without owner-written
-rules, identified by content, deduplicated, simulated with real fills and
-costs, gate-checked, lineage-tracked and archived reproducibly within a budget.
-Whether any candidate makes money after spread, commission, slippage and
-drawdown on data it did not see is a question for the walk-forward and
-promotion gates, and the answer may be no trade. A large trial count is a
-warning about data-snooping risk, not a qualification. One candidate with a
-positive validation backtest, alone, is not evidence of a durable edge.
+This slice proves a search process wired to a cost-aware simulator and a
+recorded decision, not a trading edge. It shows that candidates can be generated
+without owner-written rules, identified by content, deduplicated, simulated with
+real fills and costs, gate-checked, lineage-tracked, baselined against `hold`
+and `ret_5`, archived reproducibly within a budget, and ended with an explicit
+`no_trade`, `no_change` or `rejected`. Whether any candidate makes money after
+spread, commission, slippage and drawdown on data it did not see is a question
+for the walk-forward and promotion gates, and the answer may be no trade. A
+large trial count is a warning about data-snooping risk, not a qualification.
+One candidate with a positive validation backtest after N trials, alone, is not
+evidence of a durable edge.
