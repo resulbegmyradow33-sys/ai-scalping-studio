@@ -259,6 +259,118 @@ engine, and never a profitability claim. Discovery produces candidates; a
 bundle is not a promotion, and a validation winner after N trials is a
 multiple-testing warning rather than evidence of a durable edge.
 
+## Reproducing a candidate experiment (discovery)
+
+`scalping.discovery.reproduce` answers master prompt §36.3: given the identity a
+bundle recorded, can the experiment be re-run today and produce the same
+evidence? It is a replay, not a re-search: the spec, seed, folds and costs are
+fixed by the stored bundle, and nothing is promoted.
+
+### The reproducibility contract
+
+A replay is possible only when all of these still exist and still agree:
+
+| Input | Where it comes from | Checked against |
+|---|---|---|
+| evidence bundle | one JSON file written from `CandidateEvidence.to_dict()` | its own `checksum`, `schema_version` and required sections |
+| strategy spec | `spec=` / `--spec`, or the sidecar `<bundle stem>.spec.json` | `spec_hash`, `complexity`, `spec_version` |
+| dataset bars | `<store-root>/<symbol>/<timeframe>/<yyyy>/<mm>.parquet` | rebuilt dataset checksum |
+| dataset artifact | `<store-root>/datasets/<dataset_checksum>/artifact.json` | artifact file digests, `dataset_id`, `dataset_checksum`, symbol, timeframe |
+| settings | `Settings()` or `--settings` YAML | `settings_digest` |
+| code version | `scalping.discovery.run.code_version()` | stored `code_version` |
+
+The bundle cannot carry the strategy itself: a hash cannot be inverted. The
+sidecar is a location convention only—its content is validated against
+`spec_hash`, so it is not a trusted shortcut.
+
+The dataset artifact is written by
+`scalping.datasets.artifact.save_dataset_arrays`. Its manifest supplies the
+split edges, feature groups and horizon that the evidence payload does not
+store, and its files are digest-checked on load. The arrays are then rebuilt
+from the bars and must reproduce the recorded checksum; the artifact is not a
+source of arrays that could bypass a changed bar.
+
+### What a replay does
+
+```text
+read bundle -> verify checksum/schema -> load spec -> check spec hash
+  -> check settings digest -> check code version -> load artifact manifest
+  -> rebuild dataset from bars -> rebuild evidence with stored policy
+  -> compare checksum -> equal: CandidateEvidence
+                        different: ReproduceMismatch(sections, differences)
+```
+
+`ReproduceMismatch` carries the rebuilt bundle, the expected and reproduced
+checksums and the first differing leaf paths (for example
+`aggregate.expectancy_r`). The original file is never rewritten.
+
+The dataset checksum covers the full array, including the test rows, because
+that is the stored identity. Reproduction rebuilds those rows to prove the
+checksum, but no fold, metric or gate reads them: evidence stops at the
+validation end and every fold's `test_end_row` is checked to stay inside the
+discovery timeline. There is no test/holdout evaluation and no promotion.
+
+### Refusals and exit codes
+
+Identity differences raise `ReproduceError` with a stable `code`; none of them
+falls back to a rerun under different inputs.
+
+| Code | Meaning | CLI exit |
+|---|---|---|
+| `bundle_missing`, `bundle_invalid` | no readable evidence file | 2 |
+| `spec_missing`, `spec_invalid` | the strategy was not supplied or does not parse | 2 |
+| `dataset_missing` | no artifact for the stored checksum | 1 |
+| `dataset_corrupt`, `dataset_manifest_invalid`, `dataset_checksum_invalid` | artifact files or manifest do not verify, or the stored checksum is not a hex digest | 2 |
+| `bars_missing`, `bars_invalid` | the bar store cannot rebuild the features | 2 |
+| `settings_invalid` | the supplied settings cannot be canonicalised | 2 |
+| `spec_mismatch`, `spec_complexity_mismatch`, `spec_version_mismatch` | a different strategy | 1 |
+| `settings_mismatch` | a different execution contract, risk or cost block | 1 |
+| `code_version_mismatch` | a different arithmetic tree | 1 |
+| `dataset_mismatch`, `dataset_checksum_mismatch`, `dataset_columns_mismatch` | the stored data or feature registry changed | 1 |
+
+Exit code 0 means the checksum was reproduced. Exit code 1 means the stored
+identity does not match this environment (or the rebuilt evidence differs).
+Exit code 2 means the input cannot be read or reproduced at all. Every result
+prints one JSON line:
+
+```json
+{"reproduced": true, "checksum": "...", "expected": "...", "mismatches": []}
+```
+
+A mismatch names the differing sections, for example
+`{"reproduced": false, "checksum": "...", "expected": "...", "mismatches": ["aggregate"]}`.
+`--out` writes the full report (including the rebuilt bundle) to a separate
+path.
+
+### Honest limits
+
+- **Same environment only.** Determinism assumes the same bars, artifact, code
+  version digest, settings, seed and library set. NumPy/BLAS builds, CPU
+  threading or a different Python patch level can move a floating-point result
+  and change a checksum. That is reported as a mismatch, not hidden.
+- **Deterministic seeds, not statistical replication.** The bootstrap and the
+  simulator use fixed seeds, so the same inputs give the same numbers. That
+  says the arithmetic replays; it does not say the result would repeat on
+  another sample.
+- **Floating point is compared exactly.** The checksum is over canonical JSON,
+  so a value that differs in the last bit is a difference. There is no
+  tolerance band: a tolerant comparison would hide the drift the contract is
+  meant to expose.
+- **No network, no look-ahead.** Nothing in the module opens a socket, retrains
+  anything or evaluates the holdout.
+- **Reproduction is not validation.** A replayed bundle is the same historical
+  simulation evidence. It is still not independent OOS evidence, not a
+  promotion and not a profitability claim.
+
+```bash
+cd backend
+uv run python -m scalping.cli discovery reproduce \
+  --bundle runs/discovery/candidate.evidence.json \
+  --store-root ../data-ticks5-store \
+  --settings configs/settings.yaml \
+  --out runs/discovery/reproduce.report.json
+```
+
 ## Commands
 
 Both commands reuse the stored M1 frame, build features once and run the same
