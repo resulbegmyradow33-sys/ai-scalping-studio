@@ -8,8 +8,11 @@ DSL/AST and its interpreter (`docs/strategy-dsl.md`). Slice C wires that DSL to
 the simulator in `scalping.discovery.evaluate.DslEvaluator`, so a candidate now
 produces real net-of-cost trial metrics. Slice D adds
 `scalping.discovery.run`: stored bars go in, a validation-only search runs, and
-a champion/no-change/no-trade decision is written to the archive. The protocol
-seam is unchanged: the loop still knows nothing about strategy semantics.
+a no-change/no-trade/rejected decision is written to the archive. Phase 19 slice
+B adds strategy champion governance: a discovered spec can be promoted to the
+paper champion, compared, replaced or rolled back with an audit trail, and
+`ChampionProvider` hands the stored spec to the paper runner. The protocol seam
+is unchanged: the loop still knows nothing about strategy semantics.
 
 Nothing in the discovery package executes generated code. A candidate is data:
 canonical JSON, a sha256 id and a structural cost. The evaluator interprets
@@ -47,7 +50,10 @@ configuration, because ranking needs a numeric key.
 
 `DiscoveryArchive` is one SQLite file with WAL, `busy_timeout`, connection-scoped
 foreign keys and a versioned schema, following `scalping.registry.db`. Schema
-version 1 creates four domain tables plus `schema_version`.
+version 1 created four domain tables plus `schema_version`; version 2 adds
+strategy champion governance (`champion_promotions`, `champions`), the
+`rolled_back` outcome and a JSON `detail_json` on `decisions`. The migration is
+idempotent and keeps every existing candidate, trial, lineage edge and decision.
 
 `candidates` — one row per canonical hash.
 
@@ -80,10 +86,20 @@ version 1 creates four domain tables plus `schema_version`.
 `crossover`. Edges are written on first registration only, so a later
 re-proposal cannot rewrite the derivation that actually happened.
 
-`decisions` — `promoted`, `rejected`, `no_change` or `no_trade`, with a reason,
-an optional champion id and a timestamp. `no_change` and `no_trade` are
-first-class outcomes: rejecting every candidate is a valid result, and a search
-that finds nothing better than the champion must be able to say so.
+`decisions` — `promoted`, `rejected`, `no_change`, `no_trade` or `rolled_back`,
+with a reason, an optional champion id, a timestamp and an optional JSON
+`detail_json` holding the numbers the decision used. `no_change` and `no_trade`
+are first-class outcomes: rejecting every candidate is a valid result, and a
+search that finds nothing better than the champion must be able to say so.
+
+`champion_promotions` — the append-only history of one scope: `kind`
+(`promoted` or `rolled_back`), the candidate, the predecessor, the metric and the
+two values that were compared, the stored reason and a timestamp.
+
+`champions` — exactly one row per scope (`PRIMARY KEY (scope)`): the current
+candidate, the promotion id that put it there, the timestamp and the reason. The
+row points into the history, so the live champion cannot drift from the audit
+trail; both are written in the same transaction.
 
 Deletes are restricted, not cascading. Deleting a candidate with children or
 trials is refused because a trial cannot be reconstructed from a path the way a
@@ -247,14 +263,16 @@ reason, the archive path and the decision row id.
 
 ### Decision semantics
 
-The archive accepts `promoted`, but `run_discovery` never writes it: discovery
-produces hypotheses and the registry gate owns promotion. The vocabulary is:
+`run_discovery` never writes `promoted`: a run ends at a recorded hypothesis.
+Promotion is a separate, explicit `DiscoveryArchive.promote` call after review
+(see [Champion governance](#champion-governance)); the registry gate continues to
+own *model* promotion. The run's vocabulary is:
 
 | Decision | When | Meaning |
 |---|---|---|
 | `no_trade` | the gate rejected every trial, or the best accepted candidate is flat (0 closed trades) | standing aside is the result, not a failure |
 | `no_change` | no accepted candidate beat the best baseline | the champion (or the baseline) stands |
-| `rejected` | an accepted candidate strictly beat the best baseline | an improving candidate exists, but discovery cannot promote it; the registry gate must decide |
+| `rejected` | an accepted candidate strictly beat the best baseline | an improving candidate exists; the run hands it to the champion governor instead of promoting it |
 
 The order is part of the contract and is implemented by the pure function
 `decide(...)`. A baseline that did not publish the selection metric is not
@@ -268,8 +286,8 @@ baseline's name and value, and the trial count.
 decision only says what happened on one validation slice at a chosen cost
 level; it does not say the candidate will survive the untouched test split, a
 forward period, another symbol or another cost regime. `rejected` is a handoff
-to the registry gate, not a promotion, and `no_change`/`no_trade` are complete,
-honest outcomes.
+to the champion governor, not a promotion, and `no_change`/`no_trade` are
+complete, honest outcomes.
 
 ### Reproducibility and deduplication
 
@@ -283,6 +301,125 @@ a trial seed, the RNG stream diverges after a repeat, so a rerun explores new
 candidates instead of replaying the first run; `trials + skipped <= max_trials`
 still holds. The four `stop_reason` values are the search loop's
 (budget, patience, exhausted, stopped), reported verbatim.
+
+## Champion governance
+
+A discovered candidate becomes the paper-trading champion through the archive,
+not through a hand-written strategy file. Three methods own the lifecycle:
+`promote`, `rollback` and the read side (`champion`, `champion_history`,
+`compare_to_champion`). `run_discovery` stops at a recorded decision; a
+`rejected` row hands the candidate over, and promoting it is this explicit call.
+
+### Scope
+
+A scope is a free-text key, conventionally `<symbol>:<timeframe>` —
+`scalping.discovery.champion.scope_for("XAUUSD", "M5")` builds it. Each scope has
+its own champion, so promoting a strategy for gold never replaces the one for
+euro. A trial belongs to a scope when every alphanumeric token of the scope
+appears in its `dataset_id`: `XAUUSD:M5` matches
+`validation:XAUUSD:M5:abcd1234` and not `validation:XAUUSD:M15:abcd1234`. This is
+a naming convention, not a guarantee — a dataset id that omits the timeframe will
+not qualify.
+
+### Promotion
+
+```python
+archive.promote(
+    candidate_id,
+    scope="XAUUSD:M5",
+    reason="beats the champion on validation expectancy",
+    metric="expectancy_r",   # default
+    force=False,             # default
+)
+```
+
+`promote` runs in `BEGIN IMMEDIATE` and refuses, writing nothing:
+
+| Refusal | Exception | Forceable? |
+|---|---|---|
+| unknown candidate id | `UnknownCandidateError` | no |
+| no trial whose `dataset_id` names every scope token | `ArchiveError` | no |
+| no **accepted** trial on the scope's dataset (gate rejected) | `ArchiveError` | no |
+| accepted trial publishes no value for `metric` | `ArchiveError` | yes |
+| current champion has no value for `metric` | `ArchiveError` | yes |
+| `metric` does not strictly beat the champion's | `ArchiveError` | yes |
+| empty reason | `ValueError` | — |
+
+`force` overrides the comparison only; the evidence gate is not forceable, so a
+rejected candidate cannot be promoted by any flag. The stored reason is
+`"<human reason>; <metric> <value> vs <previous value> of <candidate prefix>"`,
+and a forced promotion prefixes it with `forced: `. The previous champion stays
+in `champion_promotions` and in `candidates`; nothing is deleted.
+
+The comparison reads each side's newest accepted trial on the scope's dataset
+that publishes the metric. Missing numbers are not wins: an unmeasured candidate,
+or an unmeasured champion to compare against, is refused rather than treated as
+zero. Only one metric is compared. A `promoted` decision is appended with
+`detail_json` holding `scope`, `metric`, `value`, `previous_candidate_id`,
+`previous_value`, `forced` and `promotion_id`.
+
+### Reading the champion
+
+`archive.champion(scope)` returns `None` before the first promotion, else the
+candidate row, its canonical spec payload, the newest accepted metrics on the
+scope's dataset, and the promotion id, timestamp and reason.
+`champion_history(scope)` returns every promotion and rollback oldest first.
+`compare_to_champion(candidate_id, scope, metric)` is the read-only preview the
+gate and a dashboard use: candidate value, champion value, delta, and
+`better=True` only for a strict win with both values measured.
+
+### Rollback
+
+```python
+archive.rollback("XAUUSD:M5", to_candidate_id=previous_id, reason="decay detected")
+```
+
+Rollback restores a candidate that was **champion of that scope before** and not
+the current one. A candidate that never won is promoted, not rolled back to, and
+mixing the two would make the audit trail lie. It appends a `rolled_back` row to
+`champion_promotions` and a `rolled_back` decision, and it works on a scope with
+no champion only as an error: there is nothing to undo.
+
+### ChampionProvider
+
+`scalping.discovery.champion.ChampionProvider` turns the stored row into a
+validated `StrategySpec` for the paper path:
+
+```python
+provider = ChampionProvider(archive, scope="XAUUSD:M5")
+spec = provider.spec()            # StrategySpec, validated before it is returned
+run = provider.champion()         # scope, spec, candidate id, promotion, metrics
+```
+
+It raises `NoChampionError` when nothing was promoted and `InvalidChampionSpec`
+when the payload does not load as a strategy or its recomputed hash differs from
+the archived id. There is no fallback to a hand-written strategy: a silent
+default would mean the autonomous run stops testing what the search produced.
+The module imports the archive and the DSL only; `scalping.paper` is never
+imported from `scalping.discovery`, so the dependency stays one-way.
+
+### Honest limits
+
+- **Promotion is policy, not proof.** It applies one comparison rule to
+  validation evidence. Passing it says the candidate beat the incumbent on one
+  metric on one dataset; it does not say the candidate will make money.
+- **The metrics come from validation trials.** No out-of-sample or walk-forward
+  result is produced here, and the evaluator refuses a holdout dataset id. A
+  promotion built on a validation split that the search already touched inherits
+  that data-snooping risk.
+- **Drift and decay monitoring is not automatic.** Nothing recomputes a
+  champion's metrics on a schedule, queues a re-test or rolls back on its own.
+  `compare_to_champion` and `rollback` are the tools; the trigger is a human or a
+  later orchestrator slice.
+- **One metric, higher is better.** A lower-is-better metric such as drawdown
+  must not be passed to `promote`; it would invert the rule.
+- **`force` hides nothing but it does override policy.** The audit trail records
+  `forced:` and the numbers that were rejected, which is exactly why the flag
+  exists; it is not evidence that the candidate is good.
+- **Restart safety is the database's.** The pointer and history are committed in
+  one transaction with WAL, so a crash leaves either the old champion or the new
+  one, never both. An OS-level power loss can still drop the newest committed
+  transaction.
 
 ## Trial accounting and multiple testing
 
@@ -423,10 +560,12 @@ for wins without losses, and a gate that requires it then rejects with
   are a caller/orchestrator concern; the evaluator only refuses a holdout id.
 - **Out-of-sample and forward testing.** No test-slice access and no paper
   period. Those are later gates.
-- **Champion comparison against an incumbent model.** `run_discovery` compares
-  against `hold` and `ret_5` and records `no_change`/`no_trade`/`rejected`; it
-  never compares against the registered champion and never promotes. That
-  policy, its rollback and its audit trail live with the registry gate.
+- **Automatic champion monitoring.** `champion`, `compare_to_champion`,
+  `promote` and `rollback` are explicit calls with an audit trail. Nothing
+  schedules a comparison, watches the champion's live paper results or rolls
+  back because a metric moved. `run_discovery` itself compares only against
+  `hold` and `ret_5` and never promotes; the incumbent comparison is the
+  governor's job, and its trigger belongs to the orchestrator.
 - **Symbol, timeframe, regime and cost sweeps.** One run evaluates one dataset
   id. Cross-condition stability needs a caller that runs several and compares.
 - **Scheduler cancellation.** `should_stop` is the hook; connecting it to a job
