@@ -67,6 +67,44 @@ The simulator adds no privileged path: the only entry call is
 `allow_new_extended`, and the kill-switch force-close runs after every mark,
 outside the policy's action.
 
+## Acceptance evidence
+
+`backend/tests/test_risk_acceptance.py` is the Phase 11 non-bypass suite. It
+runs the simulator and `DslEvaluator` on the *same* bars and settings and
+compares the closed trades, so a second gate path cannot drift silently.
+
+Proven:
+
+- A generated DSL `StrategySpec` cannot carry or request a risk limit. It has no
+  `risk` field, a payload with one is rejected, and `evaluate`/`run` take no
+  settings or limit argument.
+- DSL sizing nodes (`AtrMultiple`, `FixedFraction`) are identity only: an
+  extreme `AtrMultiple(1000)` and `FixedFraction(1.0)` produce the same fills,
+  lots and PnL as a spec with no sizing node. Every lot equals
+  `RiskEngine.size(...)` for the balance at entry.
+- Daily loss, weekly loss, max drawdown, consecutive-loss, emergency and spread
+  switches each block the next entry in the raw simulator and in the evaluator;
+  the manual loop and the evaluator produce identical trade rows. Weekly,
+  drawdown and emergency also force-close the open position with the switch
+  name recorded in `Trade.reason`.
+- `action_masks()` agrees with `_entry_reason` and the step rejection for every
+  gate, both per-gate and on a property-style sweep of a synthetic path.
+- An always-enter spec cannot open a second position (`max_positions`) and its
+  lots never exceed the notional cap.
+- `RiskEngine` exposes no override parameter, `RiskConfig`/`Settings` are frozen
+  and the engine binds its config behind read-only properties.
+- No orchestrator job kind accepts a `risk` key: the payload is a permanent
+  failure (one attempt, permanent event, no ledger or archive written).
+
+Remaining, not proven by these tests:
+
+- Partial fills and broker-side rejection/requote/margin paths.
+- Execution delay and next-bar fills; the paper broker fills on the decision
+  bar's quote with ATR slippage.
+- Broker-enforced risk (a real server-side limit or margin call). This suite
+  proves the local engine cannot be bypassed, not that an external broker would
+  enforce the same limits.
+
 ## Not covered yet
 
 This slice implements the equity and entry limits only. Still open for later
