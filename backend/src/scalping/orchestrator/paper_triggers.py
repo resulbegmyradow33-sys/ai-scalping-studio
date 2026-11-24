@@ -65,11 +65,12 @@ from scalping.paper.continuous import (
     matured_outcomes,
     outcome_fingerprint,
 )
-from scalping.paper.ledger import LedgerError, PaperLedger, SessionRecord
+from scalping.paper.ledger import LedgerError, PaperLedger
 
 __all__ = [
     "EVENT_NOT_QUEUED",
     "EVENT_RECEIVED",
+    "EVENT_REFUSED",
     "EVENT_TRUNCATED",
     "KIND_PAPER_OUTCOMES",
     "MAX_SCAN_PROPOSALS_LIMIT",
@@ -82,7 +83,9 @@ __all__ = [
     "REASON_NO_LEDGER",
     "REASON_NO_STRATEGY_HASH",
     "REASON_OUTCOME_ERROR",
+    "REASON_SYNTHETIC",
     "REASON_TRUNCATED",
+    "REFUSAL_SYNTHETIC",
     "PaperOutcomeTriggerSource",
     "make_paper_outcome_handler",
     "register_paper_outcome_handler",
@@ -97,6 +100,7 @@ KIND_PAPER_OUTCOMES: Final[str] = "paper.outcomes"
 #: ``docs/orchestrator.md`` so the audit page can filter on them.
 EVENT_NOT_QUEUED: Final[str] = "paper.outcome_not_queued"
 EVENT_RECEIVED: Final[str] = "paper.outcome_received"
+EVENT_REFUSED: Final[str] = "paper.outcome_refused"
 EVENT_TRUNCATED: Final[str] = "paper.outcome_truncated"
 
 #: Why a session produced no trigger. A reason is recorded once per session and
@@ -107,6 +111,12 @@ REASON_NO_DATASET_ID: Final[str] = "no_dataset_id"
 REASON_OUTCOME_ERROR: Final[str] = "outcome_error"
 REASON_NO_LEDGER: Final[str] = "no_ledger"
 REASON_LEDGER_UNAVAILABLE: Final[str] = "ledger_unavailable"
+#: The batch is known to come from synthetic data and the source is configured
+#: not to treat that as market evidence (``allow_synthetic=False``).
+REASON_SYNTHETIC: Final[str] = "synthetic_outcome"
+#: The same refusal code on the handler side; a job may arrive from an
+#: ``allow_synthetic=True`` source or from an older queue.
+REFUSAL_SYNTHETIC: Final[str] = REASON_SYNTHETIC
 #: The session was not read this scan because ``max_sessions`` or
 #: ``max_proposals`` was reached. The rotation cursor resumes at it next scan.
 REASON_TRUNCATED: Final[str] = "truncated"
@@ -162,6 +172,9 @@ DEFAULT_APPROVED_REASON: Final[str] = (
 DEFAULT_DECLINED_REASON: Final[str] = (
     "no should_queue callback installed; the proposal remains unexecuted"
 )
+DEFAULT_SYNTHETIC_REASON: Final[str] = (
+    "synthetic outcomes are not market evidence; allow_synthetic=False refuses them"
+)
 
 
 @dataclass(slots=True)
@@ -206,6 +219,13 @@ class PaperOutcomeTriggerSource:
     else is recorded as a refusal reason and emits nothing. Session status
     (``running``/``closed``) is not required: a running session's closed trades
     are matured, and waiting for a session close would delay feedback.
+
+    ``allow_synthetic`` defaults to ``False``: a batch whose recorded
+    ``synthetic`` flag is ``True`` is refused and logged with
+    :data:`REASON_SYNTHETIC`, because a demo run must not become market
+    evidence. ``synthetic is None`` (unknown) is not refused here; it travels in
+    the payload as ``null`` so a policy hook can decide without the trigger
+    inventing a ``False``.
     """
 
     def __init__(
@@ -219,6 +239,7 @@ class PaperOutcomeTriggerSource:
         max_sessions: int = MAX_SCAN_SESSIONS,
         max_proposals: int = MAX_SCAN_PROPOSALS,
         since: str | datetime | None = None,
+        allow_synthetic: bool = False,
         name: str | None = None,
     ) -> None:
         self.ledger_path = Path(ledger_path)
@@ -226,6 +247,8 @@ class PaperOutcomeTriggerSource:
             raise ValueError(
                 f"kind must be {KIND_PAPER_OUTCOMES!r}; {kind!r} has no registered handler"
             )
+        if not isinstance(allow_synthetic, bool):
+            raise TypeError(f"allow_synthetic must be a bool, got {type(allow_synthetic).__name__}")
         if isinstance(max_sessions, bool) or not isinstance(max_sessions, int):
             raise TypeError("max_sessions must be an int")
         if max_sessions < 1:
@@ -249,6 +272,7 @@ class PaperOutcomeTriggerSource:
         self.max_sessions = max_sessions
         self.max_proposals = max_proposals
         self.since = _coerce_since(since)
+        self.allow_synthetic = allow_synthetic
         self.name = name or f"paper.outcomes:{self.ledger_path}"
         self.cursor_key = f"trigger.paper.outcomes:{self.ledger_path.resolve()}"
         self._pending: _Cursor | None = None
@@ -355,17 +379,23 @@ class PaperOutcomeTriggerSource:
         triggers: list[Trigger],
     ) -> None:
         try:
-            record = ledger.session(session_id)
-            if record is None:
-                raise OutcomeError(f"session {session_id!r} disappeared during the scan")
             batch = matured_outcomes(ledger, session_id)
-            source, synthetic = _provenance(record)
         except (OutcomeError, LedgerError, ValueError) as exc:
             self._note(cursor, session_id, REASON_OUTCOME_ERROR, str(exc))
             return
+        source, synthetic = batch.source, batch.synthetic
 
         if batch.closed_trades == 0:
             self._note(cursor, session_id, REASON_EMPTY_BATCH, "no closed trades yet")
+            return
+        if synthetic is True and not self.allow_synthetic:
+            self._note(
+                cursor,
+                session_id,
+                REASON_SYNTHETIC,
+                "session outcomes are synthetic; allow_synthetic=False refuses them"
+                " as market evidence",
+            )
             return
         strategy_hash = batch.strategy_hash
         if strategy_hash is None or not strategy_hash.strip():
@@ -577,6 +607,7 @@ class HandlerRegistry(Protocol):
 def make_paper_outcome_handler(
     *,
     should_queue: PaperOutcomePolicy | None = None,
+    allow_synthetic: bool = False,
 ) -> Handler:
     """Build a handler that records the event and proposes the next step.
 
@@ -586,7 +617,15 @@ def make_paper_outcome_handler(
     ``executed: false`` because this slice has no executor behind the proposal.
     A callback exception propagates as an ordinary handler failure and is
     retried by the queue.
+
+    ``allow_synthetic`` defaults to ``False``. A payload with
+    ``synthetic: true`` is then refused with ``no_action`` and one
+    ``paper.outcome_refused`` audit line instead of reaching the policy: a demo
+    batch is not market evidence. ``synthetic: null`` (unknown) is passed to
+    ``should_queue`` unchanged, never upgraded to ``False``.
     """
+    if not isinstance(allow_synthetic, bool):
+        raise TypeError(f"allow_synthetic must be a bool, got {type(allow_synthetic).__name__}")
 
     def handler(job: Job, context: JobContext) -> HandlerResult:
         try:
@@ -606,6 +645,36 @@ def make_paper_outcome_handler(
                 }
             ),
         )
+        if request["synthetic"] is True and not allow_synthetic:
+            context.log(
+                EVENT_REFUSED,
+                _json(
+                    {
+                        "session_id": request["session_id"],
+                        "fingerprint": request["fingerprint"],
+                        "reason": REFUSAL_SYNTHETIC,
+                        "detail": DEFAULT_SYNTHETIC_REASON,
+                    }
+                ),
+            )
+            return HandlerResult.success(
+                {
+                    "action": "no_action",
+                    "reason": DEFAULT_SYNTHETIC_REASON,
+                    "queued": False,
+                    "executed": False,
+                    "refused": REFUSAL_SYNTHETIC,
+                    "session_id": request["session_id"],
+                    "fingerprint": request["fingerprint"],
+                    "trades": request["trades"],
+                    "pnl": request["pnl"],
+                    "r_total": request["r_total"],
+                    "strategy_hash": request["strategy_hash"],
+                    "dataset_id": request["dataset_id"],
+                    "source": request["source"],
+                    "synthetic": request["synthetic"],
+                }
+            )
         if should_queue is None:
             approved = True
             reason = DEFAULT_APPROVED_REASON
@@ -642,9 +711,13 @@ def register_paper_outcome_handler(
     registry: HandlerRegistry,
     *,
     should_queue: PaperOutcomePolicy | None = None,
+    allow_synthetic: bool = False,
 ) -> str:
     """Register the proposal-only handler for ``paper.outcomes``; returns the kind."""
-    registry.register(KIND_PAPER_OUTCOMES, make_paper_outcome_handler(should_queue=should_queue))
+    registry.register(
+        KIND_PAPER_OUTCOMES,
+        make_paper_outcome_handler(should_queue=should_queue, allow_synthetic=allow_synthetic),
+    )
     return KIND_PAPER_OUTCOMES
 
 
@@ -740,48 +813,6 @@ def _coerce_since(value: str | datetime | None) -> datetime | None:
 
 def _since_stamp(moment: datetime) -> str:
     return moment.astimezone(UTC).isoformat()
-
-
-def _provenance(record: SessionRecord) -> tuple[str | None, bool | None]:
-    """Read the stored data source and synthetic flag, if the session has any.
-
-    ``None`` means unknown, never "real data": a session that predates the
-    provenance fields must not be presented as non-synthetic evidence. The
-    values are read from explicit ``source``/``synthetic`` keys only; the
-    runner's ``origin`` field describes the process, not the data.
-    """
-    config = record.config
-    source = _nested_value(
-        config,
-        ("source", ("provenance", "source"), ("data", "source"), ("extra", "source")),
-    )
-    synthetic = _nested_value(
-        config,
-        (
-            "synthetic",
-            ("provenance", "synthetic"),
-            ("data", "synthetic"),
-            ("extra", "synthetic"),
-        ),
-    )
-    return (
-        source if isinstance(source, str) and source.strip() else None,
-        synthetic if isinstance(synthetic, bool) else None,
-    )
-
-
-def _nested_value(config: Mapping[str, Any], paths: Sequence[str | tuple[str, ...]]) -> object:
-    for path in paths:
-        keys = (path,) if isinstance(path, str) else path
-        current: object = config
-        for key in keys:
-            if not isinstance(current, Mapping) or key not in current:
-                current = None
-                break
-            current = current[key]
-        if current is not None:
-            return current
-    return None
 
 
 def _fingerprint_of(trigger: Trigger) -> object:

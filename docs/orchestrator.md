@@ -920,6 +920,7 @@ Two bounds keep a first scan over a long ledger cheap:
 |---|---|---|---|
 | `since` | `None` | — | Only sessions with `started_at >= since` are in the window. Accepts a timezone-aware `datetime` or an ISO-8601 string with an offset; a naive timestamp is rejected. |
 | `max_proposals` | `100` | `1000` | At most this many triggers per scan, so a historical ledger cannot propose an unbounded research backlog at once. The rotation cursor resumes at the first unprocessed session. |
+| `allow_synthetic` | `False` | — | A batch whose recorded `synthetic` flag is `true` is refused with `reason: synthetic_outcome` unless this is set. The default keeps a demo run out of market evidence. |
 
 `since` is a session-start bound, not a trade-time bound: a session that started
 before the bound is out of scope entirely, and it emits no per-session refusal
@@ -938,6 +939,7 @@ does not flood the audit log.
 | `reason` | Meaning | Emits? |
 |---|---|---|
 | `empty_batch` | No trade has closed yet; the P&L is not final | No |
+| `synthetic_outcome` | The batch records `synthetic: true` and the source has `allow_synthetic=False` (the default) | No |
 | `no_strategy_hash` | `model_version` and signals carry no attribution | No |
 | `no_dataset_id` | Session config records no dataset id to scope research | No |
 | `outcome_error` | Ambiguous attribution or unreadable session config | No |
@@ -947,14 +949,24 @@ does not flood the audit log.
 
 #### Provenance in the payload
 
-`source` and `synthetic` are copied from explicit keys in the session config:
-`source`, `provenance.source`, `data.source` or `extra.source`, and the
-`synthetic` counterpart. Missing or non-boolean values become `null`, which
-means **unknown** — never an invented `false`. A session whose config predates
-these fields must not be presented as real, non-synthetic evidence, so
-downstream code can refuse `synthetic is not false` without guessing. The
-runner's `origin` field is deliberately not used as a data source: it names the
-process, not the data.
+`source` and `synthetic` come from `session_provenance` in
+`scalping.paper.ledger`, which reads the session config. The canonical spelling
+is the `provenance` block the continuous runner writes (`extra.provenance.source`
+/ `extra.provenance.synthetic` in the stored JSON); older configs with
+`source`, `provenance.source`, `data.source` or `extra.source` (and the
+`synthetic` counterpart) still read. Missing values are `null`, which means
+**unknown** — never an invented `false`. A session whose config predates these
+fields must not be presented as real, non-synthetic evidence, so downstream code
+can refuse `synthetic is not false` without guessing. A value that is present
+but mistyped (a string `synthetic`, an empty `source`) is refused as
+`outcome_error` instead of being downgraded to unknown. The runner's `origin`
+field is deliberately not used as a data source: it names the process, not the
+data.
+
+A known `synthetic=True` batch is refused by the source when `allow_synthetic`
+is `False`, the default. Setting it is an explicit opt-in for drills that need
+a synthetic loop; the payload then carries `synthetic: true` so every downstream
+record still says so.
 
 #### Dedupe
 
@@ -989,14 +1001,19 @@ work.
 
 #### Proposal only, no auto-training
 
-`make_paper_outcome_handler(should_queue=None)` and
-`register_paper_outcome_handler(registry)` bind `paper.outcomes`. The handler:
+`make_paper_outcome_handler(should_queue=None, allow_synthetic=False)` and
+`register_paper_outcome_handler(registry, should_queue=None, allow_synthetic=False)`
+bind `paper.outcomes`. The handler:
 
 1. requires the seven core payload fields and accepts the optional `source` and
    `synthetic` pair (unknown, missing-required, mistyped or non-finite input is
    a permanent failure; an old job without provenance is `null`, not real);
 2. logs `paper.outcome_received` for the job, including provenance;
-3. returns `{"action": "queue_discovery" | "no_action", "reason": ...,
+3. refuses a `synthetic: true` payload with `no_action` and one
+   `paper.outcome_refused` line unless `allow_synthetic=True`: the policy hook
+   never sees a demo batch by default, and the result carries
+   `refused: "synthetic_outcome"`;
+4. returns `{"action": "queue_discovery" | "no_action", "reason": ...,
    "queued": false, "executed": false}` plus the attribution it received.
 
 It imports no discovery, training, simulator or champion module, reads no bars,
@@ -1275,7 +1292,10 @@ beyond `max_sessions` and each deferred session is recorded with `truncated`,
 without a stale note for a session whose trigger already exists; a partial
 acknowledgement is re-emitted at the start of the very next scan; a transient
 handler failure is retried before the batch is burned; `source`/`synthetic`
-provenance is forwarded and absent provenance stays `null`; the handler store is
+provenance is forwarded and absent provenance stays `null`; a `synthetic=True`
+batch is refused with a logged `synthetic_outcome` reason by default and emitted
+only under `allow_synthetic=True`, and the handler applies the same default with
+one `paper.outcome_refused` line; the handler store is
 a read-only facade with no `enqueue` or cross-job `cancel`; an injected `kind`
 and an out-of-range scan bound are rejected; and `since` plus `max_proposals`
 keep a large historical ledger from emitting an unbounded backlog.

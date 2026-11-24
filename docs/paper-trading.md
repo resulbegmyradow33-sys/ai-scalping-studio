@@ -361,22 +361,50 @@ ordering is checked across the whole slice.
 `matured_outcomes(ledger, session_id)` returns an immutable `OutcomeBatch` of
 **closed trades only**. Each row carries entry and exit timestamps, side, entry
 and exit price, lot, P&L, R multiple, exit reason, the session's canonical
-strategy hash and the stored dataset id when the session config has one. Open
-positions are not rows; the batch counts them in `open_trades`. `to_dict()` /
-`to_json()` are the JSON-safe projections.
+strategy hash, the stored dataset id when the session config has one, and the
+session's `source`/`synthetic` provenance. Open positions are not rows; the
+batch counts them in `open_trades`. `to_dict()` / `to_json()` are the JSON-safe
+projections.
 
 `outcome_fingerprint(batch)` is a sha256 over a canonical payload of the batch.
 It excludes `trade_id` (a re-created ledger can renumber rows) and
 `open_trades` (an open position is not matured), and sorts rows by their own
 fields, so identical outcomes hash identically regardless of read order. The
-orchestrator can store the last fingerprint and skip a research trigger when the
-same matured set is analysed again; any newly closed trade changes the hash.
-`PaperOutcomeTriggerSource` in `scalping.orchestrator.paper_triggers` does
-exactly that; its contract, scan order, coverage cursor, refusal reasons, `since`
-window, provenance fields and proposal-only handler are in
-`docs/orchestrator.md`. The trigger payload carries the session's stored
-`source` and `synthetic` when the config records them, and `null` (unknown) when
-it does not — a missing provenance is never presented as real data.
+fingerprint includes `source` and `synthetic`: the same trades claimed against
+different evidence are different outcomes, so a provenance change changes the
+hash. `PaperOutcomeTriggerSource` in `scalping.orchestrator.paper_triggers` uses
+that fingerprint for dedupe; its contract, scan order, coverage cursor, refusal
+reasons, `since` window, synthetic policy and proposal-only handler are in
+`docs/orchestrator.md`.
+
+### Provenance contract
+
+A paper session must say which evidence produced its trades. The contract has
+three rules:
+
+1. **Written once, at creation.** `ContinuousPaperRunner` reads the dataset
+   sidecar with `scalping.data.provenance.load_provenance` and stores
+   `{"source": ..., "synthetic": ...}` in the session config under
+   `extra.provenance`. A store with no sidecar stores nothing.
+2. **Unknown is `None`, never an invented `False`.** `session_provenance(config)`
+   in `scalping.paper.ledger` returns `(source, synthetic)` and reports
+   `(None, None)` when the creator recorded nothing. A demo run must be
+   distinguishable from real market evidence, so no code path may default
+   `synthetic` to `False`.
+3. **A change is a refusal.** When a session already exists and the store
+   sidecar now reports a different known source or flag, `advance()` raises
+   `SessionMismatchError`. An unreadable sidecar raises `ContinuousError`
+   before anything is written; a session recorded before provenance existed
+   (unknown) still resumes.
+
+`matured_outcomes` copies the pair onto every row and the batch. The trigger
+payload carries `source` and `synthetic` with `null` for unknown, and
+`PaperOutcomeTriggerSource` refuses a `synthetic=True` batch by default
+(`allow_synthetic=False`) with a logged `synthetic_outcome` reason. The
+handler applies the same default, so a synthetic job that arrives from an
+opted-in source or an older queue is answered `no_action` with one
+`paper.outcome_refused` line. Opting in is explicit and auditable; it is never
+the default, because synthetic data must not become real market evidence.
 
 ### Honest limits
 
@@ -385,8 +413,9 @@ it does not — a missing provenance is never presented as real data.
 - **Outcomes only after close.** A trade enters the batch when `trades` has a
   row. Until then its P&L is unrealized and excluded.
 - **Session-level data id.** The `signals` table has no data column, so the
-  dataset id is recorded once in the session config when the session is created.
-  A per-trade data hash would need a schema migration.
+  dataset id and the provenance pair are recorded once in the session config
+  when the session is created. A per-trade data hash would need a schema
+  migration.
 - **Replay cost grows with the session.** Each `advance()` rebuilds the feature
   matrix for the stored slice and replays the recorded actions. This is exact
   and cheap for a paper session of a few thousand bars, but it is linear in
@@ -576,7 +605,18 @@ out-of-order/duplicate bar is refused before any row is written, a session with
 a different spec hash is refused, an open position is counted but excluded from
 the matured batch, the outcome fingerprint is stable and changes when a trade
 matures, appending future bars leaves earlier signals unchanged, and a source
-scan finds no network or legacy strategy reference.
+scan finds no network or legacy strategy reference. Provenance is covered end to
+end: a synthetic sidecar is flagged in the session, the matured batch and the
+trigger (which refuses it by default and accepts it under `allow_synthetic`), a
+real dataset records `synthetic=False`, a store without a sidecar stays unknown
+(`None`, never `False`), a re-ingested provenance change refuses resume, an
+unreadable sidecar refuses the advance, the batch keeps its flag across a ledger
+reopen, and the outcome fingerprint changes with provenance.
+
+`backend/tests/test_paper_ledger.py` also pins the provenance helpers:
+`provenance_config` refuses a mistyped flag, `session_provenance` reads the
+stored pair after a reopen and reports `(None, None)` when nothing was recorded,
+and `open_session` refuses a mistyped provenance block before the insert.
 
 `frontend/src/app/paper/page.test.tsx` covers the page: an empty ledger, a
 loaded session with attribution, a `404` session, close `200` and `409`, bounded

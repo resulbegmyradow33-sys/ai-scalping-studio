@@ -35,6 +35,7 @@ from scalping.orchestrator import (
 from scalping.orchestrator.paper_triggers import (
     EVENT_NOT_QUEUED,
     EVENT_RECEIVED,
+    EVENT_REFUSED,
     EVENT_TRUNCATED,
     KIND_PAPER_OUTCOMES,
     MAX_SCAN_PROPOSALS_LIMIT,
@@ -44,7 +45,9 @@ from scalping.orchestrator.paper_triggers import (
     REASON_NO_DATASET_ID,
     REASON_NO_LEDGER,
     REASON_NO_STRATEGY_HASH,
+    REASON_SYNTHETIC,
     REASON_TRUNCATED,
+    REFUSAL_SYNTHETIC,
     PaperOutcomeTriggerSource,
     make_paper_outcome_handler,
     register_paper_outcome_handler,
@@ -665,7 +668,7 @@ def test_payload_carries_provenance_and_unknown_is_not_false(tmp_path: Path) -> 
             "known",
             started_at=BASE + timedelta(days=1),
             extra_config={
-                "provenance": {"source": "provider:csv", "synthetic": True},
+                "provenance": {"source": "provider:csv", "synthetic": False},
             },
         )
         seed_session(ledger, "unknown", started_at=BASE)
@@ -678,7 +681,7 @@ def test_payload_carries_provenance_and_unknown_is_not_false(tmp_path: Path) -> 
 
     by_session = {job.payload["session_id"]: job.payload for job in outcome.queued}
     assert by_session["known"]["source"] == "provider:csv"
-    assert by_session["known"]["synthetic"] is True
+    assert by_session["known"]["synthetic"] is False
     assert by_session["unknown"]["source"] is None
     # Unknown is None, never an invented False: a demo session must be refusable.
     assert by_session["unknown"]["synthetic"] is None
@@ -686,10 +689,123 @@ def test_payload_carries_provenance_and_unknown_is_not_false(tmp_path: Path) -> 
     store.close()
 
 
-def test_handler_forwards_provenance_to_the_proposal(tmp_path: Path) -> None:
+def test_synthetic_batch_is_refused_and_logged_by_default(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(
+            ledger,
+            "demo",
+            extra_config={"provenance": {"source": "synthetic", "synthetic": True}},
+        )
+
+    store = JobStore(tmp_path / "jobs.db")
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+    outcome = scan_once(Orchestrator(store), [source])
+
+    assert not outcome.queued
+    assert trigger_jobs(store) == []
+    assert cursor_document(store, source)["not_queued"] == {"demo": REASON_SYNTHETIC}
+    refused = [
+        event
+        for event in store.events(limit=50)
+        if event.event == EVENT_NOT_QUEUED and event.detail is not None
+    ]
+    assert any(json.loads(event.detail)["reason"] == REASON_SYNTHETIC for event in refused)
+    store.close()
+
+
+def test_allow_synthetic_opt_in_emits_the_batch_with_its_flag(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(
+            ledger,
+            "demo",
+            extra_config={"provenance": {"source": "synthetic", "synthetic": True}},
+        )
+
+    store = JobStore(tmp_path / "jobs.db")
+    outcome = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store, allow_synthetic=True)],
+    )
+
+    assert len(outcome.queued) == 1
+    payload = outcome.queued[0].payload
+    assert payload["synthetic"] is True
+    assert payload["source"] == "synthetic"
+    store.close()
+
+
+def test_handler_refuses_a_synthetic_batch_by_default(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.db")
     orchestrator = Orchestrator(store)
     register_paper_outcome_handler(orchestrator)
+    job, _ = store.enqueue(
+        KIND_PAPER_OUTCOMES,
+        dedupe_key="demo-synthetic",
+        payload={
+            "session_id": "demo",
+            "fingerprint": "d" * 64,
+            "trades": 1,
+            "pnl": 1.0,
+            "r_total": 0.1,
+            "strategy_hash": "hash-1",
+            "dataset_id": "dataset-1",
+            "source": "synthetic",
+            "synthetic": True,
+        },
+    )
+    orchestrator.run_until_idle()
+
+    finished = store.get(job.id)
+    assert finished is not None and finished.result is not None
+    data = finished.result["data"]
+    assert data["action"] == "no_action"
+    assert data["refused"] == REFUSAL_SYNTHETIC
+    assert data["queued"] is False and data["executed"] is False
+    assert any(event.event == EVENT_REFUSED for event in store.events(limit=50))
+    store.close()
+
+
+def test_handler_opt_in_lets_a_synthetic_batch_reach_the_policy(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    seen: list[bool | None] = []
+
+    def policy(payload: object) -> bool:
+        assert isinstance(payload, dict)
+        seen.append(payload["synthetic"])
+        return True
+
+    register_paper_outcome_handler(orchestrator, should_queue=policy, allow_synthetic=True)
+    job, _ = store.enqueue(
+        KIND_PAPER_OUTCOMES,
+        dedupe_key="demo-synthetic-optin",
+        payload={
+            "session_id": "demo",
+            "fingerprint": "e" * 64,
+            "trades": 1,
+            "pnl": 1.0,
+            "r_total": 0.1,
+            "strategy_hash": "hash-1",
+            "dataset_id": "dataset-1",
+            "source": "synthetic",
+            "synthetic": True,
+        },
+    )
+    orchestrator.run_until_idle()
+
+    assert seen == [True]
+    finished = store.get(job.id)
+    assert finished is not None and finished.result is not None
+    assert finished.result["data"]["action"] == "queue_discovery"
+    store.close()
+
+
+def test_handler_forwards_provenance_to_the_proposal(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    register_paper_outcome_handler(orchestrator, allow_synthetic=True)
     payload = {
         "session_id": "demo",
         "fingerprint": "c" * 64,

@@ -26,17 +26,22 @@ import polars as pl
 import pytest
 
 from scalping.config import RiskConfig, Settings
+from scalping.data.provenance import build_provenance, provenance_path, save_provenance
 from scalping.data.store import ParquetStore
+from scalping.orchestrator import JobStore, Orchestrator, scan_once
+from scalping.orchestrator.paper_triggers import REASON_SYNTHETIC, PaperOutcomeTriggerSource
 from scalping.paper import PaperLedger
 from scalping.paper.continuous import (
     BarGapError,
     BarOrderError,
+    ContinuousError,
     ContinuousPaperRunner,
     OutcomeBatch,
     SessionMismatchError,
     matured_outcomes,
     outcome_fingerprint,
 )
+from scalping.paper.ledger import session_provenance
 from scalping.strategy.dsl import (
     Compare,
     Const,
@@ -437,6 +442,194 @@ def test_future_bars_do_not_change_earlier_signals(tmp_path: Path) -> None:
         runner.advance()
         extended = signal_tuples(ledger, runner.session_id)
     assert extended[: len(short_signals)] == short_signals
+
+
+def record_provenance(
+    root: Path,
+    bars: pl.DataFrame,
+    *,
+    source: str,
+    synthetic: bool,
+) -> None:
+    """Write the ingest sidecar a real dataset would carry."""
+    save_provenance(
+        root,
+        build_provenance(
+            bars, symbol=SYMBOL, timeframe=TIMEFRAME, source=source, synthetic=synthetic
+        ),
+    )
+
+
+def test_synthetic_dataset_is_flagged_from_session_to_trigger(tmp_path: Path) -> None:
+    """A demo run is marked synthetic end to end, and the trigger refuses it."""
+    root = tmp_path / "data"
+    bars = make_bars(200)
+    write(root, bars)
+    record_provenance(root, bars, source="provider:synthetic", synthetic=True)
+    ledger_path = tmp_path / "paper.db"
+
+    with PaperLedger(ledger_path) as ledger:
+        runner = make_runner(ledger, root)
+        summary = runner.advance()
+        assert summary.trades > 0
+        record = ledger.session(runner.session_id)
+        assert record is not None
+        assert session_provenance(record.config) == ("provider:synthetic", True)
+        batch = matured_outcomes(ledger, runner.session_id)
+
+    assert batch.strategy_hash is not None
+    assert batch.dataset_id is not None
+    assert batch.source == "provider:synthetic"
+    assert batch.synthetic is True
+    assert batch.rows
+    assert all(row.source == "provider:synthetic" and row.synthetic is True for row in batch.rows)
+    assert batch.to_dict()["synthetic"] is True
+
+    store = JobStore(tmp_path / "jobs.db")
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+    refused = scan_once(Orchestrator(store), [source])
+    assert not refused.queued
+    cursor = store.get_state(source.cursor_key)
+    assert cursor is not None
+    assert REASON_SYNTHETIC in cursor
+    store.close()
+
+    store = JobStore(tmp_path / "jobs.db")
+    allowed = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store, allow_synthetic=True)],
+    )
+    assert len(allowed.queued) == 1
+    assert allowed.queued[0].payload["synthetic"] is True
+    assert allowed.queued[0].payload["source"] == "provider:synthetic"
+    store.close()
+
+
+def test_real_and_unknown_provenance_are_distinguished(tmp_path: Path) -> None:
+    bars = make_bars(200)
+    real_root = tmp_path / "real"
+    write(real_root, bars)
+    record_provenance(real_root, bars, source="dukascopy", synthetic=False)
+
+    ledger_path = tmp_path / "real.db"
+    with PaperLedger(ledger_path) as ledger:
+        runner = make_runner(ledger, real_root)
+        runner.advance()
+        record = ledger.session(runner.session_id)
+        assert record is not None
+        assert session_provenance(record.config) == ("dukascopy", False)
+        real_batch = matured_outcomes(ledger, runner.session_id)
+    assert real_batch.synthetic is False
+    assert real_batch.source == "dukascopy"
+
+    empty_root = tmp_path / "empty"
+    write(empty_root, bars)
+    unknown_path = tmp_path / "unknown.db"
+    with PaperLedger(unknown_path) as ledger:
+        runner = make_runner(ledger, empty_root)
+        runner.advance()
+        record = ledger.session(runner.session_id)
+        assert record is not None
+        assert session_provenance(record.config) == (None, None)
+        unknown_batch = matured_outcomes(ledger, runner.session_id)
+    assert unknown_batch.synthetic is None
+    assert unknown_batch.source is None
+    assert all(row.synthetic is None and row.source is None for row in unknown_batch.rows)
+
+
+def test_provenance_survives_a_ledger_reopen(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    bars = make_bars(200)
+    write(root, bars)
+    record_provenance(root, bars, source="synthetic", synthetic=True)
+    ledger_path = tmp_path / "paper.db"
+
+    with PaperLedger(ledger_path) as ledger:
+        runner = make_runner(ledger, root)
+        runner.advance()
+        session_id = runner.session_id
+
+    with PaperLedger(ledger_path) as ledger:
+        record = ledger.session(session_id)
+        assert record is not None
+        assert session_provenance(record.config) == ("synthetic", True)
+        batch = matured_outcomes(ledger, session_id)
+        assert batch.synthetic is True
+        assert batch.rows
+
+
+def test_outcome_fingerprint_changes_with_provenance(tmp_path: Path) -> None:
+    def fingerprint(name: str, provenance: dict[str, object]) -> str:
+        path = tmp_path / f"{name}.db"
+        with PaperLedger(path) as ledger:
+            ledger.open_session(
+                "fp",
+                symbol=SYMBOL,
+                timeframe=TIMEFRAME,
+                strategy="dsl",
+                model_version="hash-1",
+                started_at=BASE,
+                config={
+                    "origin": "test",
+                    "data": {"dataset_id": "dataset-1"},
+                    "provenance": provenance,
+                },
+            )
+            ledger.record_trade(
+                "fp",
+                side="long",
+                entry_ts=BASE,
+                entry_price=2000.0,
+                exit_ts=BASE + timedelta(minutes=5),
+                exit_price=2001.0,
+                lot=0.10,
+                pnl=10.0,
+                r_multiple=1.0,
+                exit_reason="take_profit",
+            )
+            return outcome_fingerprint(matured_outcomes(ledger, "fp"))
+
+    real = fingerprint("real", {"source": "dukascopy", "synthetic": False})
+    same = fingerprint("same", {"source": "dukascopy", "synthetic": False})
+    demo = fingerprint("demo", {"source": "dukascopy", "synthetic": True})
+    unknown = fingerprint("unknown", {})
+
+    assert real == same
+    assert len({real, demo, unknown}) == 3
+
+
+def test_changed_provenance_refuses_resume(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    bars = make_bars(200)
+    write(root, bars)
+    record_provenance(root, bars, source="synthetic", synthetic=True)
+    ledger_path = tmp_path / "paper.db"
+
+    with PaperLedger(ledger_path) as ledger:
+        make_runner(ledger, root).advance()
+
+    # A re-ingest rewrites the sidecar: the evidence identity behind the
+    # recorded trades changed, so the session must not continue.
+    record_provenance(root, bars, source="dukascopy", synthetic=False)
+    with (
+        PaperLedger(ledger_path) as ledger,
+        pytest.raises(SessionMismatchError, match="data source"),
+    ):
+        make_runner(ledger, root).advance()
+
+
+def test_unreadable_provenance_sidecar_is_refused(tmp_path: Path) -> None:
+    root = tmp_path / "data"
+    write(root, make_bars(200))
+    sidecar = provenance_path(root, SYMBOL, TIMEFRAME)
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("{not json", encoding="utf-8")
+
+    with PaperLedger(tmp_path / "paper.db") as ledger:
+        runner = make_runner(ledger, root)
+        with pytest.raises(ContinuousError, match="unreadable provenance"):
+            runner.advance()
+        assert ledger.session(runner.session_id) is None
 
 
 def test_continuous_module_has_no_network_or_legacy_fallback() -> None:
