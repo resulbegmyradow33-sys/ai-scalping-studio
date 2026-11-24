@@ -103,3 +103,23 @@ playbooks, named strategies or the winning model.
 
 Do not describe a proposal, TODO, branch-only PR, synthetic test,
 validation-only winner or passing CI as an autonomous profitable trading AI.
+
+
+## OpenCode Desktop team execution
+
+- Project-specific OpenCode setup lives in `opencode.jsonc`,
+  `.opencode/agents/`, `.opencode/commands/` and
+  `docs/opencode-team-workflow.md`.
+- `autonomy-lead` is the default primary coordinator. It may delegate only to
+  the named project subagents; it is not a parallel file writer.
+- Subagents inherit the active OpenCode session model unless explicitly
+  configured otherwise. Do not hard-code a provider/model in this repository;
+  cloud model choice belongs to the owner/session. Cloud LLMs may assist
+  development but are never a required dependency of the trading runtime.
+- Parallel writers require separate OpenCode worktrees and one owner per file.
+  If isolated worktrees are unavailable, serialize writes.
+- Parallel analysis is welcome; local heavy training/backtests remain limited
+  to one at a time on the Mac mini M2 8 GB.
+- Use `/team-audit`, `/team-plan` and `/team-review` for repeatable workflows.
+  OpenCode setup details and first-run checks are in
+  `docs/opencode-team-workflow.md`.
