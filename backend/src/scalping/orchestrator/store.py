@@ -40,6 +40,7 @@ from typing import Any, Self
 
 __all__ = [
     "BLOCKED_DEPENDENCY_STATUSES",
+    "DEFAULT_MAX_DEFERRALS",
     "JOB_STATUSES",
     "SCHEMA_VERSION",
     "TERMINAL_STATUSES",
@@ -56,7 +57,11 @@ __all__ = [
 
 #: Schema version written by this module. A database with a newer version is
 #: refused instead of being written with an older layout.
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
+
+#: Default ceiling on guard deferrals per job: 1440 × the daemon's 60 s guard
+#: retry equals 24 hours of waiting for resources before the job is failed.
+DEFAULT_MAX_DEFERRALS: int = 1440
 
 #: Every state a job may hold. ``interrupted`` is terminal for a job whose
 #: attempts are exhausted; a recoverable one is set back to ``queued``.
@@ -134,6 +139,16 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         )
         """,
     ),
+    2: (
+        (
+            "ALTER TABLE jobs ADD COLUMN defer_count INTEGER NOT NULL DEFAULT 0 "
+            "CHECK (defer_count >= 0)"
+        ),
+        (
+            "ALTER TABLE jobs ADD COLUMN max_deferrals INTEGER NOT NULL DEFAULT 1440 "
+            "CHECK (max_deferrals >= 0)"
+        ),
+    ),
 }
 
 
@@ -160,6 +175,8 @@ class Job:
     status: str
     attempts: int
     max_retries: int
+    defer_count: int
+    max_deferrals: int
     depends_on: tuple[int, ...]
     payload: Mapping[str, Any]
     result: Mapping[str, Any] | None
@@ -178,6 +195,8 @@ class Job:
             "status": self.status,
             "attempts": self.attempts,
             "max_retries": self.max_retries,
+            "defer_count": self.defer_count,
+            "max_deferrals": self.max_deferrals,
             "depends_on": list(self.depends_on),
             "payload": dict(self.payload),
             "result": None if self.result is None else dict(self.result),
@@ -244,6 +263,7 @@ class JobStats:
     events: int
     oldest_queued_at: str | None
     due: int
+    deferrals: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -252,6 +272,7 @@ class JobStats:
             "events": self.events,
             "oldest_queued_at": self.oldest_queued_at,
             "due": self.due,
+            "deferrals": self.deferrals,
         }
 
 
@@ -366,6 +387,8 @@ def _job_from_row(row: sqlite3.Row) -> Job:
         status=str(row["status"]),
         attempts=int(row["attempts"]),
         max_retries=int(row["max_retries"]),
+        defer_count=int(row["defer_count"]),
+        max_deferrals=int(row["max_deferrals"]),
         depends_on=_json_list(str(row["depends_on"]), "depends_on"),
         payload=payload,
         result=_json_mapping(optional("result_json"), "result_json"),
@@ -542,6 +565,7 @@ class JobStore:
         payload: Mapping[str, Any] | None = None,
         priority: int = 0,
         max_retries: int = 0,
+        max_deferrals: int = DEFAULT_MAX_DEFERRALS,
         depends_on: Sequence[int] = (),
         scheduled_at: str | datetime | None = None,
         now: str | datetime | None = None,
@@ -558,6 +582,7 @@ class JobStore:
         dedupe_key = _require_text(dedupe_key, "dedupe_key")
         priority = _require_int(priority, "priority")
         max_retries = _require_int(max_retries, "max_retries", minimum=0)
+        max_deferrals = _require_int(max_deferrals, "max_deferrals", minimum=0)
         stamp = _stamp(now, "now")
         scheduled = stamp if scheduled_at is None else _stamp(scheduled_at, "scheduled_at")
         deps: list[int] = []
@@ -589,14 +614,15 @@ class JobStore:
                 """
                 INSERT INTO jobs (
                     kind, dedupe_key, priority, status, attempts, max_retries,
-                    depends_on, payload_json, created_at, scheduled_at
-                ) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?)
+                    max_deferrals, depends_on, payload_json, created_at, scheduled_at
+                ) VALUES (?, ?, ?, 'queued', 0, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     kind,
                     dedupe_key,
                     priority,
                     max_retries,
+                    max_deferrals,
                     json.dumps(deps, separators=(",", ":")),
                     payload_json,
                     stamp,
@@ -611,6 +637,7 @@ class JobStore:
                     "kind": kind,
                     "priority": priority,
                     "max_retries": max_retries,
+                    "max_deferrals": max_deferrals,
                     "depends_on": deps,
                     "scheduled_at": scheduled,
                     "dedupe_key": dedupe_key,
@@ -904,6 +931,11 @@ class JobStore:
         "not now" — the job did no work, so ``attempts`` goes back by one and the
         job keeps its full retry budget. Retrying instead would let a busy machine
         exhaust every attempt without a single execution.
+
+        Deferrals are bounded by ``max_deferrals`` (default 1440): a job that keeps
+        meeting a loaded machine must not wait forever. The cap turns the job
+        ``failed`` with a reason instead of requeueing it, and the attempt that was
+        claimed is not restored because the row is now terminal.
         """
         job_id = _require_int(job_id, "job_id", minimum=1)
         reason = _require_text(reason, "reason")
@@ -915,19 +947,47 @@ class JobStore:
             attempts = int(row["attempts"])
             if attempts < 1:
                 raise JobStateError(f"job {job_id} was never claimed; nothing to defer")
+            defer_count = int(row["defer_count"])
+            max_deferrals = int(row["max_deferrals"])
+            if defer_count >= max_deferrals:
+                error = (
+                    f"deferral cap reached after {defer_count} deferrals "
+                    f"(max_deferrals={max_deferrals}): {reason}"
+                )
+                tx.execute(
+                    """
+                    UPDATE jobs
+                    SET status = 'failed', error = ?, finished_at = ?
+                    WHERE id = ?
+                    """,
+                    (error, stamp, job_id),
+                )
+                detail = _canonical_json(
+                    {
+                        "reason": reason,
+                        "defer_count": defer_count,
+                        "max_deferrals": max_deferrals,
+                        "terminal": "failed",
+                    }
+                )
+                self._insert_event(tx, job_id, "defer_exhausted", detail, stamp)
+                return self._reload(tx, job_id)
+            defer_count += 1
             tx.execute(
                 """
                 UPDATE jobs
-                SET status = 'queued', attempts = ?, scheduled_at = ?, started_at = NULL,
-                    finished_at = NULL, error = ?
+                SET status = 'queued', attempts = ?, defer_count = ?, scheduled_at = ?,
+                    started_at = NULL, finished_at = NULL, error = ?
                 WHERE id = ?
                 """,
-                (attempts - 1, scheduled, reason, job_id),
+                (attempts - 1, defer_count, scheduled, reason, job_id),
             )
             detail = _canonical_json(
                 {
                     "attempts_spent": 0,
                     "claimed_attempt": attempts,
+                    "defer_count": defer_count,
+                    "max_deferrals": max_deferrals,
                     "delay_seconds": delay,
                     "scheduled_at": scheduled,
                     "reason": reason,
@@ -1177,12 +1237,15 @@ class JobStore:
             (stamp,),
         ).fetchone()
         due = 0 if due_row is None else int(due_row[0])
+        defer_row = conn.execute("SELECT COALESCE(SUM(defer_count), 0) FROM jobs").fetchone()
+        deferrals = 0 if defer_row is None else int(defer_row[0])
         return JobStats(
             counts=counts,
             total=total,
             events=events,
             oldest_queued_at=oldest,
             due=due,
+            deferrals=deferrals,
         )
 
     # ------------------------------------------------------------------ helpers

@@ -12,6 +12,7 @@ The code lives in `backend/src/scalping/knowledge/`:
 | `ingest.py` | copy the original, checksum, detect format, extract sections |
 | `index.py` | SQLite documents/sections/chunks, FTS5 search, hypothesis tables |
 | `hypothesis.py` | hypothesis record, source citations, status, experiment links |
+| `routing.py` | experiment-proposal records, approval gate, candidate conversion |
 
 ## Supported formats
 
@@ -245,6 +246,117 @@ with KnowledgeIndex("runs/knowledge.sqlite3") as index:
     result.skipped   # duplicates already stored
 ```
 
+## Experiment proposals and the approval gate
+
+P4 slice 3. `scalping.knowledge.routing` turns one testable hypothesis into an
+`ExperimentProposal`, but the proposal is still a record. It contains the
+hypothesis id, the original citations, the symbol/timeframe scope, the
+hypothesis kind (`claim` or `observation`), the required raw bar columns and
+feature groups, a suggested strategy skeleton **as three text fields**
+(observation, condition, expected effect), the falsification test and its
+governance state.
+
+The proposal id is a lowercase sha256 over the immutable payload (hypothesis,
+citations, scope, kind, data requirement, skeleton text). Status, approval and
+conversion are excluded, so the same scope always has one id while governance
+changes stay auditable. Re-creating the same record returns the stored row.
+
+### Routing rules
+
+`propose_from_hypothesis(hypothesis, *, symbol, timeframe, index)` is the only
+constructor:
+
+| Condition | Result |
+|---|---|
+| status `proposed` or `testing` | accepted |
+| status `supported` or `rejected` | `bad_status`; a re-test is a new hypothesis |
+| no source refs, or a citation that does not resolve to an `indexed` section | `missing_source` |
+| symbol/timeframe outside the project registry | `unknown_scope` |
+| statement not classifiable as `claim`/`observation` | `unsupported_kind` |
+| a valid scope | `ExperimentProposal(status="proposed")` |
+
+The caller supplies the symbol and timeframe because extracted hypotheses use
+`unspecified` scope. Routing does not infer a market from prose and does not
+compare the chosen scope with `market_scope`/`timeframe_scope`; that mismatch
+remains visible in the two records.
+
+`RoutingError.code` is one of: `missing_source`, `bad_status`, `unknown_scope`,
+`already_converted`, `not_approved`, `unknown_proposal`, `unsupported_kind`,
+`invalid_proposal`. The first five are the routing contract; the last three
+cover an unknown id, an unclassifiable sentence and a payload that does not
+match its own canonical id.
+
+Required data is recorded rather than fetched. `required_columns` is the bar
+schema an experiment needs (OHLC, spread for costs, volume); `required_groups`
+starts as `price` + `volatility` and adds groups whose keywords appear in the
+statement by a fixed keyword map. This is a planning hint, not a dataset
+request and not a feature computation.
+
+### Store and approval
+
+`ProposalStore(path)` follows the same SQLite conventions as the knowledge
+index: WAL, `busy_timeout`, foreign keys, `synchronous = NORMAL`,
+`BEGIN IMMEDIATE` writes and a versioned `schema_version` table. The store
+keeps proposals and their source refs in two tables (`ON DELETE CASCADE`).
+
+`create()` accepts only `status="proposed"` records with no approval and no
+conversion. Approval is a separate, audited call; a hand-built approved record
+cannot bypass the gate.
+
+| Status | Entered by | Approval fields | In queue |
+|---|---|---|---|
+| `proposed` | `create()` | empty | no |
+| `approved` | `approve(reason, actor)` | actor, reason, timestamp | yes |
+| `rejected` | `reject(reason, actor)` | actor, reason, timestamp | no |
+| `converted` | `link_candidate(hash, dataset_id)` | preserved from approval | no |
+
+- `approve` and `reject` require a non-empty reason and actor; the decision is
+  stored in `approval`. Re-approving an approved proposal is an idempotent
+  no-op (after argument validation). An approved but not-yet-converted
+  proposal may still be rejected. Rejected and converted proposals cannot be
+  approved, because that would rewrite history.
+- `link_candidate` is allowed once, only from `approved`. A second call is
+  `already_converted`; a call before approval is `not_approved`.
+- Nothing auto-approves. `proposals_for_queue(store, limit)` returns approved
+  proposals oldest first and never changes a status.
+
+"Converted" means one discovery candidate hash was linked to one dataset id
+for this proposal. It is identity, not evidence: conversion does not mean the
+candidate was validated, promoted, paper-traded or profitable.
+
+```python
+from scalping.knowledge import (
+    KnowledgeIndex,
+    ProposalStore,
+    propose_from_hypothesis,
+    proposals_for_queue,
+)
+
+with KnowledgeIndex("runs/knowledge.sqlite3") as index, ProposalStore(
+    "runs/proposals.sqlite3"
+) as proposals:
+    draft = propose_from_hypothesis(
+        hypothesis, symbol="XAUUSD", timeframe="M15", index=index
+    )
+    proposals.create(draft)                       # status="proposed"
+    proposals.approve(draft.proposal_id, "scope and data are clear", "owner")
+    ready = proposals_for_queue(proposals, 10)    # approved only
+```
+
+### No prose-to-order path
+
+The routing module never compiles or executes the skeleton, never builds DSL
+nodes, never reads market data and never imports the strategy, discovery, API,
+paper-trading, backtest or orchestrator packages. It also has no network
+import. A proposal carries no direction, size, stop, target or order type, so
+there is nothing to execute.
+
+Approval authorizes a quantitative experiment, not a trade. The Strategy
+Discovery Engine still owns DSL/AST validation, the evidence gate owns
+promotion, and the paper runner is the only execution target. A supported
+hypothesis does not become a champion; a converted proposal does not become an
+order.
+
 ## Boundaries
 
 - **Document text is never a trusted strategy or an order.** Nothing in this
@@ -258,9 +370,9 @@ with KnowledgeIndex("runs/knowledge.sqlite3") as index:
   package. The index is a local file.
 - **No invented content.** If extraction fails, the record says so. Scanned
   PDF/OCR and unsupported formats are reported, not filled in.
-- **Claims are not facts.** This slice stores text and hypotheses but does not
-  yet classify claims, definitions, examples or opinions. That classification
-  and the route into the Strategy Discovery Engine are later slices.
+- **Claims are not facts.** Classification and hypothesis extraction are
+  heuristic triage. A routed proposal names an experiment; it does not prove
+  the claim or promote anything.
 
 ## Tests
 
@@ -274,11 +386,18 @@ section/chunk offsets, FTS5 and LIKE search with limits, duplicate documents,
 failure records, hypothesis round trips with citations, status transitions and
 experiment links.
 
+`backend/tests/test_hypothesis_routing.py` covers proposal creation from an
+extracted hypothesis, missing/unresolvable sources, refusal of supported and
+rejected hypotheses, unknown symbol/timeframe/kind, approve/reject audit,
+one-time candidate linking, queue filtering, deterministic ids, reopen
+persistence and the absence of strategy/order/network imports.
+
 Run:
 
 ```sh
 cd backend
-uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py -q
+uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py \
+  tests/test_knowledge_extract.py tests/test_hypothesis_routing.py -q
 uv run ruff check src tests scripts
 uv run mypy src
 ```
@@ -297,3 +416,14 @@ uv run mypy src
 - Classification and extraction are pattern-based, not semantic; there is no
   LLM, no strategy routing and no feedback ingestion of backtest/paper logs in
   this slice.
+- Proposal scope is caller-supplied and is not reconciled with the hypothesis'
+  `market_scope`/`timeframe_scope`. Dataset availability is not checked at
+  routing time; a proposal can name a valid registry scope for which no bars
+  are stored yet.
+- The queue function only reads approved rows. Wiring it into the orchestrator,
+  building a dataset or compiling a DSL candidate from the skeleton is outside
+  this slice.
+- Proposal ids are deterministic, so a rejected proposal cannot be re-proposed
+  under the same hypothesis and scope; a re-test requires a new hypothesis.
+- Keyword-based `required_groups` is a planning hint and can over- or
+  under-select feature groups. It never changes an experiment's actual data.
