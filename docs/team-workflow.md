@@ -196,3 +196,13 @@ the hook becomes the only local gate.
   experiment question, baseline, data id/checksum, cost-aware evaluation and a
   reason the existing system cannot answer it.
 - A green unit suite is code evidence, not OOS validation or profitability.
+
+
+## OpenCode Desktop team setup
+
+The repository's OpenCode Desktop configuration, role-based agents, slash
+commands, cloud-model inheritance, isolated worktree policy and M2 resource
+limits are documented in `docs/opencode-team-workflow.md`. The project config
+sets `autonomy-lead` as the default agent; it deliberately does not pin a
+provider/model, so the owner's currently selected cloud model is inherited by
+subagents. The trading application itself remains independent of cloud LLMs.
