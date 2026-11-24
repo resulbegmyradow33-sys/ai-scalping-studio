@@ -26,6 +26,8 @@ from scalping.paper import (
     PaperLedger,
     PaperSession,
     ResumeError,
+    provenance_config,
+    session_provenance,
 )
 from scalping.types import Bar, Side
 
@@ -371,6 +373,68 @@ def test_duplicate_session_id_is_rejected(tmp_path: Path) -> None:
         with pytest.raises(DuplicateError):
             book.open_session("s1", symbol="XAUUSD", timeframe="M1", strategy="s")
         assert book.session("s1") is not None
+
+
+def test_session_provenance_is_stored_and_survives_a_reopen(tmp_path: Path) -> None:
+    path = tmp_path / "paper.db"
+    config = {
+        "origin": "test",
+        "provenance": provenance_config("dukascopy", False),
+    }
+    with PaperLedger(path) as book:
+        record = book.open_session(
+            "s1", symbol="XAUUSD", timeframe="M1", strategy="s", config=config
+        )
+        assert session_provenance(record.config) == ("dukascopy", False)
+    with PaperLedger(path) as book:
+        reopened = book.session("s1")
+        assert reopened is not None
+        assert session_provenance(reopened.config) == ("dukascopy", False)
+
+
+def test_unknown_session_provenance_is_none_not_false(tmp_path: Path) -> None:
+    with PaperLedger(tmp_path / "paper.db") as book:
+        record = book.open_session("s1", symbol="XAUUSD", timeframe="M1", strategy="s")
+        assert session_provenance(record.config) == (None, None)
+        assert session_provenance({}) == (None, None)
+        assert provenance_config(None, None) == {}
+
+
+def test_mistyped_session_provenance_is_refused_before_the_insert(tmp_path: Path) -> None:
+    with PaperLedger(tmp_path / "paper.db") as book:
+        with pytest.raises(ValueError, match="invalid provenance"):
+            book.open_session(
+                "bad",
+                symbol="XAUUSD",
+                timeframe="M1",
+                strategy="s",
+                config={"provenance": {"synthetic": "true"}},
+            )
+        assert book.session("bad") is None
+        with pytest.raises(ValueError, match="invalid provenance"):
+            book.open_session(
+                "bad-source",
+                symbol="XAUUSD",
+                timeframe="M1",
+                strategy="s",
+                config={"source": "  "},
+            )
+        assert book.session("bad-source") is None
+
+
+def test_provenance_config_rejects_a_mistyped_flag() -> None:
+    with pytest.raises(TypeError, match="synthetic"):
+        provenance_config("synthetic", "true")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="source"):
+        provenance_config("   ", True)
+
+
+def test_conflicting_provenance_spellings_are_refused() -> None:
+    with pytest.raises(ValueError, match="different values"):
+        session_provenance({"synthetic": False, "extra": {"synthetic": True}})
+    with pytest.raises(ValueError, match="different values"):
+        session_provenance({"source": "csv", "provenance": {"source": "synthetic"}})
+    assert session_provenance({"source": "csv", "provenance": {"source": "csv"}}) == ("csv", None)
 
 
 def test_foreign_keys_are_enforced(tmp_path: Path) -> None:

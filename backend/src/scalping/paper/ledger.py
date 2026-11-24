@@ -55,6 +55,8 @@ __all__ = [
     "SessionRecord",
     "SignalRecord",
     "TradeRecord",
+    "provenance_config",
+    "session_provenance",
 ]
 
 #: Schema version written by this module. A database with a newer version is
@@ -177,6 +179,26 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
 
 #: Order states a caller may write.
 _ORDER_STATUSES: Final[frozenset[str]] = frozenset({"pending", "filled", "rejected"})
+
+#: Where a session config may record its data provenance. The first entry is the
+#: canonical spelling this package writes; the nested ones accept the runner's
+#: ``extra`` block and older configs. ``None`` means unknown, never real.
+_PROVENANCE_SOURCE_PATHS: Final[tuple[tuple[str, ...], ...]] = (
+    ("source",),
+    ("provenance", "source"),
+    ("data", "source"),
+    ("extra", "source"),
+    ("extra", "provenance", "source"),
+    ("extra", "data", "source"),
+)
+_PROVENANCE_SYNTHETIC_PATHS: Final[tuple[tuple[str, ...], ...]] = (
+    ("synthetic",),
+    ("provenance", "synthetic"),
+    ("data", "synthetic"),
+    ("extra", "synthetic"),
+    ("extra", "provenance", "synthetic"),
+    ("extra", "data", "synthetic"),
+)
 
 #: Paginated reads. The table and ordering are chosen here, never by a caller,
 #: so the only request-derived values that reach SQL are the bound parameters.
@@ -382,6 +404,72 @@ def _optional_text(value: object, field: str) -> str | None:
     if value is None:
         return None
     return _require_text(value, field)
+
+
+def _provenance_values(
+    config: Mapping[str, Any], paths: tuple[tuple[str, ...], ...]
+) -> list[object]:
+    """Every value stored under one provenance key spelling that is present."""
+    found: list[object] = []
+    for path in paths:
+        current: object = config
+        for key in path:
+            if not isinstance(current, Mapping) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current is not None:
+            found.append(current)
+    return found
+
+
+def session_provenance(config: Mapping[str, Any]) -> tuple[str | None, bool | None]:
+    """Read a session's recorded data provenance.
+
+    Returns ``(source, synthetic)``. ``None`` means **unknown**, never an
+    invented ``False``: a session whose config predates provenance, or whose
+    caller had no provider metadata, must not be presented as real market
+    evidence. A value that is present but mistyped is refused instead of being
+    downgraded to unknown, so a corrupt record cannot pass as a gap.
+    """
+    sources = _provenance_values(config, _PROVENANCE_SOURCE_PATHS)
+    synthetics = _provenance_values(config, _PROVENANCE_SYNTHETIC_PATHS)
+    for value in sources:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"session provenance source must be non-empty text, got {value!r}")
+    for value in synthetics:
+        if not isinstance(value, bool):
+            raise TypeError(f"session provenance synthetic must be a bool, got {value!r}")
+    if len(set(sources)) > 1:
+        raise ValueError(
+            f"session provenance source is recorded twice with different values: {sources!r}"
+        )
+    if len(set(synthetics)) > 1:
+        raise ValueError(
+            f"session provenance synthetic is recorded twice with different values: {synthetics!r}"
+        )
+    return (
+        str(sources[0]) if sources else None,
+        bool(synthetics[0]) if synthetics else None,
+    )
+
+
+def provenance_config(source: str | None, synthetic: bool | None) -> dict[str, Any]:
+    """The canonical config block for a session's data provenance.
+
+    Omit an unknown value instead of writing ``None``: a caller with no provider
+    metadata records nothing, and :func:`session_provenance` reports unknown on
+    read. ``synthetic`` is type-checked here, at the write boundary, so a string
+    such as ``"true"`` can never be stored as evidence.
+    """
+    block: dict[str, Any] = {}
+    if source is not None:
+        block["source"] = _require_text(source, "source")
+    if synthetic is not None:
+        if not isinstance(synthetic, bool):
+            raise TypeError(f"synthetic must be a bool, got {type(synthetic).__name__}")
+        block["synthetic"] = synthetic
+    return block
 
 
 def _require_finite(value: object, field: str) -> float:
@@ -689,7 +777,14 @@ class PaperLedger:
         _require_text(strategy, "strategy")
         version = _optional_text(model_version, "model_version")
         stamp = _stamp(_now() if started_at is None else started_at, "started_at")
-        config_json = _canonical_json({} if config is None else config)
+        config_data: dict[str, Any] = {} if config is None else dict(config)
+        # Refuse a corrupt provenance block at the write boundary: a mistyped
+        # flag must not become "unknown" or, worse, pass as real evidence.
+        try:
+            session_provenance(config_data)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"invalid provenance in session config: {exc}") from exc
+        config_json = _canonical_json(config_data)
 
         try:
             with self._transaction() as tx:
