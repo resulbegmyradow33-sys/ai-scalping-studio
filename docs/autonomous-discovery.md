@@ -52,8 +52,12 @@ configuration, because ranking needs a numeric key.
 foreign keys and a versioned schema, following `scalping.registry.db`. Schema
 version 1 created four domain tables plus `schema_version`; version 2 adds
 strategy champion governance (`champion_promotions`, `champions`), the
-`rolled_back` outcome and a JSON `detail_json` on `decisions`. The migration is
-idempotent and keeps every existing candidate, trial, lineage edge and decision.
+`rolled_back` outcome and a JSON `detail_json` on `decisions`; version 3 adds the
+promotion `mode` (`evidence`, `exploratory`, `manual`), an evidence pointer on
+the champion rows and an immutable `evidence` table keyed by the bundle checksum.
+The migration is idempotent and keeps every existing candidate, trial, lineage
+edge and decision; existing promotions default to `exploratory`, which is what
+they were.
 
 `candidates` — one row per canonical hash.
 
@@ -329,31 +333,34 @@ bundle; it is not a metric comparison:
 ```python
 from scalping.discovery.promotion import (
     PROMOTION_V1,
-    evaluate_promotion,
+    EvidenceIdentity,
     promote_with_evidence,
 )
 
-decision = evaluate_promotion(
-    evidence,                     # CandidateEvidence
-    PROMOTION_V1,                 # named, versioned, fail-closed
-    champion_evidence=champion_evidence,
-    champion_spec_hash=champion_id,
-)
 champion = promote_with_evidence(
     archive,
     candidate_id,
-    decision,
+    evidence,                     # CandidateEvidence
+    PROMOTION_V1,                 # named, versioned, fail-closed
     scope="XAUUSD:M5",
     reason="passed promotion-v1 on identical folds",
+    expected_identity=EvidenceIdentity(
+        code_version=current_code_version,
+        dataset_checksum=current_dataset_checksum,
+        settings_digest=current_settings_digest,
+    ),
 )
 ```
 
-`promote_with_evidence` refuses a rejected decision and writes the policy
-id/version, the evidence checksum, the dataset id/checksum and the settings
-digest into the audit detail. The history row stores no metric
-(`metric`/`value` are NULL); `detail_json.mode` is `"evidence"`. The policy, its
-thresholds and every rejection code are documented in
-`docs/local-learning-engine.md`.
+The policy is evaluated **inside** the call; there is no decision object to
+forge and no public archive promotion method. The current champion is read from
+the archive and its stored evidence is the baseline. The function writes the
+policy id/version/digest, evidence checksum, dataset id/checksum, settings digest
+and code version into the audit detail. The history row stores no metric
+(`metric`/`value` are NULL) and `mode`/`detail_json.mode` is `"evidence"`.
+`PROMOTION_V1.require_locked_oos` is `True`, so nothing promotes until the
+holdout slice attaches a locked-OOS section. The policy, its thresholds and
+every rejection code are documented in `docs/local-learning-engine.md`.
 
 The older one-metric path remains for research only:
 
@@ -425,9 +432,10 @@ spec = provider.spec()            # StrategySpec, validated before it is returne
 run = provider.champion()         # scope, spec, candidate id, promotion, metrics
 ```
 
-It raises `NoChampionError` when nothing was promoted and `InvalidChampionSpec`
-when the payload does not load as a strategy or its recomputed hash differs from
-the archived id. There is no fallback to a hand-written strategy: a silent
+It raises `NoChampionError` when nothing was promoted, `NoEvidenceChampion` when
+the champion came from the exploratory or manual path, and
+`InvalidChampionSpec` when the payload does not load as a strategy or its
+recomputed hash differs from the archived id. There is no fallback to a hand-written strategy: a silent
 default would mean the autonomous run stops testing what the search produced.
 The module imports the archive and the DSL only; `scalping.paper` is never
 imported from `scalping.discovery`, so the dependency stays one-way.

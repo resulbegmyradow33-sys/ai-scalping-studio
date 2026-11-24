@@ -72,7 +72,11 @@ from scalping.discovery.evidence import (
     slice_frame,
     verify_evidence,
 )
-from scalping.discovery.promotion import PromotionDecision, PromotionPolicy
+from scalping.discovery.promotion import (
+    PromotionDecision,
+    PromotionPolicy,
+    is_sealed_decision,
+)
 from scalping.discovery.protocols import canonical_json
 from scalping.features.build import FeatureFrame
 from scalping.regime.strategy import UNKNOWN_REGIME
@@ -94,8 +98,9 @@ __all__ = [
     "verify_holdout_result",
 ]
 
-#: Layout version of the ledger and of :meth:`LockedHoldoutResult.to_dict`.
-HOLDOUT_SCHEMA_VERSION: Final[int] = 1
+#: Layout version of :meth:`LockedHoldoutResult.to_dict`; version 2 records the
+#: sealed decision's policy digest alongside the id/version.
+HOLDOUT_SCHEMA_VERSION: Final[int] = 2
 
 _WAL_ATTEMPTS: Final[int] = 5
 _WAL_BACKOFF_SECONDS: Final[float] = 0.05
@@ -121,6 +126,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             settings_digest TEXT NOT NULL,
             policy_id TEXT,
             policy_version INTEGER,
+            policy_digest TEXT,
             evidence_checksum TEXT,
             decision_json TEXT,
             sealed_at TEXT NOT NULL,
@@ -310,6 +316,7 @@ class HoldoutToken:
     settings_digest: str
     policy_id: str
     policy_version: int
+    policy_digest: str
     evidence_checksum: str
 
     def __post_init__(self) -> None:
@@ -323,6 +330,7 @@ class HoldoutToken:
             "code_version",
             "settings_digest",
             "policy_id",
+            "policy_digest",
             "evidence_checksum",
         ):
             _text(getattr(self, name), name)
@@ -346,6 +354,7 @@ class HoldoutRecord:
     settings_digest: str
     policy_id: str | None
     policy_version: int | None
+    policy_digest: str | None
     evidence_checksum: str | None
     decision_json: str | None
     sealed_at: str
@@ -387,6 +396,7 @@ class LockedHoldoutResult:
     settings_digest: str
     policy_id: str
     policy_version: int
+    policy_digest: str
     evidence_checksum: str
     test_start_row: int
     test_end_row: int
@@ -424,6 +434,7 @@ class LockedHoldoutResult:
             "code_version",
             "settings_digest",
             "policy_id",
+            "policy_digest",
             "evidence_checksum",
             "test_start_ts",
             "test_end_ts",
@@ -585,6 +596,7 @@ def _row_to_record(row: sqlite3.Row) -> HoldoutRecord:
         settings_digest=str(row["settings_digest"]),
         policy_id=None if row["policy_id"] is None else str(row["policy_id"]),
         policy_version=None if row["policy_version"] is None else int(row["policy_version"]),
+        policy_digest=None if row["policy_digest"] is None else str(row["policy_digest"]),
         evidence_checksum=(
             None if row["evidence_checksum"] is None else str(row["evidence_checksum"])
         ),
@@ -1008,6 +1020,15 @@ class HoldoutLedger:
                 dataset_checksum=holdout.dataset_checksum,
                 detail=f"expected PromotionDecision, got {type(decision).__name__}",
             )
+        if not is_sealed_decision(decision):
+            self._refuse(
+                action="unlock",
+                actor=actor,
+                reason="invalid_decision",
+                dataset_id=holdout.dataset_id,
+                dataset_checksum=holdout.dataset_checksum,
+                detail="the decision is not sealed by evaluate_promotion",
+            )
         if not isinstance(policy, PromotionPolicy):
             self._refuse(
                 action="unlock",
@@ -1084,6 +1105,18 @@ class HoldoutLedger:
                     f"caller supplied {policy.policy_id} v{policy.version}"
                 ),
             )
+        if decision.policy_digest != policy.digest:
+            self._refuse(
+                action="unlock",
+                actor=actor,
+                reason="decision_policy_mismatch",
+                dataset_id=record.dataset_id,
+                dataset_checksum=record.dataset_checksum,
+                detail=(
+                    "the decision was sealed by a different policy payload; "
+                    "re-evaluate it with the policy being applied"
+                ),
+            )
 
         expected = (
             holdout.dataset_id,
@@ -1149,6 +1182,7 @@ class HoldoutLedger:
             settings_digest=record.settings_digest,
             policy_id=decision.policy_id,
             policy_version=decision.version,
+            policy_digest=decision.policy_digest,
             evidence_checksum=decision.evidence_checksum,
         )
         stamp = _now()
@@ -1159,6 +1193,7 @@ class HoldoutLedger:
                    SET status = 'spent',
                        policy_id = ?,
                        policy_version = ?,
+                       policy_digest = ?,
                        evidence_checksum = ?,
                        decision_json = ?,
                        spent_at = ?,
@@ -1172,6 +1207,7 @@ class HoldoutLedger:
                 (
                     decision.policy_id,
                     decision.version,
+                    decision.policy_digest,
                     decision.evidence_checksum,
                     decision_payload,
                     stamp,
@@ -1753,6 +1789,7 @@ def evaluate_holdout(
             settings_digest=digest_settings,
             policy_id=record.policy_id or "unknown",
             policy_version=int(record.policy_version or 0),
+            policy_digest=record.policy_digest or "",
             evidence_checksum=record.evidence_checksum or "",
             test_start_row=int(start_row),
             test_end_row=int(end_row),

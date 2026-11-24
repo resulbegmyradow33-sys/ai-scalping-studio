@@ -18,12 +18,15 @@ import numpy as np
 import polars as pl
 import pytest
 
+from promotion_evidence import evidence_for as synthetic_evidence_for
 from scalping.config import Settings
 from scalping.datasets.builder import DatasetBundle, build_dataset
 from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidenceConfig,
     build_evidence,
+    evidence_checksum,
+    evidence_from_dict,
     settings_digest,
     verify_evidence,
 )
@@ -40,8 +43,8 @@ from scalping.discovery.holdout import (
 )
 from scalping.discovery.promotion import (
     PROMOTION_V1,
+    EvidenceIdentity,
     PromotionDecision,
-    PromotionRejection,
     evaluate_promotion,
 )
 from scalping.features.build import FeatureFrame, build_features
@@ -59,7 +62,12 @@ TIMEFRAME = "M1"
 CODE = "test-holdout-2026-11-24"
 START = datetime(2026, 1, 5, tzinfo=UTC)
 ROWS = 1600
-EVIDENCE_CHECKSUM = "e" * 64
+
+#: The pre-holdout eligibility check. It keeps the production policy id/version
+#: so the attached holdout section names the policy that will judge it, but it
+#: cannot demand the section before that section exists. The final promotion
+#: still runs `PROMOTION_V1` with `require_locked_oos=True`.
+PRE_HOLDOUT_POLICY = replace(PROMOTION_V1, require_locked_oos=False)
 
 ALWAYS = Compare(Const(0.0), "<", Const(1.0))
 NEVER = Compare(Const(0.0), ">", Const(1.0))
@@ -134,7 +142,7 @@ def holdout_spec(
     )
 
 
-def accepted_decision(
+def precheck(
     bundle: DatasetBundle,
     *,
     spec_hash: str = SPEC_HASH,
@@ -142,46 +150,42 @@ def accepted_decision(
     dataset_checksum: str | None = None,
     code_version: str = CODE,
     settings_hash: str = SETTINGS_HASH,
-    evidence_checksum: str = EVIDENCE_CHECKSUM,
-    policy: Any = PROMOTION_V1,
-) -> PromotionDecision:
-    return PromotionDecision(
-        accepted=True,
-        rejections=(),
-        policy_id=policy.policy_id,
-        version=policy.version,
-        evidence_checksum=evidence_checksum,
-        champion_checksum=None,
-        candidate_spec_hash=spec_hash,
-        champion_spec_hash=None,
+    expectancy_r: float = 0.3,
+    policy: Any = PRE_HOLDOUT_POLICY,
+) -> tuple[PromotionDecision, CandidateEvidence]:
+    """A sealed accepted decision plus the synthetic bundle that produced it.
+
+    The bundle is hand-built rather than simulated (the flat tape loses its costs
+    by construction); this test is about the holdout gate, not about finding an
+    edge. Its identity is the real dataset/spec/code/settings, so the holdout
+    unlocks only when those match.
+    """
+    evidence = synthetic_evidence_for(
+        spec_hash=spec_hash,
         dataset_id=bundle.manifest.dataset_id if dataset_id is None else dataset_id,
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        code_version=code_version,
         dataset_checksum=(
             bundle.manifest.checksum if dataset_checksum is None else dataset_checksum
         ),
         settings_digest=settings_hash,
-        code_version=code_version,
-        observed={},
-        created_at="2026-11-24T00:00:00+00:00",
+        expectancy_r=expectancy_r,
     )
+    decision = evaluate_promotion(evidence, policy)
+    assert decision.accepted, decision.codes
+    return decision, evidence
+
+
+def accepted_decision(bundle: DatasetBundle, **overrides: Any) -> PromotionDecision:
+    return precheck(bundle, **overrides)[0]
 
 
 def rejected_decision(bundle: DatasetBundle) -> PromotionDecision:
-    return PromotionDecision(
-        accepted=False,
-        rejections=(PromotionRejection("min_expectancy_r", "expectancy is below the policy"),),
-        policy_id=PROMOTION_V1.policy_id,
-        version=PROMOTION_V1.version,
-        evidence_checksum=None,
-        champion_checksum=None,
-        candidate_spec_hash=SPEC_HASH,
-        champion_spec_hash=None,
-        dataset_id=bundle.manifest.dataset_id,
-        dataset_checksum=bundle.manifest.checksum,
-        settings_digest=SETTINGS_HASH,
-        code_version=CODE,
-        observed={},
-        created_at="2026-11-24T00:00:00+00:00",
-    )
+    """A sealed rejection: PROMOTION_V1 rejects until the holdout is attached."""
+    decision = evaluate_promotion(precheck(bundle)[1], PROMOTION_V1)
+    assert not decision.accepted
+    return decision
 
 
 def holdout_config(
@@ -251,20 +255,23 @@ def test_seal_spend_once_and_reuse_refused(
         assert sealed.status == "sealed"
         assert sealed.spec_hash == SPEC_HASH
 
+        decision = accepted_decision(bundle)
         token = ledger.unlock(
             spec,
-            decision=accepted_decision(bundle),
-            policy=PROMOTION_V1,
+            decision=decision,
+            policy=PRE_HOLDOUT_POLICY,
             actor="tester",
             reason="policy accepted the candidate",
         )
         spent = ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum)
         assert spent is not None and spent.status == "spent"
         assert spent.spent_at is not None
-        assert spent.policy_id == PROMOTION_V1.policy_id
-        assert spent.policy_version == PROMOTION_V1.version
+        assert spent.policy_id == PRE_HOLDOUT_POLICY.policy_id
+        assert spent.policy_version == PRE_HOLDOUT_POLICY.version
+        assert spent.policy_digest == PRE_HOLDOUT_POLICY.digest
         assert spent.decision_json is not None
-        assert EVIDENCE_CHECKSUM in spent.decision_json
+        assert decision.evidence_checksum is not None
+        assert decision.evidence_checksum in spent.decision_json
 
         result = evaluate_holdout(
             bundle,
@@ -281,7 +288,7 @@ def test_seal_spend_once_and_reuse_refused(
             ledger.unlock(
                 spec,
                 decision=accepted_decision(bundle),
-                policy=PROMOTION_V1,
+                policy=PRE_HOLDOUT_POLICY,
                 actor="tester",
                 reason="a second attempt",
             )
@@ -291,7 +298,7 @@ def test_seal_spend_once_and_reuse_refused(
             ledger.unlock(
                 other_spec,
                 decision=accepted_decision(bundle, spec_hash="f" * 64),
-                policy=PROMOTION_V1,
+                policy=PRE_HOLDOUT_POLICY,
                 actor="tester",
                 reason="a different spec on the same data",
             )
@@ -308,7 +315,7 @@ def test_a_different_dataset_checksum_is_a_new_seal(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(first)
-        ledger.unlock(first, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        ledger.unlock(first, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
         assert ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum).status == "spent"
 
         sealed_second = ledger.seal(second, actor="tester", reason="new dataset build")
@@ -319,7 +326,7 @@ def test_a_different_dataset_checksum_is_a_new_seal(
         token = ledger.unlock(
             second,
             decision=accepted_decision(bundle, dataset_checksum=other_checksum),
-            policy=PROMOTION_V1,
+            policy=PRE_HOLDOUT_POLICY,
         )
         assert token.dataset_checksum == other_checksum
 
@@ -337,12 +344,14 @@ def test_unlock_requires_an_accepted_decision(
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
         with pytest.raises(HoldoutError) as exc:
-            ledger.unlock(spec, decision=rejected_decision(bundle), policy=PROMOTION_V1)
+            ledger.unlock(spec, decision=rejected_decision(bundle), policy=PRE_HOLDOUT_POLICY)
         assert exc.value.code == "decision_rejected"
-        assert ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum).status == "sealed"
+        sealed = ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum)
+        assert sealed is not None and sealed.status == "sealed"
 
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
-        assert token.evidence_checksum == EVIDENCE_CHECKSUM
+        decision = accepted_decision(bundle)
+        token = ledger.unlock(spec, decision=decision, policy=PRE_HOLDOUT_POLICY)
+        assert token.evidence_checksum == decision.evidence_checksum
 
 
 def test_identity_mismatch_is_refused(
@@ -363,7 +372,7 @@ def test_identity_mismatch_is_refused(
         )
         for decision in mismatches:
             with pytest.raises(HoldoutError) as exc:
-                ledger.unlock(spec, decision=decision, policy=PROMOTION_V1)
+                ledger.unlock(spec, decision=decision, policy=PRE_HOLDOUT_POLICY)
             assert exc.value.code == "decision_identity_mismatch"
             assert (
                 ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum).status == "sealed"
@@ -373,14 +382,19 @@ def test_identity_mismatch_is_refused(
             ledger.unlock(
                 replace(spec, spec_hash="d" * 64),
                 decision=accepted_decision(bundle, spec_hash="d" * 64),
-                policy=PROMOTION_V1,
+                policy=PRE_HOLDOUT_POLICY,
             )
         assert exc.value.code == "holdout_identity_mismatch"
 
-        other_policy = replace(PROMOTION_V1, version=2)
+        other_policy = replace(PRE_HOLDOUT_POLICY, version=2)
         with pytest.raises(HoldoutError) as exc:
             ledger.unlock(spec, decision=accepted_decision(bundle), policy=other_policy)
         assert exc.value.code == "decision_policy_mismatch"
+
+        unsealed = object.__new__(PromotionDecision)
+        with pytest.raises(HoldoutError) as exc:
+            ledger.unlock(spec, decision=unsealed, policy=PRE_HOLDOUT_POLICY)
+        assert exc.value.code == "invalid_decision"
 
 
 def test_access_log_records_grants_and_refusals(
@@ -396,14 +410,14 @@ def test_access_log_records_grants_and_refusals(
             ledger.unlock(
                 spec,
                 decision=rejected_decision(bundle),
-                policy=PROMOTION_V1,
+                policy=PRE_HOLDOUT_POLICY,
                 actor="tester",
                 reason="rejected decision",
             )
         ledger.unlock(
             spec,
             decision=accepted_decision(bundle),
-            policy=PROMOTION_V1,
+            policy=PRE_HOLDOUT_POLICY,
             actor="tester",
             reason="policy accepted the candidate",
         )
@@ -411,7 +425,7 @@ def test_access_log_records_grants_and_refusals(
             ledger.unlock(
                 spec,
                 decision=accepted_decision(bundle),
-                policy=PROMOTION_V1,
+                policy=PRE_HOLDOUT_POLICY,
                 actor="tester",
                 reason="a second attempt",
             )
@@ -442,7 +456,7 @@ def test_result_checksum_is_stable_and_tamper_is_detected(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
         result = evaluate_holdout(
             bundle, SPEC, holdout_config(features), ledger=ledger, unlock_token=token
         )
@@ -469,7 +483,7 @@ def test_result_cannot_be_recomputed(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
         first = evaluate_holdout(
             bundle, SPEC, holdout_config(features), ledger=ledger, unlock_token=token
         )
@@ -497,7 +511,7 @@ def test_an_invalid_token_does_not_read_or_spend_the_result(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
 
         with pytest.raises(HoldoutError) as exc:
             evaluate_holdout(
@@ -528,7 +542,7 @@ def test_a_failed_evaluation_still_spends_the_holdout(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
 
         with pytest.raises(HoldoutError) as exc:
             evaluate_holdout(
@@ -577,7 +591,7 @@ def test_ledger_survives_reopen(
         token = ledger.unlock(
             spec,
             decision=accepted_decision(bundle),
-            policy=PROMOTION_V1,
+            policy=PRE_HOLDOUT_POLICY,
             actor="tester",
             reason="accepted",
         )
@@ -650,8 +664,10 @@ def test_test_rows_are_not_read_before_unlock(
         with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
             ledger.seal(spec)
             with pytest.raises(HoldoutError):
-                ledger.unlock(spec, decision=rejected_decision(bundle), policy=PROMOTION_V1)
-            token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+                ledger.unlock(spec, decision=rejected_decision(bundle), policy=PRE_HOLDOUT_POLICY)
+            token = ledger.unlock(
+                spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY
+            )
             assert (
                 ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum).status == "spent"
             )
@@ -689,7 +705,7 @@ def test_a_bare_feature_frame_is_accepted_as_the_locked_slice(
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PRE_HOLDOUT_POLICY)
         result = evaluate_holdout(
             locked,
             SPEC,
@@ -713,17 +729,13 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     discovery: tuple[FeatureFrame, DatasetBundle],
 ) -> None:
     features, bundle = discovery
-    evidence = evidence_for(discovery)
+    decision, evidence = precheck(bundle)
     assert evidence.locked_oos is None
     spec = holdout_spec(bundle)
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(
-            spec,
-            decision=accepted_decision(bundle, evidence_checksum=evidence.checksum),
-            policy=PROMOTION_V1,
-        )
+        token = ledger.unlock(spec, decision=decision, policy=PRE_HOLDOUT_POLICY)
         result = evaluate_holdout(
             bundle, SPEC, holdout_config(features), ledger=ledger, unlock_token=token
         )
@@ -745,9 +757,25 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     verify_holdout_result(result, attached)
     assert attach_holdout(attached, result) is attached
 
-    policy = replace(PROMOTION_V1, require_locked_oos=True)
-    decision = evaluate_promotion(attached, policy)
-    assert "missing_locked_oos" not in decision.codes
+    # The archive stores canonical JSON and rebuilds it later for champion
+    # comparison; the locked section must round-trip without losing its checksum.
+    rebuilt = evidence_from_dict(attached.to_dict())
+    assert rebuilt.locked_oos == attached.locked_oos
+    assert evidence_checksum(rebuilt) == attached.checksum
+
+    # End-to-end production policy: PROMOTION_V1 requires the locked-OOS section,
+    # so this is the step that makes the bundle promotable.
+    promotion = evaluate_promotion(
+        attached,
+        PROMOTION_V1,
+        expected_identity=EvidenceIdentity(
+            code_version=CODE,
+            dataset_checksum=bundle.manifest.checksum,
+            settings_digest=SETTINGS_HASH,
+        ),
+    )
+    assert promotion.accepted, promotion.codes
+    assert "missing_locked_oos" not in promotion.codes
 
 
 def test_attach_refuses_a_result_from_another_evidence_bundle(
@@ -755,16 +783,14 @@ def test_attach_refuses_a_result_from_another_evidence_bundle(
     discovery: tuple[FeatureFrame, DatasetBundle],
 ) -> None:
     features, bundle = discovery
-    evidence = evidence_for(discovery)
+    _decision, evidence = precheck(bundle)
+    other_decision, other_evidence = precheck(bundle, expectancy_r=0.4)
+    assert other_evidence.checksum != evidence.checksum
     spec = holdout_spec(bundle)
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
         ledger.seal(spec)
-        token = ledger.unlock(
-            spec,
-            decision=accepted_decision(bundle, evidence_checksum="f" * 64),
-            policy=PROMOTION_V1,
-        )
+        token = ledger.unlock(spec, decision=other_decision, policy=PRE_HOLDOUT_POLICY)
         result = evaluate_holdout(
             bundle, SPEC, holdout_config(features), ledger=ledger, unlock_token=token
         )
@@ -796,7 +822,7 @@ def test_concurrent_unlock_has_one_winner(
         with HoldoutLedger(path) as ledger:
             barrier.wait()
             try:
-                ledger.unlock(spec, decision=decision, policy=PROMOTION_V1, actor="thread")
+                ledger.unlock(spec, decision=decision, policy=PRE_HOLDOUT_POLICY, actor="thread")
             except HoldoutSpent:
                 outcome = "spent"
             except Exception as exc:  # noqa: BLE001 - the outcome is reported, not hidden

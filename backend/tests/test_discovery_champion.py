@@ -12,17 +12,19 @@ for the paper path:
   ``decisions``;
 * the champion spec round-trips through the DSL validator and its hash still
   matches the archived id;
-* a version 1 database migrates to version 2 without losing candidates, trials or
+* a version 1 database migrates to version 3 without losing candidates, trials or
   decisions, and the state survives a reopen.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from promotion_evidence import evidence_for
 from scalping.discovery import (
     DEFAULT_SCOPE,
     SCHEMA_VERSION,
@@ -36,7 +38,13 @@ from scalping.discovery.champion import (
     ChampionProvider,
     InvalidChampionSpec,
     NoChampionError,
+    NoEvidenceChampion,
     scope_for,
+)
+from scalping.discovery.promotion import (
+    PROMOTION_V1,
+    EvidenceIdentity,
+    promote_with_evidence,
 )
 from scalping.discovery.protocols import canonical_json
 from scalping.strategy.dsl import (
@@ -56,7 +64,43 @@ DATASET = f"validation:{SYMBOL}:{TIMEFRAME}:abcd1234"
 OTHER_DATASET = f"validation:{OTHER_SCOPE}:abcd1234"
 WRONG_TIMEFRAME_DATASET = "validation:XAUUSD:M15:abcd1234"
 CODE_VERSION = "test-2026-11-24"
+DATASET_CHECKSUM = "a1" * 32
+SETTINGS_DIGEST = "b2" * 32
 STAMP = "2026-11-20T10:00:00+00:00"
+IDENTITY = EvidenceIdentity(
+    code_version=CODE_VERSION,
+    dataset_checksum=DATASET_CHECKSUM,
+    settings_digest=SETTINGS_DIGEST,
+)
+TEST_POLICY = replace(PROMOTION_V1, policy_id="test-policy", require_locked_oos=False)
+
+
+def _evidence_mode_champion(
+    archive: DiscoveryArchive,
+    candidate_id: str,
+    *,
+    expectancy_r: float = 0.4,
+) -> object:
+    """Promote a candidate through the evidence API for provider tests."""
+    evidence = evidence_for(
+        spec_hash=candidate_id,
+        dataset_id=DATASET,
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        code_version=CODE_VERSION,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
+        expectancy_r=expectancy_r,
+    )
+    return promote_with_evidence(
+        archive,
+        candidate_id,
+        evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="evidence-mode test champion",
+        expected_identity=IDENTITY,
+    )
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -217,7 +261,9 @@ def test_promotion_refusals_write_nothing(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="reason must not be empty"):
             archive.promote_exploratory(known, scope=SCOPE, reason="   ")
         with pytest.raises(ValueError, match="metric"):
-            archive.promote_exploratory(known, scope=SCOPE, reason="bad metric", metric="not a metric")
+            archive.promote_exploratory(
+                known, scope=SCOPE, reason="bad metric", metric="not a metric"
+            )
 
         assert archive.champion(SCOPE) is None
         assert archive.champion_history(SCOPE) == ()
@@ -238,7 +284,9 @@ def test_not_better_is_refused_and_force_is_recorded(tmp_path: Path) -> None:
         with pytest.raises(ValueError, match="forced promotion requires"):
             archive.promote_exploratory(worse, scope=SCOPE, reason=" ", force=True)
 
-        forced = archive.promote_exploratory(worse, scope=SCOPE, reason="risk desk override", force=True)
+        forced = archive.promote_exploratory(
+            worse, scope=SCOPE, reason="risk desk override", force=True
+        )
         assert forced.reason.startswith("forced: risk desk override; ")
         assert "expectancy_r 0.4 vs 0.5 of " + champion_id[:12] in forced.reason
 
@@ -263,7 +311,9 @@ def test_missing_baseline_is_refused_unless_forced(tmp_path: Path) -> None:
         unmeasured = _add(archive, _spec(threshold=4.0))
         _trial(archive, unmeasured, 0.5)
         with pytest.raises(ArchiveError, match=r"does not publish 'profit_factor'"):
-            archive.promote_exploratory(unmeasured, scope=SCOPE, reason="unmeasured", metric="profit_factor")
+            archive.promote_exploratory(
+                unmeasured, scope=SCOPE, reason="unmeasured", metric="profit_factor"
+            )
 
         archive.promote_exploratory(champion_id, scope=SCOPE, reason="baseline")
 
@@ -341,7 +391,7 @@ def test_champion_spec_round_trips_and_validates(tmp_path: Path) -> None:
     with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
         candidate_id = _add(archive, spec)
         _trial(archive, candidate_id, 0.42)
-        promoted = archive.promote_exploratory(candidate_id, scope=SCOPE, reason="paper candidate")
+        promoted = _evidence_mode_champion(archive, candidate_id, expectancy_r=0.42)
 
         provider = ChampionProvider(archive, scope=SCOPE)
         assert provider.scope == SCOPE
@@ -355,6 +405,7 @@ def test_champion_spec_round_trips_and_validates(tmp_path: Path) -> None:
         assert champion.promoted_at == promoted.promoted_at
         assert champion.reason == promoted.reason
         assert champion.metrics["expectancy_r"] == pytest.approx(0.42)
+        assert champion.mode == "evidence"
         assert champion.to_dict()["spec"] == spec.canonical_dict()
 
         # An explicit scope argument wins over the constructor default.
@@ -365,13 +416,24 @@ def test_champion_spec_round_trips_and_validates(tmp_path: Path) -> None:
         ChampionProvider(DiscoveryArchive(tmp_path / "empty.sqlite")).champion()
 
 
+def test_provider_refuses_an_exploratory_champion(tmp_path: Path) -> None:
+    spec = _spec()
+    with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
+        candidate_id = _add(archive, spec)
+        _trial(archive, candidate_id, 0.3)
+        archive.promote_exploratory(candidate_id, scope=SCOPE, reason="research only")
+
+        with pytest.raises(NoEvidenceChampion, match="exploratory"):
+            ChampionProvider(archive, scope=SCOPE).champion()
+
+
 def test_provider_refuses_an_invalid_or_tampered_stored_spec(tmp_path: Path) -> None:
     spec = _spec()
     path = tmp_path / "discovery.sqlite"
     with DiscoveryArchive(path) as archive:
         candidate_id = _add(archive, spec)
         _trial(archive, candidate_id, 0.3)
-        archive.promote_exploratory(candidate_id, scope=SCOPE, reason="baseline")
+        _evidence_mode_champion(archive, candidate_id, expectancy_r=0.3)
         other_payload = _spec(threshold=2.0).canonical_dict()
 
         # A valid JSON object that is not a strategy payload.
@@ -417,8 +479,12 @@ def test_audit_rows_are_exact(tmp_path: Path) -> None:
 
         first_reason = "best validation expectancy; first promotion; expectancy_r 0.4"
         second_reason = f"stronger evidence; expectancy_r 0.6 vs 0.4 of {first[:12]}"
-        promoted_first = archive.promote_exploratory(first, scope=SCOPE, reason="best validation expectancy")
-        promoted_second = archive.promote_exploratory(second, scope=SCOPE, reason="stronger evidence")
+        promoted_first = archive.promote_exploratory(
+            first, scope=SCOPE, reason="best validation expectancy"
+        )
+        promoted_second = archive.promote_exploratory(
+            second, scope=SCOPE, reason="stronger evidence"
+        )
         assert promoted_first.reason == first_reason
         assert promoted_second.reason == second_reason
 
@@ -477,6 +543,7 @@ def test_audit_rows_are_exact(tmp_path: Path) -> None:
                     "previous_value": None,
                     "forced": False,
                     "promotion_id": 1,
+                    "mode": "exploratory",
                 }
             ),
             canonical_json(
@@ -488,6 +555,7 @@ def test_audit_rows_are_exact(tmp_path: Path) -> None:
                     "previous_value": 0.4,
                     "forced": False,
                     "promotion_id": 2,
+                    "mode": "exploratory",
                 }
             ),
         ]
@@ -619,7 +687,7 @@ def test_schema_v1_migrates_and_keeps_evidence(tmp_path: Path) -> None:
     candidate_id = _build_v1_database(path, spec, 0.35)
 
     with DiscoveryArchive(path) as archive:
-        assert archive.schema_version == SCHEMA_VERSION == 2
+        assert archive.schema_version == SCHEMA_VERSION == 3
         assert archive.candidate(candidate_id) is not None
         assert archive.trial_count(candidate_id) == 1
         old = archive.decisions()
@@ -637,7 +705,7 @@ def test_schema_v1_migrates_and_keeps_evidence(tmp_path: Path) -> None:
         pytest.raises(sqlite3.IntegrityError),
         DiscoveryArchive(path) as archive,
     ):
-        # The version 2 check really is in place, not just accepted by the API.
+        # The version 3 schema really is in place, not just accepted by the API.
         archive.connection.execute(
             "INSERT INTO decisions (candidate_id, decision, reason, created_at)"
             " VALUES (?, 'made_up', 'x', ?)",
@@ -651,7 +719,7 @@ def test_state_survives_reopen(tmp_path: Path) -> None:
     with DiscoveryArchive(path) as archive:
         candidate_id = _add(archive, spec)
         _trial(archive, candidate_id, 0.41)
-        archive.promote_exploratory(candidate_id, scope=SCOPE, reason="baseline")
+        _evidence_mode_champion(archive, candidate_id, expectancy_r=0.41)
         before = archive.champion(SCOPE)
         before_history = [row.to_dict() for row in archive.champion_history(SCOPE)]
 

@@ -313,16 +313,16 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       paper oturumu bitişi ve veri/doküman yönlendirmesi yok.
 - [ ] PARTIAL: ingestion/index pipeline'ları hazır; orchestrator bunları henüz
       otomatik çağırmıyor.
-- [ ] PARTIAL: persistent queue/dependencies/priorities exist (#99); actual
-      discovery, ingestion, evaluation and paper handlers/eligibility policies
-      are not wired into the orchestrator.
+- [x] Production handlers registered: knowledge ingest, dataset build,
+      discovery, paper advance and matured-outcome analysis (#115).
 - [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
-- [ ] PARTIAL: tek ağır iş kuralı ve ResourceGuard veto kancası var; gerçek
-      RAM/disk ölçen guard yok.
+- [ ] PARTIAL: measured guard (RSS/load/disk, fail-closed) merged in #112 and
+      daemon defaults to the M2 profile in #118; the plain `Orchestrator` still
+      defaults to `AllowAllGuard`, so callers can bypass measurement.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] Connect discovery, evidence validation, champion governance, paper
-      runner and matured-outcome feedback into one auditable lifecycle. The
-      champion governance proposal (#109) is open and validation-only.
+- [ ] PARTIAL: discovery, evidence bundle, champion governance, paper runner
+      and matured outcomes exist as separate pieces; one auditable lifecycle and
+      evidence-only champion enforcement are still missing.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
 - [ ] PARTIAL: pause/safe mode/disable research var; rollback kontrolü yok.
@@ -371,12 +371,13 @@ the current merged mainline. The detailed evidence and limitations are in
 3. **Knowledge extraction is heuristic.** #106 and #107 are merged. Drafts
    retain source references, but pattern extraction/classification is not
    semantic understanding, PDF/OCR support or proof of alpha.
-4. **Orchestration is infrastructure only.** Persistent queue, events, controls
-   and recovery exist; production handlers, scheduler and measured resource
-   guard are not wired as a complete pipeline.
-5. **Paper execution is a runner, not a closed loop.** #103 executes a supplied
-   DSL spec over stored data; it does not yet autonomously select a governed
-   champion, continue on appended bars and feed matured outcomes back.
+4. **Orchestration is close, but not one pipeline.** Queue/events/controls,
+   five production handlers (#115) and a measured guard (#112) exist; the
+   daemon/scheduler is PR #118 and the guard is not the default in every caller.
+5. **Paper execution has the pieces, not the loop.** #103 executes a supplied
+   spec, #116 adds append-only continuation and matured outcomes, but
+   `paper.advance` still uses the slice runner and does not require evidence-mode
+   champion provenance.
 6. **Risk action masking:** #108 is merged for simulator/evaluation. PPO training
    remains plain PPO; do not report MaskablePPO training as implemented.
 7. **Team workflow:** #110 establishes shared agent instructions and role
@@ -384,19 +385,17 @@ the current merged mainline. The detailed evidence and limitations are in
 
 ### Next work, strict order
 
-- [ ] Build a promotion-grade chronological walk-forward evaluator with
-      purge/embargo, immutable fold manifests and a locked OOS set inaccessible
-      to candidate generation and tuning.
+- [ ] PARTIAL: the evidence bundle (#114) has chronological folds, purge/
+      embargo, cost/regime/CI sections; a locked one-shot OOS set is in progress.
 - [ ] Record every candidate attempt; add multiple-testing/data-snooping
       controls, complexity penalties, sensitivity, regime stability and
       uncertainty reporting.
-- [ ] Separate exploratory search from promotion. Require a named/versioned
-      non-empty production policy; missing, stale, mismatched or incomplete
-      evidence must reject promotion.
+- [ ] PARTIAL: fail-closed promotion policy is PR #117; locked-OOS requirement
+      remains disabled until the holdout slice lands.
 - [ ] Compare candidate and incumbent champion on identical timestamps, costs,
       folds and regimes; preserve immutable evidence and rollback lineage.
-- [ ] Wire real orchestrator handlers, scheduler/daemon, new-data/document/
-      paper-completion triggers, idempotency and measured resource guard.
+- [ ] PARTIAL: handlers (#115) and measured guard (#112) merged; daemon is
+      PR #118; paper-completion trigger absent.
 - [ ] Connect only validated DSL champions to paper execution; missing or
       invalid champion must yield auditable NO TRADE, never legacy fallback.
 - [ ] Continue paper sessions on appended data; analyse only fully matured,

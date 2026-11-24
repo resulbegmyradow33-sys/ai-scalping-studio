@@ -102,7 +102,8 @@ explicit governance call.
 | Call | Purpose |
 |---|---|
 | `promote_exploratory(candidate_id, *, scope, reason, force=False, metric="expectancy_r")` | research/ablation only: one-metric comparison, never the paper champion |
-| `promote_evidence(candidate_id, *, scope, reason, policy_id, policy_version, evidence_checksum, dataset_id, candidate_spec_hash, ...)` | archive primitive for the production path: requires a named/versioned policy identity and an evidence checksum, stores no metric |
+| `promote_with_evidence(archive, candidate_id, evidence, policy, *, scope, reason, expected_identity)` | production path: evaluates the policy internally and stores the evidence bundle |
+| `promote_manual_override(archive, candidate_id, override, *, scope, reason)` | stores a human override as `mode = "manual"`; never paper-eligible |
 | `champion(scope)` | current candidate, canonical spec, newest accepted metrics, promotion id/time/reason |
 | `champion_history(scope)` | every promotion and rollback of the scope, oldest first |
 | `compare_to_champion(candidate_id, scope, metric)` | candidate value, champion value, delta, `better` |
@@ -114,6 +115,13 @@ A **scope** is conventionally `<symbol>:<timeframe>`
 contains every scope token. Each promotion and rollback runs in
 `BEGIN IMMEDIATE` and writes the pointer, the history row and the decision in one
 transaction, so the live champion and the audit trail cannot disagree.
+
+Schema v3 adds `mode` (`evidence`, `exploratory`, `manual`) and an
+`evidence_checksum` pointer to both `champion_promotions` and `champions`, plus an
+immutable `evidence` table keyed by the bundle checksum. A rollback restores the
+mode and evidence pointer of the candidate's last promotion. The paper provider
+accepts only `mode = "evidence"`; a research or manual champion is visible in the
+audit trail but cannot trade.
 
 `promote_exploratory` refuses, writing nothing: an unknown candidate, a candidate
 with no trial on the scope's dataset, a candidate with no **accepted** trial
@@ -141,8 +149,11 @@ stress, regimes, bootstrap intervals, trial exposure — and returns a
 refuses an empty or degenerate policy: a non-empty `policy_id` that is not the
 reserved `manual-override`, `version >= 1`, at least three folds, positive sample
 and complexity/trial caps, a profit factor above 1, fractions in `(0, 1]`, at
-least one cost-stress multiplier above 1, and a selection-fold share in `[0, 1]`.
-`PROMOTION_V1` is the documented starting policy:
+least one cost-stress multiplier above 1, a bootstrap confidence of at least 0.95
+from at least 500 draws, a stress-degradation cap of at least 1, and a
+selection-fold share in `[0, 1]`. `policy.digest` hashes every field, so the audit
+row names the exact policy object. `PROMOTION_V1` is the documented starting
+policy:
 
 | Field | `PROMOTION_V1` | Why |
 |---|---|---|
@@ -159,17 +170,23 @@ least one cost-stress multiplier above 1, and a selection-fold share in `[0, 1]`
 | `max_complexity` | `40` | structural node cap |
 | `max_trials` | `500` | caps the candidate's trial count and the search budget |
 | `min_improvement_r` | `0.05` | a challenger must improve on the champion by at least this much |
-| `require_locked_oos` | `False` | `True` requires the `locked_oos` section produced by the one-shot holdout protocol; the default policy leaves it off |
+| `min_bootstrap_confidence` | `0.95` | the aggregate interval must be at least 95% |
+| `min_bootstrap_samples` | `500` | fewer draws are not a usable interval |
+| `max_stress_degradation` | `2.0` | a stressed fold keeps at least half the base expectancy, stays profitable and keeps PF > 1 |
+| `require_locked_oos` | **`True`** | **nothing promotes until `scalping.discovery.holdout.attach_holdout` attaches a valid locked-OOS section** |
 | `max_selection_fold_share` | `0.4` | at most 40% of folds may overlap the validation/selection window; `0` disables the check |
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
-champion_spec_hash=None)` runs `verify_evidence` against the bundle's own
-identity, then the structural and threshold checks, and returns `accepted`, a
-tuple of `PromotionRejection(code, message, observed, required)`, the policy
-id/version, the re-derived evidence checksum, the dataset checksum, the settings
-digest and the champion checksum. A decision is accepted only when the rejection
-list is empty. Any missing, stale, edited or mismatched input is a rejection;
-there is no `force` parameter.
+champion_spec_hash=None, expected_identity=None)` runs `verify_evidence` against
+the **expected** code version, dataset checksum and settings digest, then the
+structural and threshold checks, and returns a sealed `PromotionDecision`:
+`accepted`, a tuple of `PromotionRejection(code, message, observed, required)`,
+the policy id/version/digest, the re-derived evidence checksum, the dataset
+checksum, the settings digest and the champion checksum. A decision is accepted
+only when the rejection list is empty. Any missing, stale, edited or mismatched
+input is a rejection; there is no `force` parameter. A decision cannot be
+hand-built or `dataclasses.replace`d into an acceptance: it carries a
+module-private seal over its content.
 
 A **selection fold** is a fold whose test block intersects
 `[splits.validation_start_row, splits.validation_end_row)`. Those folds sit in the
@@ -177,6 +194,13 @@ slice the search selected on, so they are not independent walk-forward evidence.
 `max_selection_fold_share=0.4` requires a clear majority of folds to lie outside
 the selection window: one of three passes, two of four does not. A bundle whose
 share is higher is rejected rather than silently reweighted.
+
+Fold geometry is also checked directly: every fold's test block must stay inside
+`[splits.train_start_row, splits.validation_end_row]`, the folds must be
+contiguous, and the last fold must end exactly at `validation_end_row`. The
+initial-history block before the first fold is allowed; a gap between folds is
+not. A fold that reaches into the test split is a `fold_geometry` rejection, not
+a wider window.
 
 ### Rejection codes
 
@@ -195,15 +219,24 @@ share is higher is rejected rather than silently reweighted.
 | `max_complexity` | structural complexity above the cap |
 | `trial_exposure` / `search_exposure` | candidate trials or the recorded search budget exceed `max_trials` |
 | `selection_fold_share` | too many folds overlap the validation/selection window |
-| `missing_locked_oos` | `require_locked_oos=True` and the bundle has no locked-OOS section |
+| `fold_geometry` | a fold leaves the train/validation range, reaches into the test split, or leaves a gap |
+| `min_bootstrap_samples` / `min_bootstrap_confidence` | the aggregate interval is weaker than the policy |
+| `cost_stress` | a required stressed fold is not profitable or has PF <= 1 |
+| `stress_degradation` | a stressed fold loses more expectancy than `max_stress_degradation` allows |
+| `missing_locked_oos` | the bundle has no valid locked-OOS section; **this is the normal state until the holdout slice lands** |
 | `champion_evidence_missing` / `champion_identity_missing` | a champion was named without its bundle or without a spec hash |
-| `incomparable_evidence` | candidate or champion lacks `dataset_checksum`, `settings_digest`, `code_version` or folds, so no same-window comparison is possible |
+| `incomparable_evidence` | candidate or champion lacks `dataset_checksum`, `settings_digest`, `code_version`, splits, folds or fold identity |
+| `champion_invalid_evidence` | the stored champion bundle fails `verify_evidence` (edited, wrong schema, no aggregate) |
 | `champion_checksum_mismatch` | the champion bundle was edited |
 | `champion_spec_mismatch` / `champion_same_spec` | the champion bundle is for another spec, or the candidate *is* the champion |
 | `champion_dataset_mismatch` / `champion_dataset_checksum_mismatch` | different dataset id or build |
 | `champion_settings_mismatch` | different execution settings (the digest differs) |
 | `champion_code_version_mismatch` / `champion_scope_mismatch` | different code version, symbol or timeframe |
-| `champion_folds_mismatch` | fold boundaries are not identical, so the comparison is not same-window |
+| `champion_splits_mismatch` | candidate and champion were cut from different dataset split boundaries |
+| `champion_folds_mismatch` | fold rows, ISO timestamps, purge/embargo or fold count differ |
+| `champion_cost_stress_mismatch` | the two bundles were stressed with different multiplier sets |
+| `champion_bootstrap_mismatch` | different bootstrap sample count or confidence |
+| `champion_window_mismatch` | different observation window |
 | `champion_improvement` | expectancy improvement is below `min_improvement_r`, or cannot be measured |
 
 The champion comparison is deliberately strict. Comparing a 3-fold bundle with a
@@ -214,32 +247,46 @@ because floats cannot represent `0.25 - 0.20` exactly; a tie still fails.
 
 ### Production promotion path
 
-`promote_with_evidence(archive, candidate_id, decision, *, scope, reason)` is the
-only production call:
+`promote_with_evidence(archive, candidate_id, evidence, policy, *, scope, reason,
+expected_identity)` is the only production call. It evaluates the policy
+**inside**; there is no accepted-decision argument to forge:
 
-- it refuses a rejected decision and any object that is not a `PromotionDecision`;
-- it requires `decision.candidate_spec_hash == candidate_id`, so evidence cannot
-  be detached from the spec it measured;
-- it writes the champion pointer, the history row and a `promoted` decision in
-  one transaction through `archive.promote_evidence`;
-- the history row stores **no metric** (`metric`/`value` are NULL) and the
-  decision detail records the policy id/version, the evidence checksum, the
-  champion checksum, the candidate spec hash, the dataset id/checksum and the
-  settings digest.
+- it reads the current champion from the archive. If a champion exists, its
+  stored evidence is the comparison baseline; a champion without stored evidence
+  is rejected with `champion_evidence_missing`. A first promotion records
+  `comparison = "first"` and no baseline explicitly.
+- it requires `evidence.spec_hash == candidate_id`, so evidence cannot be
+  detached from the spec it measured.
+- it refuses unless the internal decision is accepted, then calls the private
+  `archive._promote_evidence`. There is no public `archive.promote_evidence`.
+- the archive requires an **accepted trial on the evidence dataset**
+  (`no_accepted_trial` otherwise), stores the immutable bundle in the `evidence`
+  table keyed by its checksum, and writes the champion pointer, history row and
+  `promoted` decision in one transaction.
+- the history row stores **no metric** (`metric`/`value` are NULL) and both the
+  row and the decision detail record `mode = "evidence"`, the policy
+  id/version/digest, the evidence checksum, the champion checksum, the candidate
+  spec hash, the dataset id/checksum, the settings digest and the code version.
 
-An evidence promotion is therefore distinguishable from an exploratory one by
-inspection: `metric IS NULL` and `detail_json.mode == "evidence"` mark the
-production path, while `promote_exploratory` always stores its metric.
+An evidence promotion is therefore distinguishable from an exploratory or manual
+one by inspection: `mode = "evidence"`, `metric IS NULL` and
+`detail_json.mode == "evidence"` mark the production path.
 
 ### Manual override is not evidence
 
 `manual_override(evidence, policy, *, reason, owner)` records a human decision in
 a separate `ManualOverride` object. It requires a non-empty reason and owner,
 re-evaluates the policy, copies the original `PromotionRejection` tuple verbatim,
-fixes `policy_id` to `"manual-override"` and keeps the original policy id/version
-beside it. It has no `accepted` field, `is_policy_evidence` is always `False`, and
-`promote_with_evidence` raises `TypeError` if handed one. An override on evidence
-the policy already accepts is refused: there is nothing to override.
+fixes `policy_id` to `"manual-override"` and keeps the original policy
+id/version/digest and dataset id beside it. It has no `accepted` field,
+`is_policy_evidence` is always `False`, and `promote_with_evidence` raises
+`TypeError` if handed one. An override on evidence the policy already accepts is
+refused: there is nothing to override.
+
+`promote_manual_override(archive, candidate_id, override, *, scope, reason)` is
+the only path that stores one. It writes `mode = "manual"`, keeps the original
+rejections in the detail and still requires a known candidate with a trial on the
+dataset. The provider refuses a manual champion for paper.
 
 The rule is simple: an override can be stored for audit, but it can never be
 mistaken for a passed policy, and the next promotion decision must not cite it as
@@ -251,26 +298,32 @@ Acceptance is **policy compliance**, not proof of an edge. The bundle contains
 historical simulation evidence; a policy pass says the measured sample, stability,
 cost stress, interval, complexity and search exposure cleared the checks this
 project chose. None of that predicts future profitability, and none of it
-replaces the separate one-shot locked final OOS evaluation. The identity now
-includes the dataset checksum and the execution-settings digest, so a bundle built with
+replaces the separate one-shot locked final OOS evaluation. The identity includes
+the dataset checksum and the execution-settings digest, so a bundle built with
 different costs cannot be promoted as if it were the same experiment, and the
 selection-fold cap limits — but does not remove — the fact that the search saw the
 validation slice.
 
+The locked final OOS section is now mandatory for the production policy. Until
+the holdout slice attaches it, every `PROMOTION_V1` decision rejects with
+`missing_locked_oos`, so **no evidence promotion can happen**. That is the
+intended fail-closed state; do not relax it to make a test pass.
+
 Two structural limits are worth stating. The bundle records its fold/CI
-`EvidencePolicy` but not the promotion policy id/version, so the decision and the
-archive row are what attribute a promotion to `promotion-v1`; the checksum binds
-the numbers, not the policy. And the audit trail is local SQLite, not a signed
-ledger: it proves what this process wrote, not that a different process could not
-have written something else.
+`EvidencePolicy` but not the promotion policy id/version, so the decision,
+`policy_digest` and archive row are what attribute a promotion to
+`promotion-v1`; the checksum binds the numbers, not the policy. And the audit
+trail is local SQLite, not a signed ledger: it proves what this process wrote, not
+that a different process could not have written something else.
 
 
 `scalping.discovery.champion.ChampionProvider` reads the champion and returns a
 `StrategySpec` that has passed `validate()` and whose recomputed hash still
-matches the archived id. `NoChampionError` and `InvalidChampionSpec` are raised
-instead of falling back to a hand-written strategy. The module imports the
-archive and the DSL only; `scalping.paper` is never imported from
-`scalping.discovery`.
+matches the archived id. It refuses anything except `mode = "evidence"`:
+exploratory and manual champions raise `NoEvidenceChampion`. `NoChampionError`
+and `InvalidChampionSpec` are raised instead of falling back to a hand-written
+strategy. The module imports the archive and the DSL only; `scalping.paper` is
+never imported from `scalping.discovery`.
 
 ### Honest limits
 
@@ -278,8 +331,9 @@ archive and the DSL only; `scalping.paper` is never imported from
   walk-forward, untouched test-slice or cost-stress rule is part of it; if the
   search touched the validation split, the promotion inherits that data-snooping
   risk. That is why it is not the production path.
-- `promote_evidence` checks a walk-forward evidence bundle, but the locked final
-  OOS split is still unread. Acceptance cannot substitute for that evaluation.
+- The evidence path checks a walk-forward bundle and requires a locked-OOS
+  section, but one holdout evaluation is one sample. Acceptance cannot substitute
+  for forward paper evidence.
 - One metric, higher is better, in the exploratory path. A lower-is-better metric
   such as drawdown must not be passed to it.
 - Promotion is policy, not proof: passing the policy says the candidate cleared
@@ -326,10 +380,10 @@ anything by themselves.
 - Scheduler and job cancellation, one-heavy-job enforcement, RAM budget.
 - Champion-vs-candidate metric comparison inside the *model* gate; the strategy
   counterpart is the discovery promotion policy (previous section).
-- A locked final OOS section is now producible by
-  `scalping.discovery.holdout` (`attach_holdout`), but the protocol is not yet
-  wired into promotion/orchestration and has not been spent on real data. The
-  default policy still leaves `require_locked_oos=False`.
+- A locked final OOS section produced inside this module. The holdout slice
+  (`scalping.discovery.holdout`) attaches it; until then `require_locked_oos=True`
+  rejects every promotion. The holdout protocol is not yet wired into
+  orchestration and has not been spent on real data.
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels

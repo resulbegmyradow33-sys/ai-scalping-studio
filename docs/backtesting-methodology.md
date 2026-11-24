@@ -331,10 +331,11 @@ after seeing the result, destroys the property this ledger exists to protect.
 
 - **Wire the holdout into the autonomous path.** The protocol, ledger and
   evidence attachment exist and are tested, but discovery/orchestration do not
-  yet call them, and no real XAUUSD holdout has been spent. The promotion policy
-  still defaults `require_locked_oos=False`; setting it `True` now accepts a
-  bundle only after `attach_holdout` adds the section, but the default is not
-  flipped by this slice.
+  yet call them, and no real XAUUSD holdout has been spent. The production policy
+  sets `require_locked_oos=True`, so every bundle without a valid locked-OOS
+  section rejects with `missing_locked_oos`; that rejection is honest and
+  expected, not a bug. The holdout slice attaches the section, after which the
+  policy can evaluate the complete evidence bundle.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
   folds may overlap the validation/selection window, but no deflated metric or
@@ -345,8 +346,9 @@ after seeing the result, destroys the property this ledger exists to protect.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
   the legacy incumbent and the current champion are not run by this module. The
   promotion policy compares a candidate with a champion *bundle* only when both
-  name the same dataset id/checksum, code version and fold boundaries; it cannot
-  fill in a missing champion measurement.
+  name the same dataset id/checksum, settings digest, code version, split
+  boundaries and full fold geometry; it cannot fill in a missing champion
+  measurement.
 - **A block bootstrap.** Iid intervals are stated as a simplification.
 - **Any paper or live claim.** The bundle contains historical simulation
   evidence only.

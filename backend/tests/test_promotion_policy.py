@@ -4,7 +4,8 @@ The evidence bundles here are built by hand, not simulated. These tests exercise
 the *policy* arithmetic and identity logic; the fold geometry and checksum of a
 real bundle are covered by ``test_discovery_evidence.py``. A synthetic bundle is
 enough to prove that every threshold, every stale identity and every missing
-section is a rejection and that no path accepts a decision without a checksum.
+section is a rejection, and that no path accepts a decision without a sealed
+policy evaluation.
 """
 
 from __future__ import annotations
@@ -18,9 +19,13 @@ import pytest
 
 from discovery_fakes import ToyCandidate
 from scalping.discovery.archive import (
-    MANUAL_OVERRIDE_POLICY_ID,
+    SCHEMA_VERSION,
     ArchiveError,
     DiscoveryArchive,
+)
+from scalping.discovery.champion import (
+    ChampionProvider,
+    NoEvidenceChampion,
 )
 from scalping.discovery.evidence import (
     EVIDENCE_SCHEMA_VERSION,
@@ -32,16 +37,27 @@ from scalping.discovery.evidence import (
     SplitBoundaries,
     StressEvidence,
     evidence_checksum,
+    evidence_from_dict,
 )
 from scalping.discovery.promotion import (
     PROMOTION_V1,
+    EvidenceIdentity,
     PromotionDecision,
     PromotionRefused,
     evaluate_promotion,
     manual_override,
+    promote_manual_override,
     promote_with_evidence,
 )
 from scalping.discovery.protocols import TrialResult
+from scalping.strategy.dsl import (
+    Compare,
+    Const,
+    EntryRule,
+    ExitRule,
+    HoldingLimit,
+    StrategySpec,
+)
 
 SPEC_HASH = "a" * 64
 CHAMPION_HASH = "b" * 64
@@ -51,6 +67,18 @@ SETTINGS_DIGEST = "d" * 64
 CODE_VERSION = "test-promotion-2026-11-24"
 SCOPE = "XAUUSD:M1"
 START = datetime(2026, 1, 5, tzinfo=UTC)
+IDENTITY = EvidenceIdentity(
+    code_version=CODE_VERSION,
+    dataset_checksum=DATASET_CHECKSUM,
+    settings_digest=SETTINGS_DIGEST,
+)
+#: A non-production policy for tests that must produce an accepted decision.
+#: It is not PROMOTION_V1: the production policy requires a locked OOS section.
+TEST_POLICY = replace(
+    PROMOTION_V1,
+    policy_id="test-policy",
+    require_locked_oos=False,
+)
 
 _UNSET = object()
 
@@ -68,11 +96,18 @@ def fold(
     profit_factor: float = 1.5,
     max_drawdown: float = 0.05,
     stress: tuple[float, ...] = (1.5, 2.0),
+    stress_expectancy_r: float | None = None,
+    stress_profit_factor: float | None = None,
     shift: int = 0,
+    ts_shift: int = 0,
+    purge_bars: int = 3,
+    embargo_bars: int = 2,
 ) -> FoldEvidence:
     test_start = 100 + shift + (index - 1) * 50
     test_end = test_start + 50
-    train_end = test_start - 5
+    train_end = test_start - (purge_bars + embargo_bars)
+    stressed_r = expectancy_r if stress_expectancy_r is None else stress_expectancy_r
+    stressed_pf = profit_factor if stress_profit_factor is None else stress_profit_factor
     return FoldEvidence(
         fold=index,
         train_start_row=0,
@@ -81,12 +116,12 @@ def fold(
         test_end_row=test_end,
         train_rows=train_end,
         test_rows=50,
-        train_start_ts=_ts(0),
-        train_end_ts=_ts(test_start - 1),
-        test_start_ts=_ts(test_start),
-        test_end_ts=_ts(test_end - 1),
-        purge_bars=3,
-        embargo_bars=2,
+        train_start_ts=_ts(0 + ts_shift),
+        train_end_ts=_ts(test_start - 1 + ts_shift),
+        test_start_ts=_ts(test_start + ts_shift),
+        test_end_ts=_ts(test_end - 1 + ts_shift),
+        purge_bars=purge_bars,
+        embargo_bars=embargo_bars,
         trades=trades,
         net_profit=net_profit,
         profit_factor=profit_factor,
@@ -108,9 +143,9 @@ def fold(
                 multiplier=multiplier,
                 trades=trades,
                 net_profit=net_profit,
-                profit_factor=profit_factor,
+                profit_factor=stressed_pf,
                 max_drawdown=max_drawdown,
-                expectancy_r=expectancy_r,
+                expectancy_r=stressed_r,
             )
             for multiplier in stress
         ),
@@ -122,13 +157,13 @@ def default_folds(*, shift: int = 0) -> tuple[FoldEvidence, ...]:
 
 
 def default_splits(*, validation_start: int = 200) -> SplitBoundaries:
-    """Folds tile rows 100-250; validation starts at 200 so only fold 3 overlaps."""
+    """Folds test rows 100-250; only fold 3 overlaps validation [200, 250)."""
     return SplitBoundaries(
         train_start_row=0,
         train_end_row=validation_start,
         validation_start_row=validation_start,
-        validation_end_row=260,
-        test_start_row=260,
+        validation_end_row=250,
+        test_start_row=250,
         test_end_row=300,
     )
 
@@ -151,7 +186,7 @@ def aggregate_for(
         "expectancy_r_ci95_high": 0.40,
         "total_r_ci95_low": 1.0,
         "total_r_ci95_high": 4.0,
-        "bootstrap_samples": 200,
+        "bootstrap_samples": 1000,
         "bootstrap_confidence": 0.95,
         "bootstrap_method": "iid-bootstrap",
         "regime_coverage": 0.95,
@@ -169,7 +204,7 @@ def evidence_policy() -> EvidencePolicy:
         min_trades_per_fold=2,
         cost_stress=(1.5, 2.0),
         regime_coverage_min=0.85,
-        bootstrap_samples=200,
+        bootstrap_samples=1000,
         bootstrap_confidence=0.95,
         window=60,
     )
@@ -222,7 +257,7 @@ def codes(decision: PromotionDecision) -> tuple[str, ...]:
 # --- policy construction ------------------------------------------------------
 
 
-def test_promotion_v1_is_explicit_and_versioned() -> None:
+def test_promotion_v1_is_explicit_and_locked() -> None:
     policy = PROMOTION_V1
     assert policy.policy_id == "promotion-v1"
     assert policy.version == 1
@@ -237,8 +272,12 @@ def test_promotion_v1_is_explicit_and_versioned() -> None:
     assert policy.max_complexity > 0
     assert policy.max_trials > 0
     assert policy.min_improvement_r > 0.0
-    assert policy.require_locked_oos is False
+    assert policy.require_locked_oos is True
     assert 0.0 < policy.max_selection_fold_share <= 1.0
+    assert policy.min_bootstrap_confidence >= 0.95
+    assert policy.min_bootstrap_samples >= 500
+    assert policy.max_stress_degradation >= 1.0
+    assert len(policy.digest) == 64
 
 
 @pytest.mark.parametrize(
@@ -246,7 +285,7 @@ def test_promotion_v1_is_explicit_and_versioned() -> None:
     [
         {"policy_id": ""},
         {"policy_id": "   "},
-        {"policy_id": MANUAL_OVERRIDE_POLICY_ID},
+        {"policy_id": "manual-override"},
         {"version": 0},
         {"min_folds": 2},
         {"min_trades": 0},
@@ -256,11 +295,15 @@ def test_promotion_v1_is_explicit_and_versioned() -> None:
         {"min_regime_coverage": 0.0},
         {"require_cost_stress": ()},
         {"require_cost_stress": (2.0, 1.0)},
+        {"require_cost_stress": (1.0,)},
         {"require_cost_stress": (2.0, 2.0)},
         {"max_complexity": 0},
         {"max_trials": 0},
         {"min_improvement_r": 0.0},
-        {"require_cost_stress": (1.0,)},
+        {"min_bootstrap_confidence": 0.90},
+        {"min_bootstrap_confidence": 1.0},
+        {"min_bootstrap_samples": 499},
+        {"max_stress_degradation": 0.5},
         {"max_selection_fold_share": -0.1},
         {"max_selection_fold_share": 1.1},
     ],
@@ -271,8 +314,33 @@ def test_degenerate_policies_are_refused(changes: dict[str, Any]) -> None:
 
 
 def test_there_is_no_force_parameter() -> None:
-    for function in (evaluate_promotion, manual_override, promote_with_evidence):
+    for function in (
+        evaluate_promotion,
+        manual_override,
+        promote_with_evidence,
+        promote_manual_override,
+    ):
         assert "force" not in inspect.signature(function).parameters
+    assert "decision" not in inspect.signature(promote_with_evidence).parameters
+
+
+# --- B1: production policy needs the locked OOS section -----------------------
+
+
+def test_production_policy_rejects_without_locked_oos() -> None:
+    bundle = make_evidence()
+    decision = evaluate_promotion(bundle, PROMOTION_V1)
+
+    assert decision.accepted is False
+    assert "missing_locked_oos" in codes(decision)
+
+
+def test_the_test_policy_is_the_only_accepting_path_in_these_tests() -> None:
+    decision = evaluate_promotion(make_evidence(), TEST_POLICY)
+
+    assert decision.accepted is True
+    assert decision.policy_id == "test-policy"
+    assert decision.policy_digest == TEST_POLICY.digest
 
 
 # --- accepted path ------------------------------------------------------------
@@ -280,19 +348,56 @@ def test_there_is_no_force_parameter() -> None:
 
 def test_a_complete_bundle_is_accepted_and_attributed() -> None:
     bundle = make_evidence()
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY, expected_identity=IDENTITY)
 
     assert decision.accepted is True
     assert decision.rejections == ()
-    assert decision.policy_id == "promotion-v1"
+    assert decision.policy_id == "test-policy"
     assert decision.version == 1
+    assert decision.policy_digest == TEST_POLICY.digest
     assert decision.evidence_checksum == bundle.checksum
     assert decision.dataset_checksum == DATASET_CHECKSUM
     assert decision.settings_digest == SETTINGS_DIGEST
     assert decision.champion_checksum is None
     assert decision.candidate_spec_hash == SPEC_HASH
     assert decision.dataset_id == DATASET_ID
-    assert decision.summary.startswith("policy promotion-v1 v1 accepted")
+
+
+# --- B3: forged decisions and public bypass -----------------------------------
+
+
+def test_a_hand_built_decision_is_refused() -> None:
+    with pytest.raises(ValueError, match="evaluate_promotion"):
+        PromotionDecision(
+            accepted=True,
+            rejections=(),
+            policy_id="test-policy",
+            version=1,
+            policy_digest=TEST_POLICY.digest,
+            evidence_checksum=SPEC_HASH,
+            champion_checksum=None,
+            candidate_spec_hash=SPEC_HASH,
+            champion_spec_hash=None,
+            dataset_id=DATASET_ID,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            code_version=CODE_VERSION,
+        )
+
+
+def test_a_sealed_decision_cannot_be_replaced_into_an_acceptance() -> None:
+    rejected = evaluate_promotion(
+        make_evidence(folds=tuple(fold(i, trades=5) for i in (1, 2, 3))), TEST_POLICY
+    )
+    assert rejected.accepted is False
+
+    with pytest.raises(ValueError, match="evaluate_promotion"):
+        replace(rejected, accepted=True)
+
+
+def test_the_archive_has_no_public_evidence_promotion() -> None:
+    assert not hasattr(DiscoveryArchive, "promote_evidence")
+    assert hasattr(DiscoveryArchive, "_promote_evidence")
 
 
 # --- candidate rejections -----------------------------------------------------
@@ -300,7 +405,7 @@ def test_a_complete_bundle_is_accepted_and_attributed() -> None:
 
 def test_insufficient_folds_are_rejected() -> None:
     bundle = make_evidence(folds=(fold(1, trades=30), fold(2, trades=30)))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert decision.accepted is False
     assert "insufficient_folds" in codes(decision)
@@ -308,7 +413,7 @@ def test_insufficient_folds_are_rejected() -> None:
 
 def test_insufficient_trades_are_rejected() -> None:
     bundle = make_evidence(folds=tuple(fold(index, trades=5) for index in (1, 2, 3)))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "insufficient_trades" in codes(decision)
     assert decision.evidence_checksum == bundle.checksum
@@ -317,7 +422,7 @@ def test_insufficient_trades_are_rejected() -> None:
 def test_low_expectancy_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, expectancy_r=0.01))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "min_expectancy_r" in codes(decision)
     assert decision.rejections[0].observed == pytest.approx(0.01)
@@ -326,7 +431,7 @@ def test_low_expectancy_is_rejected() -> None:
 def test_low_profit_factor_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, profit_factor=1.1))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "min_profit_factor" in codes(decision)
 
@@ -334,19 +439,15 @@ def test_low_profit_factor_is_rejected() -> None:
 def test_deep_drawdown_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, max_drawdown=0.30))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "max_drawdown" in codes(decision)
 
 
 def test_too_few_positive_folds_are_rejected() -> None:
-    folds = (
-        fold(1),
-        fold(2, net_profit=-1.0),
-        fold(3, net_profit=-1.0),
-    )
+    folds = (fold(1), fold(2, net_profit=-1.0), fold(3, net_profit=-1.0))
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "min_positive_fold_fraction" in codes(decision)
 
@@ -354,7 +455,7 @@ def test_too_few_positive_folds_are_rejected() -> None:
 def test_low_regime_coverage_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, regime_coverage=0.5))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "min_regime_coverage" in codes(decision)
 
@@ -362,7 +463,7 @@ def test_low_regime_coverage_is_rejected() -> None:
 def test_a_confidence_interval_that_touches_zero_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, expectancy_r_ci95_low=0.0))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "min_ci_lower_r" in codes(decision)
     assert decision.rejections[0].required == "> 0"
@@ -371,50 +472,173 @@ def test_a_confidence_interval_that_touches_zero_is_rejected() -> None:
 def test_a_missing_stress_multiplier_is_rejected() -> None:
     folds = tuple(fold(index, stress=(1.5,)) for index in (1, 2, 3))
     bundle = make_evidence(folds=folds)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "missing_cost_stress" in codes(decision)
     assert "x2" in str(decision.rejections[0].required)
 
 
 def test_too_complex_a_spec_is_rejected() -> None:
-    bundle = make_evidence(complexity=PROMOTION_V1.max_complexity + 1)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    bundle = make_evidence(complexity=TEST_POLICY.max_complexity + 1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "max_complexity" in codes(decision)
-    assert decision.rejections[0].observed == PROMOTION_V1.max_complexity + 1
+    assert decision.rejections[0].observed == TEST_POLICY.max_complexity + 1
 
 
 def test_trial_and_search_exposure_are_capped() -> None:
     trials = make_evidence(
-        trial_count=PROMOTION_V1.max_trials + 1,
-        search_budget=PROMOTION_V1.max_trials + 10,
+        trial_count=TEST_POLICY.max_trials + 1,
+        search_budget=TEST_POLICY.max_trials + 10,
     )
-    assert "trial_exposure" in codes(evaluate_promotion(trials, PROMOTION_V1))
+    assert "trial_exposure" in codes(evaluate_promotion(trials, TEST_POLICY))
 
-    search = make_evidence(search_budget=PROMOTION_V1.max_trials + 1)
-    decision = evaluate_promotion(search, PROMOTION_V1)
+    search = make_evidence(search_budget=TEST_POLICY.max_trials + 1)
+    decision = evaluate_promotion(search, TEST_POLICY)
     assert "search_exposure" in codes(decision)
     assert "trial_exposure" not in codes(decision)
 
 
 def test_locked_oos_is_required_when_the_policy_says_so() -> None:
-    policy = replace(PROMOTION_V1, require_locked_oos=True)
+    policy = replace(TEST_POLICY, require_locked_oos=True)
     decision = evaluate_promotion(make_evidence(), policy)
 
     assert "missing_locked_oos" in codes(decision)
 
 
 def test_a_missing_bundle_is_rejected_not_raised() -> None:
-    decision = evaluate_promotion(None, PROMOTION_V1)
+    decision = evaluate_promotion(None, TEST_POLICY)
     assert decision.accepted is False
     assert codes(decision) == ("missing_evidence",)
 
 
 def test_a_wrong_object_is_rejected_not_raised() -> None:
-    decision = evaluate_promotion("not a bundle", PROMOTION_V1)  # type: ignore[arg-type]
+    decision = evaluate_promotion("not a bundle", TEST_POLICY)  # type: ignore[arg-type]
     assert decision.accepted is False
     assert codes(decision) == ("invalid_evidence",)
+
+
+# --- B4: fold geometry --------------------------------------------------------
+
+
+def test_a_fold_reaching_the_test_split_is_rejected() -> None:
+    reaching = replace(
+        fold(3, trades=30),
+        test_start_row=250,
+        test_end_row=300,
+        test_start_ts=_ts(250),
+        test_end_ts=_ts(299),
+    )
+    folds = (fold(1, trades=30), fold(2, trades=30), reaching)
+    bundle = make_evidence(folds=folds, splits=default_splits())
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "fold_geometry" in codes(decision)
+    assert any("250" in str(item.required) for item in decision.rejections)
+
+
+def test_folds_must_end_at_the_validation_boundary() -> None:
+    folds = (fold(1), fold(2), fold(3, shift=-10))
+    bundle = make_evidence(folds=folds, splits=default_splits())
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "fold_geometry" in codes(decision)
+
+
+# --- B5: bootstrap gate -------------------------------------------------------
+
+
+def test_low_bootstrap_samples_are_rejected() -> None:
+    folds = default_folds()
+    bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, bootstrap_samples=1))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "min_bootstrap_samples" in codes(decision)
+
+
+def test_a_weak_bootstrap_confidence_is_rejected() -> None:
+    folds = default_folds()
+    bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, bootstrap_confidence=0.50))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "min_bootstrap_confidence" in codes(decision)
+
+
+def test_a_degenerate_bootstrap_confidence_is_rejected() -> None:
+    folds = default_folds()
+    bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, bootstrap_confidence=1.0))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "min_bootstrap_confidence" in codes(decision)
+
+
+# --- H3: stress thresholds ----------------------------------------------------
+
+
+def test_catastrophic_stress_is_rejected() -> None:
+    folds = tuple(
+        fold(index, stress_expectancy_r=-5.0, stress_profit_factor=0.1) for index in (1, 2, 3)
+    )
+    bundle = make_evidence(folds=folds)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "cost_stress" in codes(decision)
+    assert "stress_degradation" in codes(decision)
+
+
+def test_stress_may_not_lose_more_than_the_degradation_cap() -> None:
+    folds = tuple(fold(index, expectancy_r=1.0, stress_expectancy_r=0.4) for index in (1, 2, 3))
+    bundle = make_evidence(folds=folds)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "stress_degradation" in codes(decision)
+
+    tolerable = tuple(fold(index, expectancy_r=1.0, stress_expectancy_r=0.6) for index in (1, 2, 3))
+    accepted = evaluate_promotion(make_evidence(folds=tolerable), TEST_POLICY)
+    assert "stress_degradation" not in codes(accepted)
+
+
+# --- H1: staleness against the current identity -------------------------------
+
+
+@pytest.mark.parametrize(
+    ("identity", "code"),
+    [
+        (
+            EvidenceIdentity("other-code", DATASET_CHECKSUM, SETTINGS_DIGEST),
+            "stale_code_version",
+        ),
+        (
+            EvidenceIdentity(CODE_VERSION, "e" * 64, SETTINGS_DIGEST),
+            "stale_dataset_checksum",
+        ),
+        (
+            EvidenceIdentity(CODE_VERSION, DATASET_CHECKSUM, "f" * 64),
+            "stale_settings",
+        ),
+    ],
+)
+def test_a_stale_bundle_is_rejected(identity: EvidenceIdentity, code: str) -> None:
+    decision = evaluate_promotion(make_evidence(), TEST_POLICY, expected_identity=identity)
+
+    assert decision.accepted is False
+    assert code in codes(decision)
+
+
+def test_an_empty_expected_identity_is_refused() -> None:
+    with pytest.raises(ValueError):
+        EvidenceIdentity("", DATASET_CHECKSUM, SETTINGS_DIGEST)
+
+
+# --- stored evidence round-trip -----------------------------------------------
+
+
+def test_evidence_round_trips_through_json() -> None:
+    bundle = make_evidence()
+    restored = evidence_from_dict(bundle.to_dict())
+
+    assert evidence_checksum(restored) == bundle.checksum
+    assert restored == bundle
 
 
 # --- stale / edited evidence --------------------------------------------------
@@ -422,7 +646,7 @@ def test_a_wrong_object_is_rejected_not_raised() -> None:
 
 def test_a_tampered_checksum_is_rejected() -> None:
     bundle = replace(make_evidence(), checksum="0" * 64)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "checksum_mismatch" in codes(decision)
     assert decision.accepted is False
@@ -430,63 +654,21 @@ def test_a_tampered_checksum_is_rejected() -> None:
 
 def test_an_unknown_schema_is_rejected() -> None:
     bundle = make_evidence(schema_version=EVIDENCE_SCHEMA_VERSION + 1)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "schema_mismatch" in codes(decision)
 
 
-def test_a_missing_settings_digest_is_rejected() -> None:
-    bundle = make_evidence(settings_digest="")
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
-
-    assert "missing_section" in codes(decision)
-
-
-def test_a_missing_dataset_checksum_is_rejected() -> None:
-    bundle = make_evidence(dataset_checksum="")
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
-
-    assert "missing_section" in codes(decision)
-
-
-def test_selection_folds_over_the_share_cap_are_rejected() -> None:
-    bundle = make_evidence(splits=default_splits(validation_start=150))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
-
-    assert "selection_fold_share" in codes(decision)
-    assert decision.observed["selection_folds"] == (2, 3)
-
-
-def test_a_zero_selection_share_disables_the_check() -> None:
-    policy = replace(PROMOTION_V1, max_selection_fold_share=0.0)
-    bundle = make_evidence(splits=default_splits(validation_start=150))
-    decision = evaluate_promotion(bundle, policy)
-
-    assert "selection_fold_share" not in codes(decision)
-    assert decision.accepted is True
-
-
-def test_a_no_op_bundle_stress_policy_is_rejected() -> None:
-    policy = replace(
-        evidence_policy(),
-        cost_stress=(1.0,),
-    )
-    bundle = make_evidence(policy=policy)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
-
-    assert "missing_cost_stress" in codes(decision)
-
-
 def test_an_empty_identity_is_rejected() -> None:
-    for field in ("spec_hash", "dataset_id", "dataset_checksum", "code_version"):
+    for field in ("spec_hash", "dataset_id", "dataset_checksum", "settings_digest"):
         bundle = make_evidence(**{field: ""})
-        decision = evaluate_promotion(bundle, PROMOTION_V1)
+        decision = evaluate_promotion(bundle, TEST_POLICY)
         assert "missing_section" in codes(decision), field
 
 
 def test_a_missing_aggregate_is_rejected() -> None:
     bundle = make_evidence(aggregate=None)
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "missing_section" in codes(decision)
 
@@ -494,14 +676,14 @@ def test_a_missing_aggregate_is_rejected() -> None:
 def test_internally_inconsistent_evidence_is_rejected() -> None:
     folds = default_folds()
     bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds, total_trades=999))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "inconsistent_evidence" in codes(decision)
 
 
 def test_an_empty_fold_list_is_rejected() -> None:
     bundle = make_evidence(folds=(), aggregate=aggregate_for(()))
-    decision = evaluate_promotion(bundle, PROMOTION_V1)
+    decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "insufficient_folds" in codes(decision)
 
@@ -513,7 +695,7 @@ def test_champion_must_use_the_same_dataset() -> None:
     champion = make_evidence(spec_hash=CHAMPION_HASH, dataset_id="validation:XAGUSD:M1:ffff")
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
@@ -522,10 +704,10 @@ def test_champion_must_use_the_same_dataset() -> None:
 
 
 def test_champion_must_use_the_same_dataset_checksum() -> None:
-    champion = make_evidence(spec_hash=CHAMPION_HASH, dataset_checksum="d" * 64)
+    champion = make_evidence(spec_hash=CHAMPION_HASH, dataset_checksum="e" * 64)
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
@@ -533,23 +715,11 @@ def test_champion_must_use_the_same_dataset_checksum() -> None:
     assert "champion_dataset_checksum_mismatch" in codes(decision)
 
 
-def test_champion_must_use_the_same_code_version() -> None:
-    champion = make_evidence(spec_hash=CHAMPION_HASH, code_version="test-other")
-    decision = evaluate_promotion(
-        make_evidence(),
-        PROMOTION_V1,
-        champion_evidence=champion,
-        champion_spec_hash=CHAMPION_HASH,
-    )
-
-    assert "champion_code_version_mismatch" in codes(decision)
-
-
 def test_champion_must_use_the_same_settings() -> None:
     champion = make_evidence(spec_hash=CHAMPION_HASH, settings_digest="e" * 64)
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
@@ -557,11 +727,160 @@ def test_champion_must_use_the_same_settings() -> None:
     assert "champion_settings_mismatch" in codes(decision)
 
 
+def test_champion_must_use_the_same_code_version() -> None:
+    champion = make_evidence(spec_hash=CHAMPION_HASH, code_version="test-other")
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_code_version_mismatch" in codes(decision)
+
+
+def test_champion_must_use_the_same_split_boundaries() -> None:
+    champion = make_evidence(spec_hash=CHAMPION_HASH, splits=default_splits(validation_start=190))
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_splits_mismatch" in codes(decision)
+
+
+def test_champion_must_use_identical_fold_geometry() -> None:
+    champion = make_evidence(spec_hash=CHAMPION_HASH, folds=default_folds(shift=5))
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_folds_mismatch" in codes(decision)
+
+
+def test_champion_fold_timestamps_are_part_of_the_identity() -> None:
+    champion = make_evidence(
+        spec_hash=CHAMPION_HASH,
+        folds=tuple(fold(index, ts_shift=9) for index in (1, 2, 3)),
+    )
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_folds_mismatch" in codes(decision)
+
+
+def test_champion_purge_embargo_are_part_of_the_identity() -> None:
+    champion = make_evidence(
+        spec_hash=CHAMPION_HASH,
+        folds=tuple(fold(index, purge_bars=4, embargo_bars=2) for index in (1, 2, 3)),
+    )
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_folds_mismatch" in codes(decision)
+
+
+def test_champion_must_use_the_same_cost_stress_set() -> None:
+    champion = make_evidence(
+        spec_hash=CHAMPION_HASH,
+        policy=replace(evidence_policy(), cost_stress=(1.5,)),
+    )
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_cost_stress_mismatch" in codes(decision)
+
+
+def test_champion_must_use_the_same_bootstrap_settings() -> None:
+    folds = default_folds()
+    champion = make_evidence(
+        spec_hash=CHAMPION_HASH,
+        folds=folds,
+        aggregate=aggregate_for(folds, bootstrap_samples=800),
+    )
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_bootstrap_mismatch" in codes(decision)
+
+
+def test_champion_must_use_the_same_observation_window() -> None:
+    champion = make_evidence(
+        spec_hash=CHAMPION_HASH,
+        policy=replace(evidence_policy(), window=30),
+    )
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=CHAMPION_HASH,
+    )
+
+    assert "champion_window_mismatch" in codes(decision)
+
+
+def test_champion_bundle_must_match_the_named_spec() -> None:
+    champion = make_evidence(spec_hash=CHAMPION_HASH)
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash="e" * 64,
+    )
+
+    assert "champion_spec_mismatch" in codes(decision)
+
+
+def test_a_champion_that_is_the_same_spec_is_rejected() -> None:
+    champion = make_evidence()
+    decision = evaluate_promotion(
+        make_evidence(),
+        TEST_POLICY,
+        champion_evidence=champion,
+        champion_spec_hash=SPEC_HASH,
+    )
+
+    assert "champion_same_spec" in codes(decision)
+
+
+def test_champion_named_without_evidence_is_rejected() -> None:
+    decision = evaluate_promotion(make_evidence(), TEST_POLICY, champion_spec_hash=CHAMPION_HASH)
+    assert "champion_evidence_missing" in codes(decision)
+
+
+def test_champion_evidence_without_a_hash_is_rejected() -> None:
+    decision = evaluate_promotion(
+        make_evidence(), TEST_POLICY, champion_evidence=make_evidence(spec_hash=CHAMPION_HASH)
+    )
+    assert "champion_identity_missing" in codes(decision)
+
+
 def test_a_champion_without_comparable_identity_is_incomparable() -> None:
     champion = make_evidence(spec_hash=CHAMPION_HASH, settings_digest="")
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
@@ -574,7 +893,7 @@ def test_a_candidate_without_settings_is_incomparable_when_a_champion_exists() -
     champion = make_evidence(spec_hash=CHAMPION_HASH)
     decision = evaluate_promotion(
         make_evidence(settings_digest=""),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
@@ -583,52 +902,28 @@ def test_a_candidate_without_settings_is_incomparable_when_a_champion_exists() -
     assert "candidate.settings_digest" in str(decision.rejections[-1].observed)
 
 
-def test_champion_must_use_identical_fold_boundaries() -> None:
-    champion = make_evidence(spec_hash=CHAMPION_HASH, folds=default_folds(shift=5))
+def test_an_edited_champion_bundle_is_rejected() -> None:
+    champion = replace(make_evidence(spec_hash=CHAMPION_HASH), checksum="f" * 64)
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
 
-    assert "champion_folds_mismatch" in codes(decision)
+    assert "champion_checksum_mismatch" in codes(decision)
 
 
-def test_champion_bundle_must_match_the_named_spec() -> None:
-    champion = make_evidence(spec_hash=CHAMPION_HASH)
+def test_champion_without_an_aggregate_is_an_error_not_a_crash() -> None:
+    champion = make_evidence(spec_hash=CHAMPION_HASH, aggregate=None)
     decision = evaluate_promotion(
         make_evidence(),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
-        champion_spec_hash="e" * 64,
+        champion_spec_hash=CHAMPION_HASH,
     )
 
-    assert "champion_spec_mismatch" in codes(decision)
-
-
-def test_a_champion_that_is_the_same_spec_is_rejected() -> None:
-    champion = make_evidence()
-    decision = evaluate_promotion(
-        make_evidence(),
-        PROMOTION_V1,
-        champion_evidence=champion,
-        champion_spec_hash=SPEC_HASH,
-    )
-
-    assert "champion_same_spec" in codes(decision)
-
-
-def test_champion_named_without_evidence_is_rejected() -> None:
-    decision = evaluate_promotion(make_evidence(), PROMOTION_V1, champion_spec_hash=CHAMPION_HASH)
-    assert "champion_evidence_missing" in codes(decision)
-
-
-def test_champion_evidence_without_a_hash_is_rejected() -> None:
-    decision = evaluate_promotion(
-        make_evidence(), PROMOTION_V1, champion_evidence=make_evidence(spec_hash=CHAMPION_HASH)
-    )
-    assert "champion_identity_missing" in codes(decision)
+    assert "champion_invalid_evidence" in codes(decision)
 
 
 def test_improvement_over_the_champion_is_strict() -> None:
@@ -639,28 +934,25 @@ def test_improvement_over_the_champion_is_strict() -> None:
         aggregate=aggregate_for(folds, expectancy_r=0.20),
     )
 
-    tie = evaluate_promotion(
+    at_boundary = evaluate_promotion(
         make_evidence(spec_hash=SPEC_HASH),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
-    # Default candidate expectancy is 0.25, the champion is 0.20: exactly the
-    # policy minimum, which passes; a 0.24 candidate is only +0.04R.
-    assert tie.accepted is True, tie.codes
+    assert at_boundary.accepted is True, at_boundary.codes
 
-    below = make_evidence(
-        spec_hash=SPEC_HASH,
-        folds=folds,
-        aggregate=aggregate_for(folds, expectancy_r=0.24),
-    )
-    weak = evaluate_promotion(
-        below,
-        PROMOTION_V1,
+    below = evaluate_promotion(
+        make_evidence(
+            spec_hash=SPEC_HASH,
+            folds=folds,
+            aggregate=aggregate_for(folds, expectancy_r=0.24),
+        ),
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
-    assert "champion_improvement" in codes(weak)
+    assert "champion_improvement" in codes(below)
 
     equal = evaluate_promotion(
         make_evidence(
@@ -668,23 +960,11 @@ def test_improvement_over_the_champion_is_strict() -> None:
             folds=folds,
             aggregate=aggregate_for(folds, expectancy_r=0.20),
         ),
-        PROMOTION_V1,
+        TEST_POLICY,
         champion_evidence=champion,
         champion_spec_hash=CHAMPION_HASH,
     )
     assert "champion_improvement" in codes(equal)
-
-
-def test_a_stale_champion_checksum_is_rejected() -> None:
-    champion = replace(make_evidence(spec_hash=CHAMPION_HASH), checksum="f" * 64)
-    decision = evaluate_promotion(
-        make_evidence(),
-        PROMOTION_V1,
-        champion_evidence=champion,
-        champion_spec_hash=CHAMPION_HASH,
-    )
-
-    assert "champion_checksum_mismatch" in codes(decision)
 
 
 # --- manual override ----------------------------------------------------------
@@ -699,20 +979,21 @@ def test_manual_override_keeps_the_original_rejections() -> None:
     bundle = rejected_bundle()
     override = manual_override(
         bundle,
-        PROMOTION_V1,
+        TEST_POLICY,
         reason="owner accepts the risk for a paper-only run",
         owner="resul",
     )
 
     assert override.policy_id == "manual-override"
-    assert override.policy_id != PROMOTION_V1.policy_id
-    assert override.original_policy_id == PROMOTION_V1.policy_id
-    assert override.original_policy_version == PROMOTION_V1.version
+    assert override.original_policy_id == TEST_POLICY.policy_id
+    assert override.original_policy_version == TEST_POLICY.version
     assert override.rejections
     assert {item.code for item in override.rejections} == set(
-        codes(evaluate_promotion(bundle, PROMOTION_V1))
+        codes(evaluate_promotion(bundle, TEST_POLICY))
     )
     assert override.evidence_checksum == bundle.checksum
+    assert override.dataset_id == DATASET_ID
+    assert override.policy_digest == TEST_POLICY.digest
     assert override.is_policy_evidence is False
     assert not hasattr(override, "accepted")
     assert "not validation evidence" in override.note
@@ -724,48 +1005,38 @@ def test_manual_override_keeps_the_original_rejections() -> None:
 )
 def test_manual_override_requires_a_reason_and_owner(reason: str, owner: str) -> None:
     with pytest.raises(ValueError):
-        manual_override(rejected_bundle(), PROMOTION_V1, reason=reason, owner=owner)
+        manual_override(rejected_bundle(), TEST_POLICY, reason=reason, owner=owner)
 
 
 def test_manual_override_is_refused_when_the_policy_already_accepts() -> None:
     with pytest.raises(ValueError, match="already satisfies"):
         manual_override(
             make_evidence(),
-            PROMOTION_V1,
+            TEST_POLICY,
             reason="nothing to override",
             owner="resul",
-        )
-
-
-def test_manual_override_cannot_be_promoted_as_evidence(tmp_path: Any) -> None:
-    archive, candidate = archive_with_candidate(tmp_path)
-    override = manual_override(
-        rejected_bundle(),
-        PROMOTION_V1,
-        reason="paper-only risk acceptance",
-        owner="resul",
-    )
-
-    with pytest.raises(TypeError, match="ManualOverride"):
-        promote_with_evidence(
-            archive,
-            candidate.canonical_hash(),
-            override,  # type: ignore[arg-type]
-            scope=SCOPE,
-            reason="override",
         )
 
 
 # --- archive integration ------------------------------------------------------
 
 
-def archive_with_candidate(tmp_path: Any) -> tuple[DiscoveryArchive, ToyCandidate]:
+def archive_with_candidate(
+    tmp_path: Any,
+    *,
+    nodes: tuple[int, ...] = (1, 2),
+    accepted: bool = True,
+) -> tuple[DiscoveryArchive, ToyCandidate]:
     archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
-    candidate = ToyCandidate((1, 2))
+    candidate = ToyCandidate(nodes)
     archive.add_candidate(candidate, code_version=CODE_VERSION)
     archive.record_trial(
         candidate.canonical_hash(),
-        TrialResult(metrics={"expectancy_r": 0.25, "trades": 75.0}, accepted=True),
+        TrialResult(
+            metrics={"expectancy_r": 0.25, "trades": 75.0},
+            accepted=accepted,
+            rejections=() if accepted else ("below_threshold",),
+        ),
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
@@ -773,61 +1044,174 @@ def archive_with_candidate(tmp_path: Any) -> tuple[DiscoveryArchive, ToyCandidat
     return archive, candidate
 
 
-def accepted_decision_for(candidate: ToyCandidate) -> PromotionDecision:
-    decision = evaluate_promotion(make_evidence(spec_hash=candidate.canonical_hash()), PROMOTION_V1)
-    assert decision.accepted
-    return decision
+def candidate_evidence(candidate: ToyCandidate, **overrides: Any) -> CandidateEvidence:
+    return make_evidence(spec_hash=candidate.canonical_hash(), **overrides)
 
 
-def test_archive_promotion_stores_the_policy_and_checksum(tmp_path: Any) -> None:
+def test_first_evidence_promotion_is_recorded_without_a_baseline(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
-    decision = accepted_decision_for(candidate)
+    evidence = candidate_evidence(candidate)
 
     champion = promote_with_evidence(
         archive,
         candidate.canonical_hash(),
-        decision,
+        evidence,
+        TEST_POLICY,
         scope=SCOPE,
-        reason="passed promotion-v1 on the validation folds",
+        reason="passed the test policy on the validation folds",
+        expected_identity=IDENTITY,
     )
 
+    assert champion.mode == "evidence"
+    assert champion.evidence_checksum == evidence.checksum
     assert champion.candidate.candidate_id == candidate.canonical_hash()
-    assert "promotion-v1 v1" in champion.reason
-    assert decision.evidence_checksum is not None
-    assert decision.evidence_checksum[:12] in champion.reason
+    assert "test-policy v1" in champion.reason
 
     history = archive.champion_history(SCOPE)
     assert len(history) == 1
-    assert history[0].metric is None  # no metric-only path
+    assert history[0].mode == "evidence"
+    assert history[0].evidence_checksum == evidence.checksum
+    assert history[0].metric is None
     assert history[0].value is None
-    assert history[0].previous_candidate_id is None
 
     recorded = archive.decisions(candidate.canonical_hash())[-1]
     assert recorded.decision == "promoted"
     detail = recorded.detail
     assert detail is not None
     assert detail["mode"] == "evidence"
-    assert detail["policy_id"] == PROMOTION_V1.policy_id
-    assert detail["policy_version"] == PROMOTION_V1.version
-    assert detail["evidence_checksum"] == decision.evidence_checksum
-    assert detail["candidate_spec_hash"] == candidate.canonical_hash()
-    assert detail["dataset_id"] == DATASET_ID
+    assert detail["comparison"] == "first"
+    assert detail["champion_candidate_id"] is None
+    assert detail["policy_id"] == TEST_POLICY.policy_id
+    assert detail["policy_version"] == TEST_POLICY.version
+    assert detail["policy_digest"] == TEST_POLICY.digest
+    assert detail["evidence_checksum"] == evidence.checksum
     assert detail["dataset_checksum"] == DATASET_CHECKSUM
     assert detail["settings_digest"] == SETTINGS_DIGEST
+    assert detail["code_version"] == CODE_VERSION
+
+    stored = archive.evidence_record(evidence.checksum)
+    assert stored is not None
+    assert stored.candidate_id == candidate.canonical_hash()
+    restored = evidence_from_dict(stored.payload)
+    assert restored == evidence
+    assert evidence_checksum(restored) == evidence.checksum
+    assert archive.champion_evidence(SCOPE) == stored
 
 
-def test_archive_refuses_a_rejected_decision(tmp_path: Any) -> None:
+def test_second_promotion_uses_the_stored_champion_evidence(tmp_path: Any) -> None:
+    archive, first = archive_with_candidate(tmp_path)
+    first_evidence = candidate_evidence(first)
+    promote_with_evidence(
+        archive,
+        first.canonical_hash(),
+        first_evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="first champion",
+        expected_identity=IDENTITY,
+    )
+
+    second = ToyCandidate((1, 2, 3))
+    archive.add_candidate(second, code_version=CODE_VERSION)
+    archive.record_trial(
+        second.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.35, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+    )
+    folds = default_folds()
+    second_evidence = candidate_evidence(
+        second,
+        folds=folds,
+        aggregate=aggregate_for(folds, expectancy_r=0.35),
+    )
+
+    champion = promote_with_evidence(
+        archive,
+        second.canonical_hash(),
+        second_evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="beats the stored champion evidence",
+        expected_identity=IDENTITY,
+    )
+
+    assert champion.candidate.candidate_id == second.canonical_hash()
+    history = archive.champion_history(SCOPE)
+    assert [row.mode for row in history] == ["evidence", "evidence"]
+    assert history[1].evidence_checksum == second_evidence.checksum
+    assert history[1].previous_candidate_id == first.canonical_hash()
+
+
+def test_second_promotion_without_champion_evidence_is_refused(tmp_path: Any) -> None:
+    archive, first = archive_with_candidate(tmp_path)
+    archive.promote_exploratory(first.canonical_hash(), scope=SCOPE, reason="research mode")
+
+    second = ToyCandidate((3, 4))
+    archive.add_candidate(second, code_version=CODE_VERSION)
+    archive.record_trial(
+        second.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.35, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+    )
+    folds = default_folds()
+    evidence = candidate_evidence(
+        second,
+        folds=folds,
+        aggregate=aggregate_for(folds, expectancy_r=0.35),
+    )
+
+    with pytest.raises(PromotionRefused, match="champion_evidence_missing"):
+        promote_with_evidence(
+            archive,
+            second.canonical_hash(),
+            evidence,
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="cannot compare without the baseline",
+            expected_identity=IDENTITY,
+        )
+
+    assert archive.champion_evidence(SCOPE) is None
+    assert archive.champion(SCOPE).candidate.candidate_id == first.canonical_hash()  # type: ignore[union-attr]
+
+
+def test_a_stale_expected_identity_refuses_promotion(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
-    decision = evaluate_promotion(rejected_bundle(), PROMOTION_V1)
-    assert decision.accepted is False
+    evidence = candidate_evidence(candidate)
+
+    with pytest.raises(PromotionRefused, match="stale_code_version"):
+        promote_with_evidence(
+            archive,
+            candidate.canonical_hash(),
+            evidence,
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="stale build",
+            expected_identity=EvidenceIdentity("other-code", DATASET_CHECKSUM, SETTINGS_DIGEST),
+        )
+
+    assert archive.champion(SCOPE) is None
+
+
+def test_archive_refuses_a_rejected_policy(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    evidence = candidate_evidence(
+        candidate, folds=tuple(fold(index, trades=5) for index in (1, 2, 3))
+    )
 
     with pytest.raises(PromotionRefused):
         promote_with_evidence(
             archive,
             candidate.canonical_hash(),
-            decision,
+            evidence,
+            TEST_POLICY,
             scope=SCOPE,
             reason="should not pass",
+            expected_identity=IDENTITY,
         )
 
     assert archive.champion(SCOPE) is None
@@ -839,94 +1223,202 @@ def test_archive_refuses_evidence_for_another_candidate(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
     other = ToyCandidate((3, 4))
     archive.add_candidate(other, code_version=CODE_VERSION)
-    decision = accepted_decision_for(candidate)
+    evidence = candidate_evidence(candidate)
 
     with pytest.raises(PromotionRefused, match="detached promotion"):
         promote_with_evidence(
             archive,
             other.canonical_hash(),
-            decision,
+            evidence,
+            TEST_POLICY,
             scope=SCOPE,
             reason="wrong candidate",
+            expected_identity=IDENTITY,
         )
 
 
-def test_archive_has_no_metric_only_promote(tmp_path: Any) -> None:
-    archive, _ = archive_with_candidate(tmp_path)
-    assert not hasattr(archive, "promote")
-    assert hasattr(archive, "promote_exploratory")
-    assert hasattr(archive, "promote_evidence")
+def test_archive_requires_an_accepted_trial(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path, accepted=False)
+    evidence = candidate_evidence(candidate)
+
+    with pytest.raises(ArchiveError, match="no_accepted_trial"):
+        promote_with_evidence(
+            archive,
+            candidate.canonical_hash(),
+            evidence,
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="no recorded acceptance",
+            expected_identity=IDENTITY,
+        )
+
+    assert archive.champion(SCOPE) is None
 
 
-def test_archive_rejects_manual_override_identity(tmp_path: Any) -> None:
+def test_archive_requires_a_trial_at_all(tmp_path: Any) -> None:
+    archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
+    candidate = ToyCandidate((5,))
+    archive.add_candidate(candidate, code_version=CODE_VERSION)
+    evidence = candidate_evidence(candidate)
+
+    with pytest.raises(ArchiveError, match="no_accepted_trial"):
+        promote_with_evidence(
+            archive,
+            candidate.canonical_hash(),
+            evidence,
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="untested candidate",
+            expected_identity=IDENTITY,
+        )
+
+
+def test_archive_scope_must_match_the_dataset(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
 
-    with pytest.raises(ArchiveError, match="manual override"):
-        archive.promote_evidence(
-            candidate.canonical_hash(),
-            scope=SCOPE,
-            reason="override",
-            policy_id=MANUAL_OVERRIDE_POLICY_ID,
-            policy_version=1,
-            evidence_checksum="a" * 64,
-            dataset_id=DATASET_ID,
-            dataset_checksum=DATASET_CHECKSUM,
-            settings_digest=SETTINGS_DIGEST,
-            candidate_spec_hash=candidate.canonical_hash(),
-        )
-
-
-def test_archive_rejects_missing_provenance(tmp_path: Any) -> None:
-    archive, candidate = archive_with_candidate(tmp_path)
-
-    with pytest.raises(ValueError):
-        archive.promote_evidence(
-            candidate.canonical_hash(),
-            scope=SCOPE,
-            reason="no checksum",
-            policy_id="promotion-v1",
-            policy_version=1,
-            evidence_checksum="",
-            dataset_id=DATASET_ID,
-            dataset_checksum=DATASET_CHECKSUM,
-            settings_digest=SETTINGS_DIGEST,
-            candidate_spec_hash=candidate.canonical_hash(),
-        )
-    with pytest.raises(ValueError):
-        archive.promote_evidence(
-            candidate.canonical_hash(),
-            scope=SCOPE,
-            reason="bad version",
-            policy_id="promotion-v1",
-            policy_version=0,
-            evidence_checksum="a" * 64,
-            dataset_id=DATASET_ID,
-            dataset_checksum=DATASET_CHECKSUM,
-            settings_digest=SETTINGS_DIGEST,
-            candidate_spec_hash=candidate.canonical_hash(),
-        )
     with pytest.raises(ArchiveError, match="scope"):
-        archive.promote_evidence(
+        promote_with_evidence(
+            archive,
             candidate.canonical_hash(),
+            candidate_evidence(candidate),
+            TEST_POLICY,
             scope="XAGUSD:M1",
             reason="wrong market",
-            policy_id="promotion-v1",
-            policy_version=1,
-            evidence_checksum="a" * 64,
-            dataset_id=DATASET_ID,
-            dataset_checksum=DATASET_CHECKSUM,
-            settings_digest=SETTINGS_DIGEST,
-            candidate_spec_hash=candidate.canonical_hash(),
+            expected_identity=IDENTITY,
         )
 
 
-def test_exploratory_promotion_is_still_available_and_separate(tmp_path: Any) -> None:
+def test_exploratory_promotion_is_marked_and_refused_by_the_provider(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
-
     champion = archive.promote_exploratory(
         candidate.canonical_hash(),
         scope=SCOPE,
         reason="research ablation only",
     )
-    assert champion.metrics["expectancy_r"] == pytest.approx(0.25)
-    assert "exploratory" in type(archive).promote_exploratory.__doc__.splitlines()[0].lower()
+
+    assert champion.mode == "exploratory"
+    assert archive.champion_history(SCOPE)[0].mode == "exploratory"
+    with pytest.raises(NoEvidenceChampion, match="exploratory"):
+        ChampionProvider(archive, scope=SCOPE).champion()
+
+
+def test_manual_override_promotes_as_manual_and_is_not_paper_evidence(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path, accepted=False)
+    evidence = candidate_evidence(
+        candidate, folds=tuple(fold(index, trades=5) for index in (1, 2, 3))
+    )
+    override = manual_override(
+        evidence,
+        TEST_POLICY,
+        reason="paper-only risk acceptance",
+        owner="resul",
+    )
+
+    champion = promote_manual_override(
+        archive,
+        candidate.canonical_hash(),
+        override,
+        scope=SCOPE,
+        reason="owner override",
+    )
+
+    assert champion.mode == "manual"
+    assert archive.champion_history(SCOPE)[-1].mode == "manual"
+    with pytest.raises(NoEvidenceChampion, match="manual"):
+        ChampionProvider(archive, scope=SCOPE).champion()
+
+
+def test_manual_override_cannot_be_passed_to_the_evidence_api(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path, accepted=False)
+    override = manual_override(
+        candidate_evidence(candidate, folds=tuple(fold(index, trades=5) for index in (1, 2, 3))),
+        TEST_POLICY,
+        reason="paper-only risk acceptance",
+        owner="resul",
+    )
+
+    with pytest.raises(TypeError):
+        promote_with_evidence(
+            archive,
+            candidate.canonical_hash(),
+            override,  # type: ignore[arg-type]
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="not evidence",
+            expected_identity=IDENTITY,
+        )
+
+
+def test_rollback_preserves_the_restored_mode(tmp_path: Any) -> None:
+    archive, first = archive_with_candidate(tmp_path)
+    first_evidence = candidate_evidence(first)
+    promote_with_evidence(
+        archive,
+        first.canonical_hash(),
+        first_evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="evidence champion",
+        expected_identity=IDENTITY,
+    )
+    second = ToyCandidate((2, 1))
+    archive.add_candidate(second, code_version=CODE_VERSION)
+    archive.record_trial(
+        second.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.9, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+    )
+    archive.promote_exploratory(second.canonical_hash(), scope=SCOPE, reason="research")
+
+    restored = archive.rollback(SCOPE, to_candidate_id=first.canonical_hash(), reason="rollback")
+
+    assert restored.mode == "evidence"
+    assert restored.evidence_checksum == first_evidence.checksum
+    assert archive.champion_history(SCOPE)[-1].mode == "evidence"
+    assert archive.champion_evidence(SCOPE) is not None
+
+
+def test_archive_evidence_schema_and_modes(tmp_path: Any) -> None:
+    archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
+    assert archive.schema_version == SCHEMA_VERSION == 3
+    tables = {
+        row[0]
+        for row in archive.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    assert "evidence" in tables
+
+
+def test_provider_accepts_a_real_spec_promoted_with_evidence(tmp_path: Any) -> None:
+    spec = StrategySpec(
+        entries=(EntryRule("long", Compare(Const(1.0), ">", Const(0.5))),),
+        exits=(ExitRule(Compare(Const(0.0), ">", Const(1.0))),),
+        holding=HoldingLimit(10),
+        max_lookback=2,
+    )
+    archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
+    candidate_id = archive.add_candidate(spec, code_version=CODE_VERSION).candidate_id
+    archive.record_trial(
+        candidate_id,
+        TrialResult(metrics={"expectancy_r": 0.3, "trades": 70.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+    )
+    evidence = make_evidence(spec_hash=candidate_id)
+
+    promote_with_evidence(
+        archive,
+        candidate_id,
+        evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="evidence champion",
+        expected_identity=IDENTITY,
+    )
+    champion = ChampionProvider(archive, scope=SCOPE).champion()
+
+    assert champion.mode == "evidence"
+    assert champion.evidence_checksum == evidence.checksum
+    assert champion.spec.canonical_hash() == candidate_id

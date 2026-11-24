@@ -4,12 +4,14 @@ Phase 18 slice one: a persistent job queue, the loop that runs it, owner
 controls and trigger sources. The queue, its audit log and the controls are real
 code with tests. Slice two (P3 slice 1) registers five production handlers:
 document ingestion, dataset build, discovery, paper advance and outcome
-analysis. There is still no scheduler thread and no measured resource guard.
+analysis. Slice three (P3 slice 2) adds a supervised long-running daemon that
+scans triggers, drains the queue and installs the measured guard by default.
 
 This slice answers one question honestly: *can the system remember, order,
 refuse, retry and explain work across a restart?* The answer is tested. The
-handlers answer *what* work exists for the first research cycle; scheduling and
-resource measurement remain later changes.
+handlers answer *what* work exists for the first research cycle; the daemon
+answers *when* it runs and under which measured limits. It is still one local
+process, not an operating-system service.
 
 ## Files
 
@@ -20,20 +22,26 @@ resource measurement remain later changes.
 | `backend/src/scalping/orchestrator/triggers.py` | `TriggerSource` protocol, `FileTriggerSource`, `scan_once` |
 | `backend/src/scalping/orchestrator/handlers.py` | `HandlerContext`, payload validators, the five pipeline handlers |
 | `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
+| `backend/src/scalping/orchestrator/daemon.py` | `DaemonConfig`, `OrchestratorDaemon`, tick order, background loop, status |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
 | `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
 | `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
+| `backend/tests/test_orchestrator_daemon.py` | Tick order, dedupe, controls, guard defer, isolation, start/stop, CLI |
 
 ## What is not in this slice
 
-- **No scheduler thread.** `run_once()` processes one unit of work;
-  `run_until_idle()` drains for a CLI or a test. A daemon loop is a later change
-  and would not alter these semantics. Nothing calls the handlers on a timer.
-- **Measured guard exists but is not the default.** `MeasuredResourceGuard` in
-  `orchestrator/resources.py` measures RAM/load/disk with a stdlib probe and
-  fails closed, but the caller (a future daemon) must pass it; `AllowAllGuard`
-  remains the default. It fences job start, not growth during a run.
+- **One process, not an operating-system service.** `OrchestratorDaemon` runs a
+  daemon thread inside whatever process calls `start()`. There is no launchd,
+  systemd, supervisor, multi-worker scheduler or persisted timer. A process
+  restart relies on `recover_interrupted` and each job's own `scheduled_at`.
+- **Paper execution is still caller/thread driven.** The daemon calls
+  `paper.advance` when a job is due; it does not own a market-data feed, a bar
+  clock or a trading loop. Running it against live/appended bars is the caller's
+  responsibility.
+- **The measured guard fences start, not growth.** It measures RAM/load/disk
+  before a job starts. A job that grows after the check is not interrupted;
+  `max_process_rss_mb` only refuses the next job.
 - **No promotion handler.** Discovery only records `no_trade`, `no_change` or
   `rejected`. `paper.advance` reads a champion that a reviewed path promoted;
   neither handler can promote, replace or roll back one.
@@ -41,11 +49,165 @@ resource measurement remain later changes.
   slice, and no handler here fits a model.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
-- **No API/UI.** State is queryable through `JobStore` and
-  `Orchestrator.status()`; exposing it is future work.
-- **One writer at a time.** One connection per thread, mirroring the registry and
-  the Mac mini's "one heavy job" rule. Two processes are safe through
-  `BEGIN IMMEDIATE`, not fast.
+- **No API/UI.** State is queryable through `JobStore`, `Orchestrator.status()`
+  and `OrchestratorDaemon.status()`; exposing it is future work.
+- **One daemon per database.** SQLite `BEGIN IMMEDIATE` makes claims unique, but
+  it does not provide ownership: a second daemon's `start()` recovery sees the
+  first daemon's `running` rows as interrupted, requeues them and runs them
+  twice. Run one daemon per database; an ownership/lease protocol is future
+  work.
+
+## Daemon and scheduler (P3 slice 2)
+
+`OrchestratorDaemon(store, registry, config, *, guard=None, triggers=(),
+clock=time.monotonic, sleeper=time.sleep)` wires the existing queue, handler
+registry and measured guard into one supervised process. `registry` is either a
+`{kind: handler}` mapping or anything exposing `.handlers` — the CLI builds an
+`Orchestrator`, calls `register_default_handlers`, and passes it in, so there is
+no second registration table.
+
+### Configuration
+
+| Field | Default | Meaning |
+|---|---|---|
+| `poll_seconds` | `5.0` | Wait between ticks. Bounded to 1–60 so a typo cannot busy-spin or hide a stop. |
+| `guard_profile` | `m2_8gb` | `m2_8gb` and `exploratory` build `MeasuredResourceGuard` with the matching profile; `none` installs `AllowAllGuard` for tests/dev only. |
+| `scan_triggers` | `True` | Call `scan_once` before the drain. With no sources the scan is skipped entirely. |
+| `max_jobs_per_tick` | `10` | Cap passed to `run_until_idle`; `0` scans and enqueues but claims nothing. |
+| `stop_grace_seconds` | `5.0` | How long `stop()` joins the loop before returning; bounded to 0–300. |
+| `heavy_kinds` | `()` | Passed to the core's one-heavy-job rule. The CLI passes `HEAVY_HANDLER_KINDS`. |
+| `research_kinds` | `()` | Kinds the persisted `disable research` control excludes. The CLI passes dataset, discovery, paper advance and paper analyse. |
+
+An explicit `guard=` argument overrides the profile; status reports both the
+configured `guard_profile` and the actual guard `type`, plus
+`unmeasured: true` when `AllowAllGuard` is in use. `none` is documented as a
+test/development profile and must not be used for an unattended run.
+
+### Tick order
+
+1. **Crash recovery, once.** The first `tick()` runs
+   `store.recover_interrupted()` on the caller's connection. `start()` runs it on
+   the worker thread's own connection, before the first tick, and blocks until it
+   finishes. The flag is per daemon instance; a second `start()` never repeats
+   it.
+2. **Scan triggers.** `scan_once(orchestrator, triggers)` asks each source, goes
+   through idempotent `enqueue`, acknowledges each source and writes one
+   `trigger_scan` event. Dedupe is the trigger's `dedupe_key`, so two ticks that
+   see the same content produce one job. The daemon passes its stop flag as
+   `should_stop` to the drain, so a stop requested between jobs does not start
+   the remaining ones.
+3. **Drain.** `run_until_idle(max_jobs_per_tick, should_stop=...)` claims and
+   runs due work.
+
+Scanning and enqueueing remain allowed while the queue is paused, in safe mode
+or with research disabled. Only claims are refused, with the core's existing
+`claim_refused` / `research_disabled` event. That is deliberate: the owner
+stopped spending work, not the recording of new work, and a hidden scanner would
+lose the event that created the job.
+
+A scan or store failure is recorded in `last_error` and the drain still runs, so
+a broken trigger source cannot stop paper jobs. Handler exceptions are already
+per-job failures in the core: one failed heavy training-like job does not stop a
+paper job that is due later in the same tick or on the next one.
+
+### Guard refusals
+
+`MeasuredResourceGuard.can_start` runs after the claim and before the handler.
+A refusal writes `resource_refused` with the measured reason and calls
+`store.defer`, so the job returns to `queued` with `attempts` unchanged and a
+`scheduled_at` at least `guard_retry_seconds` (60 s in the daemon) in the future.
+The reason is in the event log, the job row's `error` and the next status
+snapshot's guard block.
+
+Deferrals are bounded: each job carries `defer_count` and `max_deferrals`
+(default 1440 = 24 h at 60 s). A successful defer increments the count; the
+refusal that would exceed the cap writes `defer_exhausted`, leaves the job
+`failed` with a reason naming the cap and leaves the claimed attempt spent. That
+makes a permanently starved job visible instead of queued forever. `JobStats`
+reports the summed `deferrals`.
+
+### Start, stop and status
+
+`start()` is idempotent: while the thread is alive a second call returns `[]`.
+It clears the stop flag *before* recovery (under the lifecycle lock), starts a
+named daemon thread and waits for that thread's recovery to finish. If `stop()`
+arrived during recovery, `start()` returns `[]` and leaves no running thread.
+Recovery exceptions are re-raised by `start()`.
+
+The loop opens its own `JobStore` connection because SQLite connections are
+thread-bound; recovery and every tick use that connection. WAL lets `status()`
+read while the worker writes. `tick()` still uses the connection that created
+`store` and must be called on that thread; `start()` and `status()` do not.
+`:memory:` stores cannot cross threads, so only their creating thread may call
+`status()`, and `start()` rejects them — use `tick()`.
+
+`stop()` sets the flag before reading the thread reference and does not take the
+lifecycle lock while reading it, so a stop can win while `start()` is blocked in
+recovery. It joins for at most `stop_grace_seconds`; it never raises, and calling
+it twice or before `start()` is safe. The wait between ticks is sliced at 0.25 s
+so a 60 s poll does not delay shutdown by a minute. A handler already running
+cannot be interrupted from another thread; the loop stops after that `tick()`
+returns. Stop does not cancel the running job.
+
+`status()` returns a JSON-safe `DaemonStatus` from a short-lived
+`query_only` connection for a file-backed store: `running`, `worker_ident`,
+`paused`, `safe_mode`, `disabled_research`, queue counts from `JobStats` (with
+`deferrals`), tick count, **terminal** job count, last tick time and duration,
+last error, recovered-job count, and the guard profile/type/unmeasured flag with
+its last snapshot (never a fresh probe).
+
+### CLI
+
+```
+# one deterministic pass; exactly one JSON line on stdout
+uv run scalping.cli orchestrator run --once --profile m2_8gb
+
+# supervised loop; SIGINT/SIGTERM stop it and print a final snapshot
+uv run scalping.cli orchestrator run --forever --poll-seconds 5
+
+# watch a directory: each new/changed file enqueues knowledge.ingest
+uv run scalping.cli orchestrator run --forever --watch-dir docs/research
+
+# tests/dev only: no measured guard, status says unmeasured
+uv run scalping.cli orchestrator run --once --profile none
+```
+
+`--db` defaults to `runs/orchestrator.sqlite3`; `--root`, `--runs-root` and
+`--archive-root` feed the existing `HandlerContext` (`--root data`,
+`--runs-root runs`, `--archive-root data`, with the paper ledger at
+`<archive-root>/paper.sqlite`, matching the API default).
+
+There is no trigger by default: without `--watch-dir` the daemon scans nothing
+and the queue is filled by another process. `--watch-dir` binds one
+`FileTriggerSource`; `--watch-kind` defaults to `knowledge.ingest` and the CLI
+adapts the file payload to that handler's `document_path`. `--no-scan` is
+meaningful only in that default mode; combining it with `--watch-dir` is a CLI
+error.
+
+`--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
+store error). A job-level handler failure is a recorded job outcome and still
+exits 0. `--forever` detects a worker thread that died without a stop request,
+prints `{"status": "failed", ...}` and exits 1. A requested stop prints
+`{"status": "stopped", ...}` and exits 0. Other CLI commands keep the single JSON
+line contract; `--forever` prints `started` and then `stopped`/`failed`.
+
+### Honest limits
+
+- **One daemon per database.** `BEGIN IMMEDIATE` keeps claims unique, but there
+  is no ownership or lease. A second daemon's recovery treats the first's
+  `running` rows as interrupted, requeues them and can run them twice. Start two
+  only for an experiment you can reconcile; a lease is a future slice.
+- No OS service, no process supervision, no restart-on-crash. A supervisor or
+  the operator restarts it, and recovery handles the interrupted rows.
+- Paper jobs are driven by the queue, not by a market clock; the daemon cannot
+  create bars or guarantee a cadence for `paper.advance`.
+- Guard numbers describe this machine at this instant. They do not predict the
+  next allocation and, on macOS, cannot see memory held by other processes.
+- Trigger sources are scanned sequentially in the calling thread; a slow hash of
+  a large document delays that tick.
+- `status()` opens a connection per call. It is cheap for an operator poll, not
+  intended as a high-frequency metrics endpoint.
+
 
 ## Job lifecycle
 
@@ -156,9 +318,14 @@ handlers.
 After a claim and before the handler, `guard.can_start(kind)` gets a veto. A
 refusal does not fail the job and does not spend an attempt: the job is
 deferred after `guard_retry_seconds` (60 by default), `attempts` is decremented
-back, and the guard's reason is stored in `jobs.error` with `resource_refused`
-and `deferred` events. Waiting for RAM cannot exhaust a job's retry budget,
-which a retry-based refusal would. The refusal is visible, not a silent drop.
+back, `defer_count` is incremented, and the guard's reason is stored in
+`jobs.error` with `resource_refused` and `deferred` events. Waiting for RAM
+cannot exhaust a job's retry budget, which a retry-based refusal would. The
+refusal is visible, not a silent drop.
+
+A deferral is not unlimited: `max_deferrals` (default 1440) caps the wait. The
+refusal past the cap is terminal — `failed`, `defer_exhausted` event, the reason
+names the cap — so a permanently starved job cannot sit queued for weeks.
 
 ## Measured resource guard (P6 slice one)
 
@@ -299,7 +466,8 @@ so a reader can parse the reason and a human can still read it.
 | `succeeded` | store | Result document stored |
 | `failed` | store | Terminal failure with the error |
 | `retry` | store | Requeued with delay and reason |
-| `deferred` | store | Guard refusal; delay recorded, attempt refunded |
+| `deferred` | store | Guard refusal; delay and `defer_count` recorded, attempt refunded |
+| `defer_exhausted` | store | Deferral cap reached; job failed with the reason |
 | `cancelled` | store | Cancelled with previous status and reason |
 | `skipped` | store | Dependency reason stored |
 | `interrupted` / `requeued` | store | Restart recovery |
@@ -431,13 +599,14 @@ must not consume attempts.
 
 `discovery.run` cannot write a `promoted` decision: `run_discovery` refuses it
 and `DiscoveryRunResult` raises if asked. The handler also checks the returned
-decision before storing its result. Promotion and rollback stay in
-`DiscoveryArchive.promote/rollback`, reached by a separate reviewed path.
-`paper.advance` selects the champion of `symbol:timeframe` through
-`ChampionProvider`. If the archive is absent, has no champion, or the stored
-payload fails DSL validation or hashes inconsistently, the job records NO TRADE
-and the handler opens no ledger, writes no order and never falls back to the
-legacy `flow_momentum` rule.
+decision before storing its result. Promotion stays an explicit, reviewed call:
+`promote_with_evidence` for production, `promote_exploratory` for research, and
+`rollback` to restore a previous champion. `paper.advance` selects the champion of
+`symbol:timeframe` through `ChampionProvider`. If the archive is absent, has no
+champion, the champion is exploratory/manual (`NoEvidenceChampion`), or the
+stored payload fails DSL validation or hashes inconsistently, the job records NO
+TRADE and the handler opens no ledger, writes no order and never falls back to
+the legacy `flow_momentum` rule.
 
 ### Outcome attribution
 
@@ -492,7 +661,8 @@ cd backend
 uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
-  tests/test_orchestrator_handlers.py tests/test_orchestrator_resources.py -q
+  tests/test_orchestrator_handlers.py tests/test_orchestrator_resources.py \
+  tests/test_orchestrator_daemon.py -q
 uv run pytest
 ```
 
@@ -502,8 +672,10 @@ gating, dependency order, dependency failure to `skipped` (including a cascade),
 retry backoff bounds and exhaustion, permanent failures, cancel while queued and
 while running, pause/resume/safe-mode/disable-research (including persistence
 across a reopen), crash recovery with and without attempts left, one heavy job,
-guard refusal without spending an attempt, event-log completeness, and
-file-trigger dedupe across a store restart. The handler tests cover a real
+guard refusal without spending an attempt, the deferral cap turning a starved
+job terminal, the v1→v2 deferral migration, event-log completeness,
+`run_until_idle(should_stop=...)`, and file-trigger dedupe across a store
+restart. The handler tests cover a real
 ingest/index/extract round trip, checksum idempotency, dataset manifest
 reproducibility, an unknown symbol refusal, a real bounded discovery run that
 records no promotion, a no-champion NO TRADE that writes nothing, a governed
@@ -520,3 +692,19 @@ real `SystemProbe` on the host; `measure` recording finite wall/CPU/RSS values
 and a failed block without masking it; a bounded sample ring; JSON-safe
 payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
 job with the measured reason in its event log.
+
+The daemon tests cover: config bounds and profile/type selection; tick scans
+before it drains; trigger dedupe across ticks; pause and safe mode still scan and
+enqueue but claim nothing; disabled research leaves research queued while
+ingestion runs; a guard refusal defers without spending an attempt and records
+its reason; the deferral cap fails the job after the configured refusals; a
+raised heavy handler does not stop a later paper job on the next tick; recovery
+happens once, `start()` is idempotent and keeps one worker thread; a stop during
+blocked recovery is not lost and leaves no thread; `stop()` joins the loop from
+the caller thread and slices a 60 s poll into ≤0.25 s waits; the drain stops
+between jobs; `:memory:` is rejected by `start()` and stays single-threaded for
+`status()`; `status()` is readable from another thread for a file store and is
+JSON-safe; the CLI `--once` exits 2 on a tick error but 0 on a job failure;
+`--forever` reports a dead worker with exit 1; and `--watch-dir` enqueues a
+document once and dedupes the second pass.
+
