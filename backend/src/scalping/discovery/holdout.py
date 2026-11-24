@@ -122,6 +122,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             policy_id TEXT,
             policy_version INTEGER,
             evidence_checksum TEXT,
+            decision_json TEXT,
             sealed_at TEXT NOT NULL,
             sealed_by TEXT NOT NULL,
             spent_at TEXT,
@@ -346,6 +347,7 @@ class HoldoutRecord:
     policy_id: str | None
     policy_version: int | None
     evidence_checksum: str | None
+    decision_json: str | None
     sealed_at: str
     sealed_by: str
     spent_at: str | None
@@ -586,6 +588,7 @@ def _row_to_record(row: sqlite3.Row) -> HoldoutRecord:
         evidence_checksum=(
             None if row["evidence_checksum"] is None else str(row["evidence_checksum"])
         ),
+        decision_json=None if row["decision_json"] is None else str(row["decision_json"]),
         sealed_at=str(row["sealed_at"]),
         sealed_by=str(row["sealed_by"]),
         spent_at=None if row["spent_at"] is None else str(row["spent_at"]),
@@ -1121,6 +1124,18 @@ class HoldoutLedger:
                 detail="an accepted decision has no usable evidence checksum",
             )
 
+        try:
+            decision_payload = canonical_json(decision.to_dict())
+        except (TypeError, ValueError) as exc:
+            self._refuse(
+                action="unlock",
+                actor=actor,
+                reason="invalid_decision",
+                dataset_id=record.dataset_id,
+                dataset_checksum=record.dataset_checksum,
+                detail=f"the decision payload is not canonical JSON: {exc}",
+            )
+
         token = secrets.token_urlsafe(32)
         digest = _token_digest(token)
         unlock_token = HoldoutToken(
@@ -1145,6 +1160,7 @@ class HoldoutLedger:
                        policy_id = ?,
                        policy_version = ?,
                        evidence_checksum = ?,
+                       decision_json = ?,
                        spent_at = ?,
                        unlocked_by = ?,
                        unlock_token = ?
@@ -1157,6 +1173,7 @@ class HoldoutLedger:
                     decision.policy_id,
                     decision.version,
                     decision.evidence_checksum,
+                    decision_payload,
                     stamp,
                     actor,
                     digest,
@@ -1258,6 +1275,27 @@ class HoldoutLedger:
             dataset_checksum=record.dataset_checksum,
             detail="the holdout is not spent or is not available for evaluation",
         )
+
+    def _invalidate_token(self, record: HoldoutRecord, digest: str) -> None:
+        """Burn the token after a failed evaluation.
+
+        The holdout is already spent at this point. Clearing the token means a
+        retry cannot look like an in-progress evaluation forever: it is refused
+        as an invalid token, and the result stays absent. That is the one-shot
+        rule applied to failure as well as success.
+        """
+        with self._transaction() as tx:
+            tx.execute(
+                """
+                UPDATE holdouts
+                   SET unlock_token = NULL
+                 WHERE dataset_id = ?
+                   AND dataset_checksum = ?
+                   AND result_json IS NULL
+                   AND unlock_token = ?
+                """,
+                (record.dataset_id, record.dataset_checksum, digest),
+            )
 
     def _save_result(self, record: HoldoutRecord, digest: str, result: LockedHoldoutResult) -> None:
         payload = canonical_json(result.to_dict())
@@ -1743,6 +1781,10 @@ def evaluate_holdout(
         )
         result = replace(result, checksum=_result_checksum(result))
     except HoldoutError as exc:
+        try:
+            ledger._invalidate_token(record, digest)
+        except HoldoutError:  # pragma: no cover - the original refusal is more useful
+            pass
         ledger._log(
             action="evaluate",
             outcome="refused",
@@ -1754,6 +1796,10 @@ def evaluate_holdout(
         )
         raise
     except Exception as exc:
+        try:
+            ledger._invalidate_token(record, digest)
+        except HoldoutError:  # pragma: no cover - the original failure is more useful
+            pass
         ledger._log(
             action="evaluate",
             outcome="refused",
@@ -1765,7 +1811,23 @@ def evaluate_holdout(
         )
         raise HoldoutError("holdout_evaluation_failed", str(exc)) from exc
 
-    ledger._save_result(record, digest, result)
+    try:
+        ledger._save_result(record, digest, result)
+    except HoldoutError as exc:
+        try:
+            ledger._invalidate_token(record, digest)
+        except HoldoutError:  # pragma: no cover - the original failure is more useful
+            pass
+        ledger._log(
+            action="evaluate",
+            outcome="refused",
+            actor=actor,
+            reason=exc.code,
+            dataset_id=record.dataset_id,
+            dataset_checksum=record.dataset_checksum,
+            detail=str(exc),
+        )
+        raise
     return result
 
 

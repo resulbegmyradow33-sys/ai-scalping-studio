@@ -263,6 +263,8 @@ def test_seal_spend_once_and_reuse_refused(
         assert spent.spent_at is not None
         assert spent.policy_id == PROMOTION_V1.policy_id
         assert spent.policy_version == PROMOTION_V1.version
+        assert spent.decision_json is not None
+        assert EVIDENCE_CHECKSUM in spent.decision_json
 
         result = evaluate_holdout(
             bundle,
@@ -515,6 +517,50 @@ def test_an_invalid_token_does_not_read_or_spend_the_result(
             bundle, SPEC, holdout_config(features), ledger=ledger, unlock_token=token
         )
         assert result.checksum
+
+
+def test_a_failed_evaluation_still_spends_the_holdout(
+    tmp_path: Path,
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    features, bundle = discovery
+    spec = holdout_spec(bundle)
+
+    with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
+        ledger.seal(spec)
+        token = ledger.unlock(spec, decision=accepted_decision(bundle), policy=PROMOTION_V1)
+
+        with pytest.raises(HoldoutError) as exc:
+            evaluate_holdout(
+                bundle,
+                SPEC,
+                holdout_config(None),
+                ledger=ledger,
+                unlock_token=token,
+            )
+        assert exc.value.code == "missing_features"
+
+        record = ledger.get(bundle.manifest.dataset_id, bundle.manifest.checksum)
+        assert record is not None
+        assert record.status == "spent"
+        assert record.result_json is None
+        assert record.unlock_token is None
+        assert any(
+            entry.action == "evaluate"
+            and entry.outcome == "refused"
+            and entry.reason == "missing_features"
+            for entry in ledger.access_entries()
+        )
+
+        with pytest.raises(HoldoutError) as retry:
+            evaluate_holdout(
+                bundle,
+                SPEC,
+                holdout_config(features),
+                ledger=ledger,
+                unlock_token=token,
+            )
+        assert retry.value.code == "holdout_invalid_token"
 
 
 def test_ledger_survives_reopen(
