@@ -240,6 +240,59 @@
         "action"
       ]
     },
+    "DataQualityResponse": {
+      "enums": {
+        "status": [
+          "ok",
+          "warn",
+          "fail"
+        ]
+      },
+      "properties": {
+        "configured": "boolean",
+        "crossed_quotes": "integer | null",
+        "duplicates": "integer | null",
+        "first_ts": "string | null",
+        "gaps": "integer | null",
+        "issues": "array<object>",
+        "last_ts": "string | null",
+        "negative_spread": "integer | null",
+        "negative_volume": "integer | null",
+        "ohlc_violations": "integer | null",
+        "outliers": "integer | null",
+        "outliers_checked": "boolean",
+        "provenance": "object | null",
+        "rows": "integer",
+        "status": "enum[ok|warn|fail]",
+        "status_detail": "string",
+        "status_rule": "string",
+        "symbol": "string",
+        "thresholds": "object",
+        "timeframe": "string"
+      },
+      "required": [
+        "configured",
+        "crossed_quotes",
+        "duplicates",
+        "first_ts",
+        "gaps",
+        "issues",
+        "last_ts",
+        "negative_spread",
+        "negative_volume",
+        "ohlc_violations",
+        "outliers",
+        "outliers_checked",
+        "provenance",
+        "rows",
+        "status",
+        "status_detail",
+        "status_rule",
+        "symbol",
+        "thresholds",
+        "timeframe"
+      ]
+    },
     "DataStatusResponse": {
       "properties": {
         "first_ts": "string | null",
@@ -1005,6 +1058,18 @@
       "request": null,
       "responses": {
         "200": "AutonomyStatus"
+      }
+    },
+    "GET /api/data/quality": {
+      "query": {
+        "include_outliers": "boolean",
+        "symbol": "string!",
+        "timeframe": "string"
+      },
+      "request": null,
+      "responses": {
+        "200": "DataQualityResponse",
+        "422": "HTTPValidationError"
       }
     },
     "GET /api/data/status": {
