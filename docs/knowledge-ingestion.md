@@ -257,7 +257,8 @@ feature groups, a suggested strategy skeleton **as three text fields**
 governance state.
 
 The proposal id is a lowercase sha256 over the immutable payload (hypothesis,
-citations, scope, kind, data requirement, skeleton text). Source citations are
+citations, scope, kind, data requirement, skeleton text), using the
+`scalping.knowledge.experiment_proposal.v2` payload schema. Source citations are
 sorted before hashing, so the same citations in a different order produce the
 same id; the record still shows them in the order the hypothesis supplied.
 Status, approval and conversion are excluded, so the same scope always has one
@@ -265,10 +266,12 @@ id while governance changes stay auditable. Re-creating the same record returns
 the stored row. A rejected id is terminal: creating it again raises
 `already_rejected`, so a re-test needs a new hypothesis.
 
-`kind_source` (`classified` or `supplied`) is part of the payload and the stored
-row. It says whether `hypothesis_kind` came from the deterministic sentence
-classifier or was passed in explicitly for an imported record; it is hashed, so
-the two provenances cannot share an id.
+`kind_source` (`classified`, `supplied` or `legacy`) is part of the payload and
+the stored row. It says whether `hypothesis_kind` came from the deterministic
+sentence classifier, was passed in explicitly for an imported record, or was
+migrated from schema v1, which had no such field. It is hashed for new records,
+so classified and supplied provenances cannot share an id. `legacy` exists only
+on migrated rows and `create()` refuses it.
 
 ### Routing rules
 
@@ -293,9 +296,10 @@ remains visible in the two records.
 `RoutingError.code` is one of: `missing_source`, `bad_status`, `unknown_scope`,
 `already_converted`, `already_rejected`, `not_approved`, `unknown_proposal`,
 `unknown_hypothesis`, `unsupported_kind`, `unverified_quote`,
-`invalid_proposal`. The first six are governance moves; `unknown_hypothesis`
-and `invalid_proposal` cover provenance and payload integrity, and
-`unverified_quote` means a citation does not literally occur in its section.
+`invalid_proposal`. Payload/provenance codes are `missing_source`,
+`unverified_quote`, `unknown_hypothesis`, `unsupported_kind` and
+`invalid_proposal`; `unknown_scope` covers registry scope; the rest are
+lifecycle and governance refusals.
 
 Required data is recorded rather than fetched. `required_columns` is the bar
 schema an experiment needs (OHLC, spread for costs, volume); `required_groups`
@@ -313,15 +317,33 @@ index: WAL, `busy_timeout`, foreign keys, `synchronous = NORMAL`,
 2 adds `kind_source` and the decision log by additive migration. The store keeps
 proposals, their source refs and the append-only decision log.
 
+Schema 2 does **not** rewrite schema-v1 primary keys. v1 hashed proposals
+without `kind_source` and without sorting citations, so a rehash would change
+every id; instead migration keeps the old id, sets `kind_source='legacy'` and
+backfills `proposal_decisions` from the `approval_*` columns (an approved or
+rejected row gets one row, a converted row gets approved then converted). An
+approve-then-reject sequence from v1 cannot be reconstructed because v1
+overwrote the approval; migration records the surviving decision only.
+`create()` looks up both the schema-v2 id and the computed v1 id for the same
+payload, so the post-migration row is found, a rejected idea stays rejected and
+the same scope cannot be stored twice. Because a migrated row keeps its v1 id,
+use the record returned by `create()` for later governance calls rather than the
+id of the draft you passed in.
+
 `create(proposal, *, index)` is the persistence boundary. It re-checks
 provenance against the knowledge index even when the record came from
-`propose_from_hypothesis`: the `hypothesis_id` must exist, every cited document
-must be `indexed`, every section must exist, and every quote must be a
-normalised (case-folded, whitespace-collapsed) substring of that section's text.
-It accepts only `status="proposed"` records with no approval and no conversion.
-Approval is a separate, audited call; a hand-built approved record cannot
-bypass the gate. A rejected proposal id stays rejected: re-creating it raises
-`already_rejected`.
+`propose_from_hypothesis`: the hypothesis must be `proposed` or `testing`, its
+citation multiset must equal the proposal's citations, every cited document must be
+`indexed`, every section must exist, and every quote must be a normalised
+(case-folded, whitespace-collapsed) substring of that section's text. Comparing
+citation multisets is structural; the module does not prove that the free-text DSL
+skeleton paraphrases the hypothesis. `required_columns` and `required_groups`
+must be non-empty, duplicate-free tuples from the documented vocabularies, and
+the row is read back inside the insert transaction so a malformed payload rolls
+back instead of leaving a corrupt row. It accepts only `status="proposed"`
+records with no approval and no conversion. Approval is a separate, audited
+call; a hand-built approved record cannot bypass the gate. A rejected proposal
+id stays rejected: re-creating it raises `already_rejected`.
 
 `proposal_decisions(proposal_id, from_status, to_status, actor, reason, at)` is
 append-only and is written in the same `BEGIN IMMEDIATE` transaction as the
@@ -329,6 +351,12 @@ status update. Rejecting an approved proposal adds a second row
 (`approved -> rejected`) instead of erasing the approval. `decisions(proposal_id)`
 returns the log oldest first, and the current `status` always equals the last
 row's `to_status`.
+
+The append-only guarantee is an **API-level boundary**, not a database-enforced
+one. `ProposalStore.connection` exposes the raw SQLite handle and
+`proposal_decisions` cascades from `proposals`, so direct SQL can edit or delete
+history. Governance goes through the methods; raw SQL is for read-only
+diagnostics.
 
 | Status | Entered by | Approval fields | In queue |
 |---|---|---|---|
@@ -419,12 +447,15 @@ experiment links.
 
 `backend/tests/test_hypothesis_routing.py` covers proposal creation from an
 extracted hypothesis, missing/unresolvable sources, persistence-boundary
-provenance checks (unknown hypothesis, unindexed document, missing section,
-fabricated quote, normalised quote match), refusal of supported and rejected
-hypotheses, unknown symbol/timeframe/kind, approve/reject audit including
-approve→reject history, one-time candidate linking with a required hash and
-actor, queue filtering, deterministic order-independent ids, `kind_source`
-recording, reopen persistence and the absence of strategy/order/network imports.
+provenance checks (unknown hypothesis, terminal hypothesis status, missing
+section, citation ownership, fabricated quote, normalised quote match), refusal
+of supported and rejected hypotheses, unknown symbol/timeframe/kind,
+approve/reject audit including approve→reject history, one-time candidate
+linking with a required hash and actor, queue filtering, deterministic
+order-independent ids, `kind_source` recording, required-data validation,
+read-back rollback, schema-v1→v2 migration with backfilled decisions,
+concurrent rejected inserts, reopen persistence and the absence of
+strategy/order/network imports.
 
 Run:
 
@@ -460,9 +491,21 @@ uv run mypy src
 - Proposal ids are deterministic, so a rejected payload cannot be re-proposed
   under the same hypothesis and scope: `create()` raises `already_rejected`. A
   re-test requires a new hypothesis and therefore a new id.
+- Migrated v1 rows keep their v1 ids. The dual lookup matches a new proposal to
+  a v1 row only when the rest of the payload is identical; a v1 row created
+  with a caller-supplied kind that the classifier now derives differently is a
+  different payload and will not match.
+- The v1 decision backfill cannot invent history. A row that was approved and
+  then rejected before schema 2 shows only the surviving rejection; converted
+  rows show the reconstructed approval and conversion.
+- The append-only decision log is an API-level boundary. `connection` exposes
+  raw SQL and the table cascades from `proposals`, so direct SQL can edit or
+  delete it.
 - The decision log is append-only and unbounded; there is no pruning or
   archival policy yet. It records governance moves, not experiment evidence.
 - Quote verification is a normalised substring test. It catches fabricated or
   paraphrased citations but cannot detect a real quote used out of context.
+- Citation-ownership checking compares multisets; it does not prove that the DSL
+  skeleton text paraphrases the hypothesis.
 - Keyword-based `required_groups` is a planning hint and can over- or
   under-select feature groups. It never changes an experiment's actual data.

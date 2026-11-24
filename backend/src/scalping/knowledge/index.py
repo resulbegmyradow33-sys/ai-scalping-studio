@@ -836,16 +836,6 @@ class KnowledgeIndex:
 
     # --------------------------------------------------------------- hypotheses
 
-    def hypothesis_exists(self, hypothesis_id: str) -> bool:
-        """Whether a hypothesis row exists; a read-only existence check."""
-        hypothesis_id = _require_text(hypothesis_id, "hypothesis_id")
-        row = (
-            self._connection()
-            .execute("SELECT 1 FROM hypotheses WHERE hypothesis_id = ?", (hypothesis_id,))
-            .fetchone()
-        )
-        return row is not None
-
     def create_hypothesis(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate to :func:`scalping.knowledge.hypothesis.create_hypothesis`."""
         from scalping.knowledge.hypothesis import create_hypothesis

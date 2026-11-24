@@ -28,6 +28,12 @@ hypothesis, scope and skeleton always produce the same id. Source citations are
 sorted before hashing, so citation order does not change the id. Status,
 approval and conversion are mutable governance fields and are not part of the
 hash.
+
+Schema 2 keeps schema-v1 primary keys instead of rewriting them. A v1 id was
+hashed without ``kind_source`` and without sorted citations, so
+``ProposalStore.create`` looks up both the v2 id and the computed v1 id for the
+same payload; a migrated row is found, a rejected one stays rejected, and the
+same scope is not stored twice.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ import re
 import sqlite3
 import time
 import unicodedata
+from collections import Counter
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -54,6 +61,7 @@ __all__ = [
     "APPROVAL_STATUSES",
     "PROPOSAL_BAR_COLUMNS",
     "PROPOSAL_GROUPS",
+    "PROPOSAL_KIND_SOURCES",
     "PROPOSAL_SCHEMA_VERSION",
     "PROPOSAL_STATUSES",
     "ROUTING_ERROR_CODES",
@@ -63,6 +71,7 @@ __all__ = [
     "ProposalStore",
     "RoutingError",
     "canonical_proposal_id",
+    "legacy_proposal_id",
     "proposals_for_queue",
     "propose_from_hypothesis",
 ]
@@ -72,6 +81,10 @@ PROPOSAL_STATUSES: frozenset[str] = frozenset({"proposed", "approved", "rejected
 
 #: Statuses that carry a recorded human decision.
 APPROVAL_STATUSES: frozenset[str] = frozenset({"approved", "rejected", "converted"})
+
+#: Where ``hypothesis_kind`` came from. ``legacy`` belongs only to rows written by
+#: schema v1; ``create`` refuses it, so a fresh record is never unattributed.
+PROPOSAL_KIND_SOURCES: frozenset[str] = frozenset({"classified", "supplied", "legacy"})
 
 #: Machine-readable refusal codes. ``RoutingError.code`` is always one of these.
 ROUTING_ERROR_CODES: frozenset[str] = frozenset(
@@ -233,7 +246,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         ),
     ),
     2: (
-        "ALTER TABLE proposals ADD COLUMN kind_source TEXT NOT NULL DEFAULT 'classified'",
+        "ALTER TABLE proposals ADD COLUMN kind_source TEXT NOT NULL DEFAULT 'legacy'",
         """
         CREATE TABLE IF NOT EXISTS proposal_decisions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -252,6 +265,41 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS proposal_decisions_proposal_idx"
             " ON proposal_decisions(proposal_id, id)"
         ),
+        # Backfill the governance history v1 only kept in approval_* columns.
+        # An approve-then-reject sequence cannot be reconstructed (v1
+        # overwrote the approval), so a rejected row gets one honest row.
+        """
+        INSERT INTO proposal_decisions (
+            proposal_id, from_status, to_status, actor, reason, at
+        )
+        SELECT proposal_id, 'proposed', 'approved', approval_actor, approval_reason,
+               approval_at
+        FROM proposals
+        WHERE status IN ('approved', 'converted')
+          AND approval_actor IS NOT NULL
+        """,
+        """
+        INSERT INTO proposal_decisions (
+            proposal_id, from_status, to_status, actor, reason, at
+        )
+        SELECT proposal_id, 'approved', 'converted', approval_actor,
+               'legacy conversion: candidate ' || converted_candidate_hash
+                   || ' on dataset ' || dataset_id,
+               updated_at
+        FROM proposals
+        WHERE status = 'converted'
+          AND converted_candidate_hash IS NOT NULL
+        """,
+        """
+        INSERT INTO proposal_decisions (
+            proposal_id, from_status, to_status, actor, reason, at
+        )
+        SELECT proposal_id, 'proposed', 'rejected', approval_actor, approval_reason,
+               approval_at
+        FROM proposals
+        WHERE status = 'rejected'
+          AND approval_actor IS NOT NULL
+        """,
     ),
 }
 
@@ -382,6 +430,30 @@ def _text(value: object, field: str) -> str:
     return text
 
 
+def _string_items(value: object, field: str, allowed: tuple[str, ...]) -> tuple[str, ...]:
+    """Validate a stored-as-JSON string tuple before it is written.
+
+    Reading a malformed row back raises, so a bad tuple is caught here rather
+    than after commit. Membership and duplicate checks keep the record within
+    the documented planning vocabulary.
+    """
+    if not isinstance(value, tuple):
+        raise RoutingError("invalid_proposal", f"{field} must be a tuple of strings")
+    if not value:
+        raise RoutingError("invalid_proposal", f"{field} must not be empty")
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, str) or item not in allowed:
+            raise RoutingError(
+                "invalid_proposal",
+                f"{field} entry {item!r} is not one of {', '.join(allowed)}",
+            )
+        if item in seen:
+            raise RoutingError("invalid_proposal", f"{field} contains duplicate {item!r}")
+        seen.add(item)
+    return value
+
+
 def _canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(
         dict(payload),
@@ -390,6 +462,10 @@ def _canonical_json(payload: Mapping[str, Any]) -> str:
         ensure_ascii=True,
         allow_nan=False,
     )
+
+
+_LEGACY_PAYLOAD_SCHEMA: Final[str] = "scalping.knowledge.experiment_proposal.v1"
+_PAYLOAD_SCHEMA: Final[str] = "scalping.knowledge.experiment_proposal.v2"
 
 
 def _payload(
@@ -408,7 +484,7 @@ def _payload(
     falsification_test: str,
 ) -> dict[str, Any]:
     return {
-        "schema": "scalping.knowledge.experiment_proposal.v1",
+        "schema": _PAYLOAD_SCHEMA,
         "hypothesis_id": hypothesis_id,
         "source_refs": [
             {
@@ -422,6 +498,52 @@ def _payload(
         "timeframe": timeframe,
         "hypothesis_kind": hypothesis_kind,
         "kind_source": kind_source,
+        "required_data": {
+            "columns": list(required_columns),
+            "groups": list(required_groups),
+        },
+        "dsl": {
+            "observation": dsl_observation,
+            "condition": dsl_condition,
+            "expected_effect": dsl_expected_effect,
+        },
+        "falsification_test": falsification_test,
+    }
+
+
+def _legacy_payload(
+    *,
+    hypothesis_id: str,
+    source_refs: tuple[SourceRef, ...],
+    symbol: str,
+    timeframe: str,
+    hypothesis_kind: str,
+    required_columns: tuple[str, ...],
+    required_groups: tuple[str, ...],
+    dsl_observation: str,
+    dsl_condition: str,
+    dsl_expected_effect: str,
+    falsification_test: str,
+) -> dict[str, Any]:
+    """The schema-v1 payload: no ``kind_source`` and citations in stored order.
+
+    v1 hashed refs exactly as supplied, so this function must not sort them:
+    the goal is to reproduce an existing id, not to canonicalise new ones.
+    """
+    return {
+        "schema": _LEGACY_PAYLOAD_SCHEMA,
+        "hypothesis_id": hypothesis_id,
+        "source_refs": [
+            {
+                "doc_id": ref.doc_id,
+                "section_ordinal": ref.section_ordinal,
+                "quote": ref.quote,
+            }
+            for ref in source_refs
+        ],
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "hypothesis_kind": hypothesis_kind,
         "required_data": {
             "columns": list(required_columns),
             "groups": list(required_groups),
@@ -473,6 +595,60 @@ def canonical_proposal_id(
         falsification_test=falsification_test,
     )
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def legacy_proposal_id(
+    *,
+    hypothesis_id: str,
+    source_refs: tuple[SourceRef, ...],
+    symbol: str,
+    timeframe: str,
+    hypothesis_kind: str,
+    required_columns: tuple[str, ...],
+    required_groups: tuple[str, ...],
+    dsl_observation: str,
+    dsl_condition: str,
+    dsl_expected_effect: str,
+    falsification_test: str,
+) -> str:
+    """The schema-v1 id for the same content, used only for compatibility.
+
+    Migration keeps v1 rows under their original id instead of rewriting the
+    primary key. ``ProposalStore.create`` computes this id as a second lookup so
+    a proposal built today finds the pre-migration row, which keeps a rejected
+    idea rejected and prevents the same scope from being stored twice.
+    """
+    payload = _legacy_payload(
+        hypothesis_id=hypothesis_id,
+        source_refs=source_refs,
+        symbol=symbol,
+        timeframe=timeframe,
+        hypothesis_kind=hypothesis_kind,
+        required_columns=required_columns,
+        required_groups=required_groups,
+        dsl_observation=dsl_observation,
+        dsl_condition=dsl_condition,
+        dsl_expected_effect=dsl_expected_effect,
+        falsification_test=falsification_test,
+    )
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _legacy_id_for(proposal: ExperimentProposal) -> str:
+    """The v1 id this payload would have had before schema 2."""
+    return legacy_proposal_id(
+        hypothesis_id=proposal.hypothesis_id,
+        source_refs=proposal.source_refs,
+        symbol=proposal.symbol,
+        timeframe=proposal.timeframe,
+        hypothesis_kind=proposal.hypothesis_kind,
+        required_columns=proposal.required_columns,
+        required_groups=proposal.required_groups,
+        dsl_observation=proposal.dsl_observation,
+        dsl_condition=proposal.dsl_condition,
+        dsl_expected_effect=proposal.dsl_expected_effect,
+        falsification_test=proposal.falsification_test,
+    )
 
 
 def _required_groups(text: str) -> tuple[str, ...]:
@@ -535,11 +711,37 @@ def _check_sources(index: KnowledgeIndex, refs: tuple[SourceRef, ...]) -> None:
 
 
 def _verify_provenance(index: KnowledgeIndex, proposal: ExperimentProposal) -> None:
-    """Persistence-boundary check: the cited hypothesis and sources must exist."""
-    if not index.hypothesis_exists(proposal.hypothesis_id):
+    """Persistence-boundary check: the cited hypothesis and sources must exist.
+
+    Two structural rules are enforced beyond resolving the documents: the
+    hypothesis must still be routable (``proposed``/``testing``), and the
+    proposal's citation set must equal the hypothesis's own citations. The
+    latter is a set comparison, not a semantic one: this module does not prove
+    that the free-text DSL skeleton paraphrases the hypothesis; that remains the
+    caller's responsibility and is visible in the payload.
+    """
+    hypothesis = index.get_hypothesis(proposal.hypothesis_id)
+    if hypothesis is None:
         raise RoutingError(
             "unknown_hypothesis",
             f"proposal cites unknown hypothesis {proposal.hypothesis_id!r}",
+        )
+    if hypothesis.status not in {"proposed", "testing"}:
+        raise RoutingError(
+            "bad_status",
+            f"hypothesis {proposal.hypothesis_id!r} is {hypothesis.status!r};"
+            " only proposed or testing hypotheses can back a proposal",
+        )
+    hypothesis_refs = Counter(
+        (ref.doc_id, ref.section_ordinal, ref.quote) for ref in hypothesis.source_refs
+    )
+    proposal_refs = Counter(
+        (ref.doc_id, ref.section_ordinal, ref.quote) for ref in proposal.source_refs
+    )
+    if hypothesis_refs != proposal_refs:
+        raise RoutingError(
+            "missing_source",
+            f"proposal citations do not match hypothesis {proposal.hypothesis_id!r}",
         )
     _check_sources(index, proposal.source_refs)
 
@@ -741,6 +943,13 @@ class ProposalStore:
     Conventions match the knowledge index: WAL, foreign keys, a versioned
     ``schema_version`` table and ``BEGIN IMMEDIATE`` writes. Not thread-safe;
     one connection belongs to the thread that opened it.
+
+    The append-only decision log and the status transitions are an **API-level
+    boundary**, not a database-enforced one. The public :attr:`connection`
+    exposes the raw SQLite handle, and ``proposal_decisions`` uses
+    ``ON DELETE CASCADE``; direct SQL can therefore edit or delete history. Use
+    :meth:`approve`, :meth:`reject`, :meth:`link_candidate` and
+    :meth:`decisions` for governance; raw SQL is for read-only diagnostics.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -766,6 +975,13 @@ class ProposalStore:
 
     @property
     def connection(self) -> sqlite3.Connection:
+        """The raw SQLite connection, for read-only diagnostics.
+
+        This is an API-level boundary: raw SQL can bypass the governance
+        methods and, because ``proposal_decisions`` cascades from ``proposals``,
+        can delete decision history. Do not use it for writes outside this
+        class.
+        """
         return self._connection()
 
     def _connection(self) -> sqlite3.Connection:
@@ -847,35 +1063,38 @@ class ProposalStore:
     # ------------------------------------------------------------------- writes
 
     def create(self, proposal: ExperimentProposal, *, index: KnowledgeIndex) -> ExperimentProposal:
-        """Persist a ``proposed`` record; repeating the same id returns it.
+        """Persist a ``proposed`` record; repeating the same payload returns it.
 
         The store is the persistence boundary, so it re-checks provenance even
         when the record came from :func:`propose_from_hypothesis`: the
-        hypothesis must exist in ``index``, every cited document must be
-        ``indexed``, every section must exist and each quote must appear in that
-        section. Only the ``proposed`` state may be inserted. Approval is a
-        separate, audited call, so importing a hand-built approved record cannot
-        bypass the gate.
+        hypothesis must still be ``proposed`` or ``testing``, every cited
+        document must be ``indexed``, every section must exist, each quote must
+        appear in that section and the citation set must match the hypothesis's
+        own citations. Only the ``proposed`` state may be inserted. Approval is
+        a separate, audited call, so importing a hand-built approved record
+        cannot bypass the gate.
 
-        A rejected proposal is terminal for this payload: creating it again
-        raises ``already_rejected``. A re-test needs a new hypothesis and
-        therefore a new payload id.
+        The lookup accepts both the schema-v2 id and the schema-v1 id of the same
+        payload. Migration keeps v1 primary keys, so without the second lookup a
+        pre-migration proposal could be inserted twice or a rejected one could be
+        approved. On a migrated store the returned record keeps its v1 id; call
+        ``approve``/``reject``/``link_candidate`` with the returned record's
+        ``proposal_id``, not the id of the freshly built draft.
+
+        A rejected payload is terminal: creating it again raises
+        ``already_rejected``. A re-test needs a new hypothesis and therefore a
+        new payload id.
         """
         if not isinstance(proposal, ExperimentProposal):
             raise TypeError("proposal must be an ExperimentProposal")
         if not isinstance(index, KnowledgeIndex):
             raise TypeError("index must be a KnowledgeIndex")
         self._check_payload(proposal)
-        existing = self.get(proposal.proposal_id)
-        if existing is not None:
-            if existing.status == "rejected":
-                raise RoutingError(
-                    "already_rejected",
-                    f"proposal {existing.proposal_id!r} was rejected;"
-                    " a re-test requires a new hypothesis",
-                )
-            return existing
         _verify_provenance(index, proposal)
+        existing = self._find_existing(proposal)
+        if existing is not None:
+            return existing
+        stored: ExperimentProposal | None = None
         try:
             with self.transaction() as tx:
                 tx.execute(
@@ -924,15 +1143,44 @@ class ProposalStore:
                             ref.quote,
                         ),
                     )
+                row = tx.execute(
+                    "SELECT * FROM proposals WHERE proposal_id = ?",
+                    (proposal.proposal_id,),
+                ).fetchone()
+                if row is None:
+                    raise KnowledgeIndexError("proposal insert did not return a row")
+                # Read back inside the transaction: a malformed stored payload
+                # must roll the insert back rather than leave a corrupt row.
+                stored = _load(self, row)
         except sqlite3.IntegrityError as exc:
-            concurrent = self.get(proposal.proposal_id)
+            concurrent = self._find_existing(proposal)
             if concurrent is not None:
                 return concurrent
             raise RoutingError("invalid_proposal", f"proposal could not be stored: {exc}") from exc
-        stored = self.get(proposal.proposal_id)
         if stored is None:
             raise KnowledgeIndexError("proposal insert committed but the row is missing")
         return stored
+
+    def _find_existing(self, proposal: ExperimentProposal) -> ExperimentProposal | None:
+        """Look up the payload under both id schemes; reject terminal rows.
+
+        A rejected row is returned as an error, never as an idempotent no-op, so
+        a concurrent insert that loses the race behaves exactly like a direct
+        re-proposal.
+        """
+        lookup = [proposal.proposal_id]
+        legacy = _legacy_id_for(proposal)
+        if legacy not in lookup:
+            lookup.append(legacy)
+        found = [record for proposal_id in lookup if (record := self.get(proposal_id)) is not None]
+        rejected = next((record for record in found if record.status == "rejected"), None)
+        if rejected is not None:
+            raise RoutingError(
+                "already_rejected",
+                f"proposal {rejected.proposal_id!r} was rejected;"
+                " a re-test requires a new hypothesis",
+            )
+        return found[0] if found else None
 
     def _check_payload(self, proposal: ExperimentProposal) -> None:
         if proposal.status != "proposed":
@@ -963,11 +1211,19 @@ class ProposalStore:
                 f"hypothesis_kind must be 'claim' or 'observation', got"
                 f" {proposal.hypothesis_kind!r}",
             )
-        if proposal.kind_source not in {"classified", "supplied"}:
+        if proposal.kind_source not in PROPOSAL_KIND_SOURCES:
             raise RoutingError(
                 "invalid_proposal",
-                f"kind_source must be 'classified' or 'supplied', got {proposal.kind_source!r}",
+                f"kind_source must be one of {sorted(PROPOSAL_KIND_SOURCES)}, got"
+                f" {proposal.kind_source!r}",
             )
+        if proposal.kind_source == "legacy":
+            raise RoutingError(
+                "invalid_proposal",
+                "kind_source 'legacy' belongs to migrated rows and cannot be created",
+            )
+        _string_items(proposal.required_columns, "required_columns", PROPOSAL_BAR_COLUMNS)
+        _string_items(proposal.required_groups, "required_groups", PROPOSAL_GROUPS)
         if proposal.symbol not in SYMBOLS:
             raise RoutingError("unknown_scope", f"unknown symbol {proposal.symbol!r}")
         if proposal.timeframe not in TIMEFRAMES:
