@@ -995,6 +995,36 @@ def _cmd_backtest_sensitivity(args: argparse.Namespace) -> None:
     _print_json(payload)
 
 
+# --- acceptance ---------------------------------------------------------------
+def _cmd_acceptance_run(args: argparse.Namespace) -> None:
+    """Run the synthetic end-to-end acceptance harness and print one JSON line."""
+    from scalping.acceptance import AcceptanceConfig, AcceptanceError, run_acceptance
+
+    try:
+        config = AcceptanceConfig(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            start=args.start,
+            days=args.days,
+            seed=args.seed,
+            window=args.window,
+            max_trials=args.max_trials,
+            paper_bars=args.paper_bars,
+            out=Path(args.out),
+            keep=args.keep,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    try:
+        result = run_acceptance(config)
+    except AcceptanceError as exc:
+        # The failed report is the command's normal output; the exit code gates it.
+        _print_json(exc.result.cli_dict())
+        raise _ExitCode(1) from exc
+    _print_json(result.cli_dict())
+
+
 # --- serve ---------------------------------------------------------------------
 def _bind(host: str, port: int) -> socket.socket:
     """Bind and listen before uvicorn starts, so a failure stays ours to report."""
@@ -1601,6 +1631,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     d_evidence.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     d_evidence.set_defaults(handler=_cmd_discovery_evidence)
+
+    acceptance = commands.add_parser(
+        "acceptance", help="run the synthetic end-to-end acceptance harness"
+    )
+    acceptance_commands = acceptance.add_subparsers(dest="acceptance_command", required=True)
+    acc_run = acceptance_commands.add_parser(
+        "run", help="execute every stage on a tiny deterministic synthetic store"
+    )
+    acc_run.add_argument(
+        "--out",
+        default="runs/acceptance",
+        help="directory that receives <acceptance-id>/report.json",
+    )
+    acc_run.add_argument(
+        "--keep",
+        action="store_true",
+        help="retain the temporary synthetic bar store after the run",
+    )
+    acc_run.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    acc_run.add_argument("--timeframe", default=TIMEFRAME)
+    acc_run.add_argument(
+        "--start",
+        type=_day,
+        default=date(2026, 1, 5),
+        help="first synthetic UTC day (default: a Monday)",
+    )
+    acc_run.add_argument("--days", type=int, default=1)
+    acc_run.add_argument("--seed", type=int, default=7)
+    acc_run.add_argument("--window", type=int, default=20)
+    acc_run.add_argument("--max-trials", type=int, default=6)
+    acc_run.add_argument("--paper-bars", type=int, default=120)
+    acc_run.set_defaults(handler=_cmd_acceptance_run)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")

@@ -123,3 +123,106 @@ P4 — Target-hardware acceptance:
   OOS validity or profitability.
 - All repository changes remain on reviewed branches; main is not edited
   directly. Resul retains final project acceptance authority.
+
+---
+
+## Second refresh — 2026-11-24 (main `693f8a37`)
+
+Verified main commit: `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875`
+(merge of #121). The sections above are left as written; where they conflict
+with this note, this note is current. Method: `git log`/`git show`, current
+source files, `gh pr`/`gh run` and targeted pytest (the five claim files passed;
+`test_api_autonomy.py` failed). No market data was used, no real holdout was
+spent, no M2 benchmark was run.
+
+### What landed since the first refresh
+
+| PR | State | Correct interpretation |
+|---|---|---|
+| #112 | Merged | Measured RSS/load/disk guard, fail-closed probe |
+| #114 | Merged | Chronological-fold evidence bundle (schema v2) |
+| #115 | Merged | Production orchestrator handlers |
+| #116 | Merged | Continuous paper operation, matured-outcome batches |
+| #117 | Merged | `PROMOTION_V1`: named, versioned, fail-closed policy; no empty policy, no force flag, locked OOS required |
+| #118 | Merged | Orchestrator daemon; `m2_8gb` guard profile by default |
+| #119 | **Open PR** | Knowledge table structure; not on main |
+| #121 | Merged | One-shot locked holdout with append-only access ledger |
+| #122 | Merged | Matured paper-outcome trigger; enqueues a proposal, not a promotion |
+| #123 / #132 | Merged | Hypothesis → audited experiment proposal; provenance/audit hardening |
+| #124 | Merged | Repeatable M2 pipeline measurement harness |
+| #128 | Merged | `/paper` page over the real `/api/paper` ledger |
+| #129 | Merged | Orchestrator end-to-end integration coverage |
+| #130 | Merged | `discovery reproduce` from bundle identity |
+| #131 | Merged | Paper-outcome trigger hardening |
+| #133 | Merged | MTF alignment semantics and feature-naming pins |
+| #134 | Merged | Read-only `/api/autonomy` status endpoints |
+| #135 | Merged | Phase 11 non-bypass risk acceptance suite |
+
+### Corrections to earlier wording
+
+- **Promotion is fail-closed, not a proposal.** #117 rejects an empty policy, a
+  version below 1, a disabled production `require_locked_oos`, a missing or
+  fabricated locked-OOS section, stale identity, insufficient folds/trades,
+  low expectancy/PF, deep drawdown, poor regime coverage, a CI touching zero,
+  missing cost stress, complexity over cap and trial overrun. It has **no
+  runtime call site**, so no production promotion exists.
+- **Reproduction has a consumer, not a producer.** #130 rebuilds a bundle from
+  its identity and refuses drift with typed codes. Nothing on main writes a
+  bundle or its dataset artifact; that is issue #136, still open. Treat
+  reproduce as implemented and tested, end-to-end unreachable.
+- **Autonomy API is read-only.** Every `/api/autonomy` route is `GET`; SQLite is
+  opened `mode=ro` with `query_only=ON`; a missing store answers
+  `configured:false`, an unreadable one `readable:false`. No dashboard page
+  consumes it.
+- **Paper page is read-only.** #128 renders `/api/paper`; it may close a running
+  session and does nothing else — no session creation, no runner step, no broker.
+- **Risk tests are acceptance, not smoke.** #135 runs the same bars through a
+  DSL policy, a raw action and a job payload against one frozen `RiskEngine`.
+- **MTF is tested but not a feature input.** M30/H4 alignment and chained
+  resampling are pinned; the feature layer still consumes M5/M15.
+- **Knowledge tables are open PR #119.** The task-board/audit lines that imply
+  table extraction is missing "and no PR exists" are stale; the line that says
+  the capability is absent on main is correct.
+
+### Known red on main
+
+`backend/tests/test_api_autonomy.py` fails with
+`AttributeError: 'DiscoveryArchive' object has no attribute 'promote'` in 4
+tests: #117 replaced the archive `promote` with the sealed evidence path and
+#134's tests still call the removed method. CI run `45424959773` (main at
+`6113197`) ended `4 failed, 1816 passed, 2 skipped`. The newest green main CI
+run found is `45422130310` at `2bbb312`. Earlier pushes after that were
+cancelled or failed, and the run at `693f8a3` was still in progress at refresh
+time. Do not cite a green CI for the current tree.
+
+### Reproduce the claims
+
+```bash
+cd backend
+uv run pytest tests/test_promotion_policy.py    # fail-closed policy + sealed decisions
+uv run pytest tests/test_locked_holdout.py      # seal, refusal, one spend
+uv run pytest tests/test_discovery_reproduce.py # checksum round-trip, typed refusals
+uv run pytest tests/test_risk_acceptance.py     # no bypass by spec/action/job
+uv run pytest tests/test_mtf_alignment.py       # HTF visibility after bucket close
+uv run pytest tests/test_api_autonomy.py        # read-only API (red on main)
+```
+
+```bash
+# One validation-slice discovery run; writes a decision, not a bundle
+uv run python -m scalping.cli discovery run \
+  --root ../data-ticks5-store --symbol XAUUSD --timeframe M5 \
+  --max-trials 64 --seed 0 --out runs/discovery/report.json
+
+# Replay a stored bundle once a producer exists (#136)
+uv run python -m scalping.cli discovery reproduce \
+  --bundle runs/discovery/candidate.evidence.json \
+  --store-root ../data-ticks5-store
+```
+
+### Still unproven
+
+No candidate has been validated on an independent chronological OOS, no real
+holdout has been spent, no promotion decision has been produced by a runtime, no
+paper session has been selected by a promotion decision, and nothing is
+paper-traded or profitable. The evidence vocabulary in `AGENTS.md` still applies unchanged:
+implemented ≠ validated ≠ paper-traded ≠ profitable.

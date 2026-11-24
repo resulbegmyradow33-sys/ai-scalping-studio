@@ -233,6 +233,39 @@ count. `/status` opens the archive once and derives both sections from that
 snapshot. `events.detail` is deliberately withheld: it can contain local paths
 or handler errors that are outside the status contract.
 
+### Autonomy page (`/autonomy`)
+
+`frontend/src/app/autonomy/page.tsx` is the operator view of those three reads
+(`/status`, `/jobs`, `/events`). It is read-only: the refresh button re-runs the
+GETs, and nothing on the page enqueues, cancels, pauses, promotes or starts a
+daemon. `autonomy/layout.tsx` gives the route its own document title
+(“Otonomi — AI Scalping Studio”).
+
+- **Sections.** Paper ledger counts (sessions, open positions, closed trades),
+  orchestrator queue and persisted controls (queued/running/failed, paused, safe
+  mode, research disabled, last event), champions per scope, discovery
+  run/decision counts and data symbols with a month partition.
+- **Honest states.** `configured: false` renders “yapılandırılmadı” and an
+  unreadable store renders “okunamıyor”; both replace the numbers and table
+  rows rather than showing zero. A count field absent from a readable response
+  renders `—`. A readable store that really answered zero shows zero, and an
+  empty champion list says NO TRADE is a valid outcome.
+- **Champion modes.** The badge separates `evidence` from `exploratory` and
+  `manual` (and an unrecognised or missing mode is labelled “kanıtsız”). The
+  section states that only an `evidence` champion may trade paper; every other
+  row is marked “paper dışı”.
+- **Bounded windows.** Jobs and events are newest-first windows of 25, 50 or 100
+  rows. The API has no offset, so the page exposes a window size and never
+  offers a “previous page” that does not exist.
+- **Accessibility.** Section headings, a paper-only notice, captions with
+  `scope` on every header cell, focusable scroll regions named by their
+  captions, labelled window selectors, `role="alert"` for failures and a single
+  polite live region announcing the last successful read.
+- **Tests.** `frontend/src/app/autonomy/page.test.tsx` covers loaded, missing,
+  unreadable, empty, error/retry, absent counts, champion modes and the
+  accessible table region; `frontend/src/components/nav.test.tsx` covers the
+  navigation link.
+
 ### Honest limits
 
 - **One daemon per database.** `BEGIN IMMEDIATE` keeps claims unique, but there
@@ -872,8 +905,9 @@ cd backend
 uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
-  tests/test_orchestrator_handlers.py tests/test_orchestrator_resources.py \
-  tests/test_orchestrator_daemon.py tests/test_orchestrator_integration.py -q
+  tests/test_orchestrator_cancel.py tests/test_orchestrator_handlers.py \
+  tests/test_orchestrator_resources.py tests/test_orchestrator_daemon.py \
+  tests/test_orchestrator_integration.py -q
 uv run pytest
 ```
 
@@ -893,6 +927,51 @@ records no promotion, a no-champion NO TRADE that writes nothing, a governed
 champion paper advance with queue dedupe, an invalid champion payload, closed-
 only outcome analysis with an open position excluded, and permanent failure for
 invalid payloads with the retry budget untouched.
+
+### Cancellation, retry and deferral contract
+
+`tests/test_orchestrator_cancel.py` pins the semantics that decide whether work
+may be banked or retried, separately from the store's single-transition tests:
+
+- **Cancel queued.** The row is terminal before any worker sees it. A second
+  cancel is a no-op with no second event, and a sibling job still runs.
+- **Cancel while running.** The handler is not stopped. After it returns, the loop
+  compares the row, writes one `cancelled_while_running` event and discards both
+  a successful and a failed result. Nothing is requeued.
+- **Cancel terminal or unknown.** A succeeded or failed row refuses cancellation
+  with `JobStateError`; an unknown id raises `UnknownJobError` and writes no
+  audit line.
+- **Retry.** Backoff is `base_seconds * factor ** (attempt - 1)`, capped at
+  `max_seconds`; the job is idle before its delay, spends one attempt per run and
+  fails after `max_retries + 1` attempts. `PermanentJobError` and
+  `HandlerResult.failure(..., permanent=True)` fail on the first attempt without a
+  `retry` event. The store's own `retry` guard refuses a spent budget
+  independently of the orchestrator.
+- **Defer ceiling.** A guard refusal restores the claimed attempt. After
+  `max_deferrals` refusals the next one turns the job `failed` with
+  `deferral cap reached ...` and a `defer_exhausted` event; the terminal claim is
+  not restored and the handler never ran.
+- **Drains.** `should_stop` is a boundary between jobs, never inside one. A pause
+  raised from a handler stops the current drain, and `resume()` lets the next one
+  finish the remainder. A cancelled dependency skips its dependents, cascading to
+  grandchildren, and a dedupe key still returns the failed job instead of
+  reviving it.
+
+Mutation check (each patch applied alone, run against this file, then reverted;
+the committed tree is green):
+
+| Mutation | Test that fails |
+|---|---|
+| delete the `current.status != "running"` guard in `core._execute` | `test_cancel_while_running_discards_the_result`, `..._a_failure_too` |
+| reduce `_fail`'s condition to `permanent` only (drop `attempts > max_retries`) | `test_retry_backoff_is_capped_then_terminal` (plus `test_cancel_terminal_job_is_refused` and the idempotent-enqueue test, which share the failure path) |
+| delete the `attempts > max_retries` guard in `store.retry` | `test_store_retry_refuses_a_spent_budget` |
+| delete the `defer_count >= max_deferrals` branch in `store.defer` | `test_defer_ceiling_turns_a_starved_job_terminal` |
+
+What remains unproven: cancellation is cooperative. There is no preemption, no
+signal, thread kill or cancellation token. A running handler keeps its CPU and
+I/O until it returns; only its result is discarded, and a handler that never
+returns holds the claimed row. Cancellation and pause are observed at loop
+boundaries, and no test drives two processes over one database.
 
 The measured-guard tests cover: disabled limits allow; each limit refuses at its
 boundary and allows just inside it; reasons carry the limit and the measured
