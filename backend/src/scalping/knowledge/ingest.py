@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Protocol
 from xml.etree import ElementTree
 
+from scalping.knowledge.tables import TableRecord, extract_tables
+
 __all__ = [
     "DocumentIngestionError",
     "DocumentIngestor",
@@ -44,8 +46,9 @@ __all__ = [
 SOURCES_DIRNAME = "sources"
 
 #: Version of the extraction behaviour, recorded with every document. Bump it
-#: when a parser change alters the text a document produces.
-PARSER_VERSION = "1"
+#: when a parser change alters the text a document produces. Version 2 adds
+#: structural table records; the paragraph text itself is unchanged.
+PARSER_VERSION = "2"
 
 #: Refuse absurdly large DOCX XML before it is parsed into memory. A real
 #: ``word/document.xml`` is a few megabytes; a zip bomb is not.
@@ -132,6 +135,7 @@ class DocumentRecord:
     status: str
     error: str | None = None
     sections: tuple[Section, ...] = field(default_factory=tuple)
+    tables: tuple[TableRecord, ...] = field(default_factory=tuple)
 
     @property
     def extracted(self) -> bool:
@@ -165,6 +169,7 @@ class DocumentRecord:
             "status": self.status,
             "error": self.error,
             "section_count": len(self.sections),
+            "table_count": len(self.tables),
         }
 
 
@@ -473,6 +478,9 @@ _FORMATS: dict[str, str] = {
     ".pdf": "pdf",
 }
 
+#: Formats whose extracted tables are stored with the document.
+_TABLE_FORMATS: frozenset[str] = frozenset({"docx", "html", "markdown"})
+
 
 def _extractor_for(suffix: str) -> TextExtractor:
     for extractor in _EXTRACTORS:
@@ -571,6 +579,7 @@ class DocumentIngestor:
         status = "indexed"
         error: str | None = None
         sections: tuple[Section, ...] = ()
+        tables: tuple[TableRecord, ...] = ()
         parser = "none"
         parser_version = PARSER_VERSION
 
@@ -581,6 +590,8 @@ class DocumentIngestor:
             sections = tuple(extractor.extract(stored))
             if not sections:
                 raise ExtractionError("no extractable text")
+            if document_format in _TABLE_FORMATS:
+                tables = extract_tables(stored, sections=sections).tables
         except UnsupportedFormat as exc:
             status = "unsupported"
             error = str(exc)
@@ -604,6 +615,7 @@ class DocumentIngestor:
             status=status,
             error=error,
             sections=sections,
+            tables=tables,
         )
 
     def extract(self, path: str | Path) -> list[Section]:
@@ -636,9 +648,7 @@ class DocumentIngestor:
         if candidate != base and not candidate.startswith(base + os.sep):
             raise DocumentIngestionError(f"destination escapes {base}: {candidate}")
 
-    def _preserve(
-        self, source: Path, directory: Path, target: Path, checksum: str
-    ) -> None:
+    def _preserve(self, source: Path, directory: Path, target: Path, checksum: str) -> None:
         """Copy atomically; the temp name lives in the final directory."""
         directory.mkdir(parents=True, exist_ok=True)
         self._check_within_root(target)

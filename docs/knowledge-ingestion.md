@@ -1,27 +1,32 @@
 # Knowledge ingestion and hypothesis research
 
-Phase 17, slice 1. This slice adds local, offline ingestion of research
-documents with provenance, deterministic text extraction, a searchable SQLite
-index and structured hypothesis records. It does not add a language model, a
-cloud service, OCR, claim classification or a document-to-order path.
+Phase 17, slice 1 added local, offline ingestion of research documents with
+provenance, deterministic text extraction, a searchable SQLite index and
+structured hypothesis records. Slice 2 adds structural table preservation for
+DOCX, HTML and Markdown (schema version 2) without OCR, a model or a new
+dependency.
 
 The code lives in `backend/src/scalping/knowledge/`:
 
 | Module | Responsibility |
 |---|---|
-| `ingest.py` | copy the original, checksum, detect format, extract sections |
-| `index.py` | SQLite documents/sections/chunks, FTS5 search, hypothesis tables |
+| `ingest.py` | copy the original, checksum, detect format, extract sections and tables |
+| `tables.py` | structural DOCX/HTML/Markdown table extraction |
+| `index.py` | SQLite documents/sections/chunks/tables, FTS5 search, hypothesis tables |
 | `hypothesis.py` | hypothesis record, source citations, status, experiment links |
 
 ## Supported formats
 
 | Extension | Recorded format | Parser | Version | Notes |
 |---|---|---|---|---|
-| `.txt` | `text` | `stdlib-text` | `1` | UTF-8 (BOM tolerated); form feeds split pages |
-| `.md`, `.markdown` | `markdown` | `stdlib-markdown` | `1` | ATX headings define sections; fenced code is not scanned |
-| `.html`, `.htm` | `html` | `html.parser` | `1` | scripts, styles, templates and titles are dropped; `h1`–`h6` define sections |
-| `.docx` | `docx` | `zipfile+ElementTree` | `1` | paragraph text from `word/document.xml`; heading styles define sections |
+| `.txt` | `text` | `stdlib-text` | `2` | UTF-8 (BOM tolerated); form feeds split pages; no tables |
+| `.md`, `.markdown` | `markdown` | `stdlib-markdown` | `2` | ATX headings define sections; fenced code is not scanned; pipe tables are extracted |
+| `.html`, `.htm` | `html` | `html.parser` | `2` | scripts, styles, templates and titles are dropped; `h1`–`h6` define sections; `<table>` is extracted |
+| `.docx` | `docx` | `zipfile+ElementTree` | `2` | paragraph text and `w:tbl` tables from `word/document.xml`; heading styles define sections |
 | `.pdf` | `pdf` | none | n/a | `status="unsupported"`: an optional parser must be installed explicitly |
+
+Version 2 adds table records; the paragraph text produced by every parser is
+unchanged from version 1.
 
 No dependency was added. PDF text extraction needs an optional parser and an
 implementation of the `TextExtractor` protocol; until then the ingestor returns
@@ -87,11 +92,26 @@ layout. Opening is idempotent.
 | `documents` | `doc_id` PK, unique `checksum`, filename, source/stored path, size, mtime, format, parser, parser version, imported_at, duplicate, status, error |
 | `sections` | id, `doc_id` FK, ordinal, heading path, label, text, `char_start`, `char_end`; unique `(doc_id, ordinal)` |
 | `chunks` | id, `section_id` FK, ordinal, text, token count, offsets; unique `(section_id, ordinal)` |
+| `tables` | id, `doc_id` FK, ordinal, section ordinal, kind, caption, heading, `header_json`, `rows_json`, search text, row/col counts, `char_start`, `char_end`; unique `(doc_id, ordinal)` |
 | `hypotheses` | id, statement, observed, proposed condition, expected effect, market/timeframe scope, assumptions JSON, falsification test, status, timestamps |
 | `hypothesis_sources` | hypothesis FK, position, document FK, section ordinal, quote |
 | `hypothesis_experiments` | hypothesis FK, experiment reference, position, linked_at |
 
-Sections and chunks are also deleted with their document (`ON DELETE CASCADE`).
+Sections, chunks and tables are deleted with their document (`ON DELETE
+CASCADE`).
+
+### Schema history
+
+| Version | Change |
+|---|---|
+| 1 | documents, sections, chunks, hypotheses, hypothesis sources/experiments |
+| 2 | `tables` (document tables with caption, header/rows JSON, counts, offsets) |
+
+Opening a version-1 database applies migration 2 in place; existing documents,
+sections, chunks and hypotheses are untouched and `tables(doc_id)` returns an
+empty list for them. Re-ingesting the same bytes (a duplicate record) inserts
+the missing tables once instead of requiring a full rebuild. A database with a
+newer version is still refused.
 
 ### Offsets
 
@@ -106,6 +126,72 @@ Chunk offsets are relative to their section, and `split_chunks` returns exact
 slices of at most 800 characters broken between words. A single word longer
 than the limit stays whole rather than producing a fake offset. The invariant
 lets a citation be sliced back out without guessing.
+
+### Tables
+
+`scalping.knowledge.tables.extract_tables(path, sections=None)` returns a
+`TableExtraction` with two parts:
+
+- `tables`: `TableRecord` values in document order (deterministic, never
+  reordered by size or score).
+- `problems`: one `TableProblem(kind, reason, char_start)` per malformed table.
+  Extraction reports and continues; it never raises for malformed content.
+
+A `TableRecord` carries:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `docx`, `html` or `markdown` |
+| `caption` | best effort; `""` when the format has none |
+| `heading` | heading path at the table, same `" > "` convention as sections |
+| `header` | header row, or `None` |
+| `rows` | body rows only; a tuple of tuples of cell strings |
+| `section_ordinal` | section the table belongs to, best effort (`0` when unknown) |
+| `row_count` | header (when present) plus body rows |
+| `col_count` | widest row after merged-cell expansion |
+| `char_start`, `char_end` | citation span, see below |
+
+Format rules:
+
+- **DOCX** — `w:tbl`/`w:tr`/`w:tc`. The first row is the header only when it
+  carries `w:tblHeader`; no style inspection guesses a header. A cell with
+  `w:gridSpan` keeps its text in the first slot; the extra slots are
+  placeholders. A `w:vMerge` continuation cell becomes one placeholder,
+  whatever its (normally empty) text. Rows shorter than the widest row are
+  padded with empty strings. Nested tables are not descended into.
+- **HTML** — `html.parser` with `<table>`, `<caption>`, `<thead>`, `<tbody>`,
+  `<tr>`, `<th>`, `<td>`. The first `<thead>` row, or the first body row when
+  every cell is `<th>`, is the header. `colspan` expands to placeholders;
+  `rowspan` reserves the covered slots in later rows as placeholders.
+  `script`, `style`, `noscript` and `template` content is ignored.
+- **Markdown** — a header line with `|` followed by an alignment delimiter row
+  (`---`, `:--`, `--:`, `:-:`); alignment is validated but not stored. Fenced
+  code blocks are skipped entirely. Cells are trimmed and `\|` escapes a pipe.
+  Ragged body rows are padded with empty strings (or truncated) and reported.
+  Inline code spans containing `|` are not protected; a pipe inside backticks
+  still splits the cell.
+
+Merged-cell placeholder policy: the covering cell keeps the text and every
+covered slot holds the literal `[[merged]]` (`MERGED_CELL`). The extractor
+never copies a value into slots it did not occupy, so "merged" is
+distinguishable from "repeated".
+
+Character offsets slice the raw text the extractor read:
+
+- Markdown and HTML: the decoded file text, starting at the header line or
+  `<table>`.
+- DOCX: the decoded `word/document.xml` payload inside the preserved archive,
+  starting at `<w:tbl>`.
+
+The DOCX body has no stable plain-text rendering, so pointing at the payload is
+the honest option; `char_start < char_end` still locates the element. Offsets
+are citations, not a promise that re-parsing the slice alone reproduces the
+record.
+
+Table text is not added to section text by this module. The existing paragraph
+extractors already include cell text (DOCX cell paragraphs, HTML visible text,
+Markdown source lines), so a value appears in a section exactly once and the
+table record is the structured view of the same source.
 
 ### Search
 
@@ -123,7 +209,17 @@ lets a citation be sliced back out without guessing.
   `MATCH` operators. The LIKE fallback escapes `%`, `_` and the escape
   character.
 
-The FTS object is created outside the versioned migrations: a Python build
+`index.search_tables(query, limit=10)` is a separate path over table text: the
+flattened rows (`flatten_table`, tabs between cells, newlines between rows),
+captions and heading paths. It returns `TableHit` values (`doc_id`, filename,
+`table_ordinal`, `section_ordinal`, kind, caption, heading, text, score) and
+uses `tables_fts` with the same `bm25`/`LIKE` policy, reported by
+`tables_search_backend`. Tables are not appended to `chunks`: a chunk belongs
+to a section and keeps exact section offsets, which a table chunk would break.
+A cell value is therefore searchable through `search_tables`, and often through
+`search` too because the source paragraphs/lines remain in section text.
+
+Both FTS objects are created outside the versioned migrations: a Python build
 without FTS5 must still open the same database, and the index never claims FTS5
 unless the virtual table was actually created.
 
@@ -251,6 +347,9 @@ with KnowledgeIndex("runs/knowledge.sqlite3") as index:
   package imports the strategy, backtest, paper-trading or API modules. A
   hypothesis can only be tested by a separate quantitative experiment; its
   prose is never executed.
+- **Tables are structure, not interpretation.** A table record reproduces
+  cells and their positions; it does not classify, score or trust them, and a
+  merged-cell placeholder is metadata rather than data.
 - **No LLM.** Parsing is deterministic stdlib code. The system does not claim to
   understand a book like a human, to have trained on a PDF, or to have language
   model embeddings. Ingestion is not training.
@@ -274,11 +373,18 @@ section/chunk offsets, FTS5 and LIKE search with limits, duplicate documents,
 failure records, hypothesis round trips with citations, status transitions and
 experiment links.
 
+`backend/tests/test_knowledge_tables.py` covers DOCX header/`w:tblHeader` and
+merged cells, HTML caption/`thead`/`colspan`/`rowspan`, Markdown alignment and
+fenced-code exclusion, malformed-table reporting, deterministic order, index
+round trips, table search (FTS5 and LIKE), v1→v2 migration with existing
+documents, cascade deletion, and the absence of network/`eval`/trading imports.
+
 Run:
 
 ```sh
 cd backend
-uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py -q
+uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py \
+  tests/test_knowledge_tables.py -q
 uv run ruff check src tests scripts
 uv run mypy src
 ```
@@ -286,14 +392,25 @@ uv run mypy src
 ## Limitations
 
 - PDF is unsupported until an optional parser is explicitly installed and
-  registered. Scanned documents need OCR, which is absent.
-- DOCX extraction reads paragraph text; tables become paragraph text but lose
-  their cell structure, and images are ignored.
+  registered. Scanned documents need OCR, which is absent. There is no OCR for
+  table images in any format.
+- Table extraction is structural, not semantic: complex layouts (nested DOCX
+  tables, floating/positioned tables, multi-page tables, vertical merges that
+  also carry content) may flatten or lose a cell. DOCX nested tables are not
+  descended into.
+- DOCX tables are detected by `w:tbl`/`w:tr`/`w:tc` only. Rows wrapped in
+  content controls (`w:sdt`) can be missed; column widths and cell borders are
+  not stored.
+- The DOCX offset points into `word/document.xml`, not at a rendered page.
+- Markdown pipe tables are recognised by the delimiter row; Setext headings,
+  tables inside block quotes and pipes inside inline code are not handled
+  specially.
 - Markdown relies on ATX headings; Setext headings are treated as body text.
 - HTML text is normalised (horizontal whitespace collapsed, blank lines
-  dropped); exact layout is not preserved.
-- The index stores the extracted text, not the source bytes; the preserved
-  original remains the authority.
+  dropped); exact layout is not preserved. A table without a closing
+  `</table>` is extracted up to its last parsed row and reported.
+- The index stores the extracted text and table records, not the source bytes;
+  the preserved original remains the authority.
 - Classification and extraction are pattern-based, not semantic; there is no
   LLM, no strategy routing and no feedback ingestion of backtest/paper logs in
   this slice.

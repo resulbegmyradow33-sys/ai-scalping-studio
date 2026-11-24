@@ -49,6 +49,7 @@ from scalping.knowledge.index import (
     KnowledgeIndexError,
     SearchHit,
     SectionRecord,
+    TableHit,
     split_chunks,
 )
 from scalping.knowledge.ingest import (
@@ -60,15 +61,26 @@ from scalping.knowledge.ingest import (
     TextExtractor,
     UnsupportedFormat,
 )
+from scalping.knowledge.tables import (
+    MERGED_CELL,
+    TABLE_KINDS,
+    TableExtraction,
+    TableProblem,
+    TableRecord,
+    extract_tables,
+    flatten_table,
+)
 
 __all__ = [
     "CHUNK_CHARS",
     "CLAIM_KINDS",
     "DEFAULT_FALSIFICATION",
     "HYPOTHESIS_STATUSES",
+    "MERGED_CELL",
     "SCHEMA_VERSION",
     "SEARCH_BACKENDS",
     "STATUS_TRANSITIONS",
+    "TABLE_KINDS",
     "ChunkRecord",
     "ClaimKind",
     "ClassifiedSentence",
@@ -86,12 +98,18 @@ __all__ = [
     "Section",
     "SectionRecord",
     "SourceRef",
+    "TableExtraction",
+    "TableHit",
+    "TableProblem",
+    "TableRecord",
     "TextExtractor",
     "UnsupportedFormat",
     "classify_document",
     "classify_sentence",
     "create_hypothesis",
     "extract_hypotheses",
+    "extract_tables",
+    "flatten_table",
     "get_hypothesis",
     "link_experiment",
     "list_hypotheses",
