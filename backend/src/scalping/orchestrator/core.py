@@ -28,13 +28,15 @@ queue for a CLI or a test, so its behaviour is reproducible without sleeping.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from scalping.orchestrator.store import (
     BlockedJob,
+    Event,
     Job,
     JobStateError,
     JobStats,
@@ -47,6 +49,7 @@ __all__ = [
     "Handler",
     "HandlerResult",
     "JobContext",
+    "JobStoreReader",
     "Orchestrator",
     "OrchestratorStatus",
     "PermanentJobError",
@@ -204,16 +207,107 @@ HandlerReturn = HandlerResult | Mapping[str, Any] | None
 Handler = Callable[[Job, "JobContext"], HandlerReturn]
 
 
+class JobStoreReader:
+    """The read-only slice of :class:`JobStore` a handler is allowed to see.
+
+    The orchestrator owns the queue: a handler reports what it found and the
+    loop decides whether another job exists. Handing the raw store to a handler
+    contradicted that (``context.store.enqueue`` was reachable), so the context
+    carries this facade instead. Reads and audit lines pass through; enqueue,
+    claim, retry, defer, cancel and every state write are absent and raise
+    ``AttributeError`` if a handler tries them.
+
+    ``append_event`` is deliberately exposed: a handler must be able to explain
+    a decision in the audit log, and that write cannot create work.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: JobStore) -> None:
+        if not isinstance(store, JobStore):
+            raise TypeError(f"store must be a JobStore, got {type(store).__name__}")
+        self._store = store
+
+    @property
+    def path(self) -> str | Path:
+        """The store's SQLite path, for an audit line that names its source."""
+        return self._store.path
+
+    def get(self, job_id: int) -> Job | None:
+        return self._store.get(job_id)
+
+    def list_jobs(
+        self,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[Job]:
+        return self._store.list_jobs(status=status, kind=kind, limit=limit)
+
+    def due(
+        self,
+        *,
+        kinds: Sequence[str] = (),
+        now: str | datetime | None = None,
+    ) -> list[Job]:
+        return self._store.due(kinds=kinds, now=now)
+
+    def has_due(
+        self,
+        *,
+        kinds: Sequence[str] = (),
+        now: str | datetime | None = None,
+    ) -> bool:
+        return self._store.has_due(kinds=kinds, now=now)
+
+    def count_running(self, *, kinds: Sequence[str] = ()) -> int:
+        return self._store.count_running(kinds=kinds)
+
+    def blocked_jobs(self) -> list[BlockedJob]:
+        return self._store.blocked_jobs()
+
+    def events(
+        self,
+        job_id: int | None = None,
+        *,
+        since_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[Event]:
+        return self._store.events(job_id, since_id=since_id, limit=limit)
+
+    def get_state(self, key: str) -> str | None:
+        return self._store.get_state(key)
+
+    def stats(self, *, now: str | datetime | None = None) -> JobStats:
+        return self._store.stats(now=now)
+
+    def append_event(
+        self,
+        event: str,
+        *,
+        job_id: int | None = None,
+        detail: str | None = None,
+        now: str | datetime | None = None,
+    ) -> Event:
+        return self._store.append_event(event, job_id=job_id, detail=detail, now=now)
+
+    def _cancel(self, job_id: int, reason: str | None) -> Job:
+        """Internal hook for :meth:`JobContext.cancel`; not part of the surface."""
+        return self._store.cancel(job_id, reason)
+
+
 @dataclass(frozen=True, slots=True)
 class JobContext:
     """Everything a handler may look at, and the only side effects it needs.
 
-    The context cannot enqueue or claim jobs on its own: a handler reports, the
-    orchestrator records. ``cancel`` is cooperative — it flips the row, and the
-    orchestrator refuses to bank a result for a cancelled job.
+    ``store`` is a :class:`JobStoreReader`: a handler can inspect jobs, events
+    and state, and append an audit line, but it cannot enqueue or claim. The
+    orchestrator records the result. ``cancel`` is cooperative — it flips the
+    row, and the orchestrator refuses to bank a result for a cancelled job.
     """
 
-    store: JobStore
+    store: JobStoreReader
     job: Job
     safe_mode: bool
     research_enabled: bool
@@ -224,7 +318,7 @@ class JobContext:
 
     def cancel(self, reason: str | None = None) -> Job:
         """Cancel the current job from inside its handler."""
-        return self.store.cancel(self.job.id, reason)
+        return self.store._cancel(self.job.id, reason)
 
     def cancelled(self) -> bool:
         """True when the row was cancelled after the handler started."""
@@ -588,7 +682,7 @@ class Orchestrator:
             return RunOutcome(status="no_handler", job=job, detail=error)
 
         context = JobContext(
-            store=self.store,
+            store=JobStoreReader(self.store),
             job=job,
             safe_mode=self.safe_mode_enabled,
             research_enabled=not research_disabled,

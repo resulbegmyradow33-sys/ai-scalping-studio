@@ -23,16 +23,25 @@ from pathlib import Path
 
 import pytest
 
-from scalping.orchestrator import JobStore, Orchestrator, ScanOutcome, scan_once
+from scalping.orchestrator import (
+    HandlerResult,
+    JobStore,
+    Orchestrator,
+    RetryPolicy,
+    ScanOutcome,
+    scan_once,
+)
 from scalping.orchestrator.paper_triggers import (
     EVENT_NOT_QUEUED,
     EVENT_RECEIVED,
+    EVENT_TRUNCATED,
     KIND_PAPER_OUTCOMES,
     PAPER_OUTCOME_FIELDS,
     REASON_EMPTY_BATCH,
     REASON_NO_DATASET_ID,
     REASON_NO_LEDGER,
     REASON_NO_STRATEGY_HASH,
+    REASON_TRUNCATED,
     PaperOutcomeTriggerSource,
     make_paper_outcome_handler,
     register_paper_outcome_handler,
@@ -57,28 +66,33 @@ def seed_session(
     open_positions: int = 0,
     pnl: float = 10.0,
     r_multiple: float = 1.0,
+    started_at: datetime = BASE,
+    exit_offset: timedelta = timedelta(minutes=5),
+    extra_config: dict[str, object] | None = None,
 ) -> None:
     """One paper session with the requested number of closed and open trades."""
     config: dict[str, object] = {}
     if dataset_id is not None:
         config = {"origin": "test", "data": {"dataset_id": dataset_id}}
+    if extra_config:
+        config = {**config, **extra_config}
     ledger.open_session(
         session_id,
         symbol=SYMBOL,
         timeframe=TIMEFRAME,
         strategy="dsl",
         model_version=model_version,
-        started_at=BASE,
+        started_at=started_at,
         config=config,
     )
     for index in range(closed):
-        entry = BASE + timedelta(minutes=10 * index)
+        entry = started_at + timedelta(minutes=10 * index)
         ledger.record_trade(
             session_id,
             side="long",
             entry_ts=entry,
             entry_price=2000.0,
-            exit_ts=entry + timedelta(minutes=5),
+            exit_ts=entry + exit_offset,
             exit_price=2001.0,
             lot=0.10,
             pnl=pnl,
@@ -86,7 +100,7 @@ def seed_session(
             exit_reason="take_profit",
         )
     for index in range(open_positions):
-        entry = BASE + timedelta(minutes=30 + 10 * index)
+        entry = started_at + timedelta(minutes=30 + 10 * index)
         order_id = ledger.record_order(
             session_id,
             signal_id=None,
@@ -414,3 +428,285 @@ def test_module_contains_no_discovery_training_or_order_path() -> None:
         "stable_baselines3",
     ):
         assert forbidden not in text
+
+
+# ------------------------------------------------------- coverage and truncation
+
+
+def test_activity_order_does_not_starve_a_busy_older_session(tmp_path: Path) -> None:
+    """A session that keeps closing trades is read before a newer quiet one."""
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(
+            ledger,
+            "busy",
+            started_at=BASE,
+            exit_offset=timedelta(days=10),
+        )
+        seed_session(
+            ledger,
+            "quiet",
+            started_at=BASE + timedelta(days=1),
+            exit_offset=timedelta(minutes=5),
+        )
+
+    store = JobStore(tmp_path / "jobs.db")
+    source = PaperOutcomeTriggerSource(ledger_path, store=store, max_sessions=1)
+    outcome = scan_once(Orchestrator(store), [source])
+
+    assert [job.payload["session_id"] for job in outcome.queued] == ["busy"]
+    store.close()
+
+
+def test_rotation_visits_every_session_beyond_the_cap(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        for index, name in enumerate(("s1", "s2", "s3")):
+            seed_session(
+                ledger,
+                name,
+                exit_offset=timedelta(minutes=5 + index),
+            )
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store, max_sessions=1)
+
+    visited: list[str] = []
+    for _ in range(3):
+        outcome = scan_once(orchestrator, [source])
+        assert len(outcome.queued) == 1
+        visited.append(str(outcome.queued[0].payload["session_id"]))
+
+    assert sorted(visited) == ["s1", "s2", "s3"]
+    # A full cycle later nothing is emitted again: coverage is not duplication.
+    fourth = scan_once(orchestrator, [source])
+    assert not fourth.queued
+    assert len(trigger_jobs(store)) == 3
+    store.close()
+
+
+def test_deferred_sessions_are_recorded_not_dropped(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "first", exit_offset=timedelta(minutes=10))
+        seed_session(ledger, "second", exit_offset=timedelta(minutes=5))
+
+    store = JobStore(tmp_path / "jobs.db")
+    outcome = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store, max_sessions=1)],
+    )
+    assert len(outcome.queued) == 1
+
+    summaries = [event for event in store.events() if event.event == EVENT_TRUNCATED]
+    assert len(summaries) == 1
+    summary = json.loads(summaries[0].detail or "{}")
+    assert summary["deferred"] == 1
+    assert summary["scanned"] == 1
+    assert summary["total"] == 2
+
+    truncated = [item for item in not_queued_events(store) if item["reason"] == REASON_TRUNCATED]
+    assert [item["session_id"] for item in truncated] == ["second"]
+    store.close()
+
+
+def test_partial_acknowledgement_reemits_only_the_unacked_trigger(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "alpha", exit_offset=timedelta(minutes=10))
+        seed_session(ledger, "beta", exit_offset=timedelta(minutes=5))
+
+    store = JobStore(tmp_path / "jobs.db")
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+
+    first = source.scan()
+    assert len(first) == 2
+    acknowledged = first[0]
+    source.seen([acknowledged])
+
+    second = source.scan()
+    assert len(second) == 1
+    assert second[0].payload["fingerprint"] != acknowledged.payload["fingerprint"]
+    assert second[0].payload["session_id"] == "beta"
+
+    # Acknowledging the rest converges: one cursor entry per emitted trigger.
+    source.seen(second)
+    assert source.scan() == []
+    store.close()
+
+
+# ------------------------------------------------------------- failure handling
+
+
+def test_transient_handler_failure_retries_before_the_batch_is_burned(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "complete")
+
+    calls = 0
+
+    def flaky(job, context):  # type: ignore[no-untyped-def]
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("provider hiccup")
+        return HandlerResult.success({"retried": True})
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(
+        store,
+        handlers={KIND_PAPER_OUTCOMES: flaky},
+        retry=RetryPolicy(base_seconds=1),
+    )
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+    now = datetime(2026, 1, 5, 12, tzinfo=UTC)
+
+    first = scan_once(orchestrator, [source], now=now)
+    assert len(first.queued) == 1
+    assert first.queued[0].max_retries >= 1
+
+    retried = orchestrator.run_once(now=now)
+    assert retried.status == "retry"
+    finished = orchestrator.run_once(now=now + timedelta(seconds=2))
+    assert finished.status == "succeeded"
+    assert finished.job is not None and finished.job.attempts == 2
+    assert len(trigger_jobs(store)) == 1
+
+    # The batch is not scanned again: the job consumed it only once.
+    again = scan_once(orchestrator, [source], now=now + timedelta(seconds=5))
+    assert not again.queued
+    store.close()
+
+
+# ------------------------------------------------------------------ provenance
+
+
+def test_payload_carries_provenance_and_unknown_is_not_false(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(
+            ledger,
+            "known",
+            started_at=BASE + timedelta(days=1),
+            extra_config={
+                "provenance": {"source": "provider:csv", "synthetic": True},
+            },
+        )
+        seed_session(ledger, "unknown", started_at=BASE)
+
+    store = JobStore(tmp_path / "jobs.db")
+    outcome = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store)],
+    )
+
+    by_session = {job.payload["session_id"]: job.payload for job in outcome.queued}
+    assert by_session["known"]["source"] == "provider:csv"
+    assert by_session["known"]["synthetic"] is True
+    assert by_session["unknown"]["source"] is None
+    # Unknown is None, never an invented False: a demo session must be refusable.
+    assert by_session["unknown"]["synthetic"] is None
+    assert set(by_session["known"]) == PAPER_OUTCOME_FIELDS
+    store.close()
+
+
+def test_handler_forwards_provenance_to_the_proposal(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    register_paper_outcome_handler(orchestrator)
+    payload = {
+        "session_id": "demo",
+        "fingerprint": "c" * 64,
+        "trades": 1,
+        "pnl": 1.0,
+        "r_total": 0.1,
+        "strategy_hash": "hash-1",
+        "dataset_id": "dataset-1",
+        "source": "provider:synthetic",
+        "synthetic": True,
+    }
+    job, _ = store.enqueue(KIND_PAPER_OUTCOMES, dedupe_key="demo-1", payload=payload)
+    orchestrator.run_until_idle()
+
+    finished = store.get(job.id)
+    assert finished is not None and finished.result is not None
+    data = finished.result["data"]
+    assert data["source"] == "provider:synthetic"
+    assert data["synthetic"] is True
+    store.close()
+
+
+# --------------------------------------------------------------- contract guards
+
+
+def test_handlers_get_a_read_only_store_facade(tmp_path: Path) -> None:
+    observed: dict[str, object] = {}
+
+    def inspect(job, context):  # type: ignore[no-untyped-def]
+        observed["has_enqueue"] = hasattr(context.store, "enqueue")
+        observed["has_set_state"] = hasattr(context.store, "set_state")
+        observed["row"] = context.store.get(job.id) is not None
+        try:
+            context.store.enqueue("x", dedupe_key="y")  # type: ignore[attr-defined]
+        except AttributeError:
+            observed["blocked"] = True
+        return HandlerResult.success({"checked": True})
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store, handlers={"inspect": inspect})
+    job, _ = store.enqueue("inspect", dedupe_key="inspect-1", payload={})
+    assert orchestrator.run_once().status == "succeeded"
+
+    assert observed == {
+        "has_enqueue": False,
+        "has_set_state": False,
+        "row": True,
+        "blocked": True,
+    }
+    assert store.get(job.id).status == "succeeded"  # type: ignore[union-attr]
+    store.close()
+
+
+def test_kind_injection_is_rejected(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    with pytest.raises(ValueError, match="no registered handler"):
+        PaperOutcomeTriggerSource(tmp_path / "paper.db", store=store, kind="paper.other")
+    store.close()
+
+
+def test_since_and_proposal_cap_bound_a_first_scan(tmp_path: Path) -> None:
+    """A long historical ledger cannot propose an unbounded backlog at once."""
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        for index in range(6):
+            seed_session(
+                ledger,
+                f"old-{index}",
+                started_at=BASE + timedelta(days=index),
+                exit_offset=timedelta(minutes=5 + index),
+            )
+        for index in range(6):
+            seed_session(
+                ledger,
+                f"new-{index}",
+                started_at=BASE + timedelta(days=30, minutes=index),
+                exit_offset=timedelta(minutes=5 + index),
+            )
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(
+        ledger_path,
+        store=store,
+        since=BASE + timedelta(days=10),
+        max_proposals=2,
+    )
+
+    per_scan = [len(scan_once(orchestrator, [source]).queued) for _ in range(4)]
+    assert per_scan == [2, 2, 2, 0]
+
+    sessions = {str(job.payload["session_id"]) for job in trigger_jobs(store)}
+    assert sessions == {f"new-{index}" for index in range(6)}
+    assert not any(name.startswith("old-") for name in sessions)
+    store.close()
