@@ -117,6 +117,43 @@ describe("api client", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
     await expect(api.getHealth()).resolves.toBeUndefined();
   });
+
+  it("sends bounded paper ledger queries and encodes the opaque session id", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ items: [], total: 0, limit: 20, offset: 40 }), {
+          status: 200,
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await api.paperSessions(20, 40);
+    await api.paperEquity("abc/123", 20, 0);
+
+    const urls = fetchMock.mock.calls.map(([input]) => {
+      const url = new URL(String(input));
+      return `${url.pathname}${url.search}`;
+    });
+    expect(urls).toEqual([
+      "/api/paper/sessions?limit=20&offset=40",
+      "/api/paper/sessions/abc%2F123/equity?limit=20&offset=0",
+    ]);
+  });
+
+  it("gives the paper close write its own timeout and always POSTs", async () => {
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(
+      async () =>
+        new Response(JSON.stringify({ session_id: "abc", status: "closed" }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+
+    await api.closePaperSession("abc");
+
+    expect(timeout).toHaveBeenCalledWith(15_000);
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init?.method).toBe("POST");
+  });
 });
 
 describe("isSimMessage", () => {
