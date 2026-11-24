@@ -329,7 +329,7 @@ def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
 
 
 def test_decision_vocabulary_is_closed() -> None:
-    assert DECISIONS == {"promoted", "rejected", "no_change", "no_trade"}
+    assert DECISIONS == {"promoted", "rejected", "no_change", "no_trade", "rolled_back"}
 
 
 def test_closed_archive_rejects_writes(tmp_path: Path) -> None:

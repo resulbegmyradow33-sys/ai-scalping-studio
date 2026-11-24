@@ -6,6 +6,21 @@ its dataset, seed, code version and metrics, and the decisions taken afterwards.
 It does not evaluate anything and it does not decide anything; a search run
 writes trials here and a champion gate writes decisions.
 
+Schema version 2 adds strategy champion governance. ``champion_promotions`` is
+the append-only history of every promotion and rollback in a scope, ``champions``
+holds exactly one current pointer per scope, and ``decisions`` gained a JSON
+``detail_json`` and the ``rolled_back`` outcome. The pointer and the history are
+written in one ``BEGIN IMMEDIATE`` transaction, so the live champion and the
+audit trail cannot disagree.
+
+A scope is a free-text key, conventionally ``<symbol>:<timeframe>``. A trial
+"belongs to" a scope when every alphanumeric token of the scope appears in its
+``dataset_id``: scope ``XAUUSD:M5`` matches ``validation:XAUUSD:M5:abcd1234`` and
+not ``validation:XAUUSD:M15:abcd1234``. That rule lets the archive answer "was
+this candidate evaluated on the scope's dataset?" without a second table, and it
+is a naming convention, not a guarantee: a dataset id that omits the timeframe
+will not qualify.
+
 Identity is the candidate hash. ``add_candidate`` deduplicates by that hash and
 returns the existing row, so a repeated proposal is not an error and does not
 create a second identity for the same strategy. The id is verified against the
@@ -44,9 +59,13 @@ from scalping.discovery.protocols import Candidate, TrialResult, canonical_diges
 
 __all__ = [
     "DECISIONS",
+    "DEFAULT_SCOPE",
     "SCHEMA_VERSION",
     "ArchiveError",
     "CandidateRecord",
+    "ChampionComparison",
+    "ChampionPromotion",
+    "ChampionRecord",
     "DecisionRecord",
     "DiscoveryArchive",
     "TrialRecord",
@@ -55,15 +74,29 @@ __all__ = [
 
 #: Schema version written by this module. A database from a newer module is
 #: refused instead of being written with an older layout.
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
+
+#: Default scope key. A real deployment passes ``<symbol>:<timeframe>``
+#: (:func:`scalping.discovery.champion.scope_for` builds it); this literal keeps
+#: the column and the read methods usable without inventing a symbol.
+DEFAULT_SCOPE: str = "symbol:timeframe"
 
 #: Decisions a champion gate may record. ``no_trade`` and ``no_change`` are
 #: first-class outcomes: rejecting every candidate is a valid result.
-DECISIONS: frozenset[str] = frozenset({"promoted", "rejected", "no_change", "no_trade"})
+#: ``rolled_back`` is written only by :meth:`DiscoveryArchive.rollback`.
+DECISIONS: frozenset[str] = frozenset(
+    {"promoted", "rejected", "no_change", "no_trade", "rolled_back"}
+)
+
 
 #: Metric names are used to build a JSON path, so they stay in a conservative
 #: alphabet (no quotes, no backslashes, no whitespace).
 _METRIC_PATTERN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*")
+
+#: Scope and dataset ids are free text; ``xauusd:m5`` and ``XAUUSD-M5-2026``
+#: both split into symbol/period tokens for scope matching.
+_TOKEN_SPLIT = re.compile(r"[^a-z0-9]+")
+
 
 _WAL_ATTEMPTS: int = 5
 _WAL_BACKOFF_SECONDS: float = 0.05
@@ -155,6 +188,75 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             OR json_type(NEW.rejections_json) <> 'array'
         BEGIN
             SELECT RAISE(ABORT, 'trials.rejections_json must be a JSON array');
+        END
+        """,
+    ),
+    2: (
+        # One row per promotion or rollback, append-only: the audit trail of the
+        # scope. ``champions`` points at the newest row, so history and the live
+        # pointer are written in the same transaction and cannot disagree.
+        """
+        CREATE TABLE IF NOT EXISTS champion_promotions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('promoted', 'rolled_back')),
+            candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            previous_candidate_id TEXT REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            metric TEXT,
+            value REAL,
+            previous_value REAL,
+            reason TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS champion_promotions_scope_idx
+        ON champion_promotions(scope, id)
+        """,
+        # The primary key is what makes "exactly one champion per scope" a
+        # database fact instead of a convention. Scopes keep independent
+        # champions, so two symbols never replace each other.
+        """
+        CREATE TABLE IF NOT EXISTS champions (
+            scope TEXT NOT NULL PRIMARY KEY,
+            candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            promotion_id INTEGER NOT NULL
+                REFERENCES champion_promotions(id) ON DELETE RESTRICT,
+            promoted_at TEXT NOT NULL,
+            reason TEXT NOT NULL
+        )
+        """,
+        # ``decisions`` must accept ``rolled_back`` and carry the numbers a
+        # promotion used. A CHECK cannot be altered in place, and rebuilding the
+        # table is safe here because nothing references ``decisions``.
+        """
+        CREATE TABLE decisions_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            decision TEXT NOT NULL
+                CHECK (decision IN
+                    ('promoted', 'rejected', 'no_change', 'no_trade', 'rolled_back')),
+            reason TEXT NOT NULL,
+            champion_id TEXT REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            created_at TEXT NOT NULL,
+            detail_json TEXT
+        )
+        """,
+        """
+        INSERT INTO decisions_v2 (id, candidate_id, decision, reason, champion_id, created_at)
+        SELECT id, candidate_id, decision, reason, champion_id, created_at FROM decisions
+        """,
+        "DROP TABLE decisions",
+        "ALTER TABLE decisions_v2 RENAME TO decisions",
+        "CREATE INDEX IF NOT EXISTS decisions_candidate_idx ON decisions(candidate_id, id)",
+        """
+        CREATE TRIGGER IF NOT EXISTS decisions_detail_json_insert
+        BEFORE INSERT ON decisions
+        FOR EACH ROW WHEN NEW.detail_json IS NOT NULL AND (
+            json_valid(NEW.detail_json) = 0
+            OR json_type(NEW.detail_json) <> 'object')
+        BEGIN
+            SELECT RAISE(ABORT, 'decisions.detail_json must be a JSON object or NULL');
         END
         """,
     ),
@@ -260,6 +362,20 @@ class DecisionRecord:
     reason: str
     champion_id: str | None
     created_at: str
+    detail_json: str | None = None
+
+    @property
+    def detail(self) -> dict[str, Any] | None:
+        """The numbers the decision used, or ``None`` when none were recorded."""
+        if self.detail_json is None:
+            return None
+        try:
+            data = json.loads(self.detail_json)
+        except json.JSONDecodeError as exc:  # pragma: no cover - triggers prevent this
+            raise ArchiveError(f"decision {self.id} has invalid detail JSON: {exc}") from exc
+        if not isinstance(data, dict):  # pragma: no cover - triggers prevent this
+            raise ArchiveError(f"decision {self.id} has a non-object detail")
+        return data
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -269,6 +385,104 @@ class DecisionRecord:
             "reason": self.reason,
             "champion_id": self.champion_id,
             "created_at": self.created_at,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChampionPromotion:
+    """One historical champion change in one scope, promotion or rollback."""
+
+    id: int
+    scope: str
+    kind: str
+    candidate_id: str
+    previous_candidate_id: str | None
+    metric: str | None
+    value: float | None
+    previous_value: float | None
+    reason: str
+    created_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "scope": self.scope,
+            "kind": self.kind,
+            "candidate_id": self.candidate_id,
+            "previous_candidate_id": self.previous_candidate_id,
+            "metric": self.metric,
+            "value": self.value,
+            "previous_value": self.previous_value,
+            "reason": self.reason,
+            "created_at": self.created_at,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChampionRecord:
+    """The current champion of a scope, its spec and the promotion that made it.
+
+    ``metrics`` is the newest accepted trial of the candidate on the scope's
+    dataset, so "the champion's current evidence" is one read and not a
+    reconstruction. ``candidate.canonical`` is the canonical spec payload the
+    paper runner validates.
+    """
+
+    scope: str
+    candidate: CandidateRecord
+    metrics: dict[str, float]
+    promotion_id: int
+    promoted_at: str
+    reason: str
+    previous_candidate_id: str | None
+
+    @property
+    def canonical(self) -> dict[str, Any]:
+        """The stored canonical spec payload, ready for ``StrategySpec.from_dict``."""
+        return self.candidate.canonical
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope": self.scope,
+            "candidate": self.candidate.to_dict(),
+            "canonical": self.canonical,
+            "metrics": dict(self.metrics),
+            "promotion_id": self.promotion_id,
+            "promoted_at": self.promoted_at,
+            "reason": self.reason,
+            "previous_candidate_id": self.previous_candidate_id,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ChampionComparison:
+    """One candidate against the current champion on one metric.
+
+    ``better`` is strict (``candidate > champion``) and false when either side
+    has no measured value: a missing number is not a win. Higher is better; a
+    lower-is-better metric (drawdown) must not be promoted through this helper.
+    """
+
+    scope: str
+    metric: str
+    candidate_id: str
+    candidate_value: float | None
+    champion_id: str | None
+    champion_value: float | None
+    delta: float | None
+    better: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "scope": self.scope,
+            "metric": self.metric,
+            "candidate_id": self.candidate_id,
+            "candidate_value": self.candidate_value,
+            "champion_id": self.champion_id,
+            "champion_value": self.champion_value,
+            "delta": self.delta,
+            "better": self.better,
         }
 
 
@@ -322,6 +536,91 @@ def _require_metric(value: object) -> str:
     return metric
 
 
+def _scope_tokens(scope: str) -> frozenset[str]:
+    """Lowercase alphanumeric tokens of a scope or dataset id.
+
+    ``XAUUSD:M5`` -> ``{"xauusd", "m5"}``. Both scope matching and dataset
+    matching use this splitter, so the rule has one spelling.
+    """
+    return frozenset(token for token in _TOKEN_SPLIT.split(scope.lower()) if token)
+
+
+def _require_scope(value: object) -> str:
+    scope = _require_text(value, "scope")
+    if not _scope_tokens(scope):
+        raise ValueError(f"scope {scope!r} must contain at least one alphanumeric token")
+    return scope
+
+
+def _scope_trials(
+    conn: sqlite3.Connection, candidate_id: str, tokens: frozenset[str]
+) -> list[TrialRecord]:
+    """This candidate's trials whose dataset id names every scope token.
+
+    Newest first. A trial on another symbol, timeframe or split is not evidence
+    for this scope, and neither is a trial whose dataset id forgot the token.
+    """
+    rows = conn.execute(
+        "SELECT * FROM trials WHERE candidate_id = ? ORDER BY id DESC", (candidate_id,)
+    ).fetchall()
+    return [
+        trial
+        for trial in (_trial_from_row(row) for row in rows)
+        if tokens <= _scope_tokens(trial.dataset_id)
+    ]
+
+
+def _latest_accepted(
+    conn: sqlite3.Connection, candidate_id: str, tokens: frozenset[str]
+) -> TrialRecord | None:
+    """The newest accepted trial on the scope's dataset, if any."""
+    for trial in _scope_trials(conn, candidate_id, tokens):
+        if trial.accepted:
+            return trial
+    return None
+
+
+def _metric_value(
+    conn: sqlite3.Connection, candidate_id: str, tokens: frozenset[str], metric: str
+) -> float | None:
+    """The metric of the newest accepted trial that publishes it, or ``None``.
+
+    Only accepted trials count: the evaluator's verdict is the evidence gate, and
+    a number from a gate-rejected run is not a claim the policy may act on.
+    """
+    for trial in _scope_trials(conn, candidate_id, tokens):
+        if not trial.accepted:
+            continue
+        metrics = trial.metrics
+        if metric in metrics:
+            return metrics[metric]
+    return None
+
+
+def _promotion_reason(
+    *,
+    reason: str,
+    forced: bool,
+    metric: str,
+    value: float | None,
+    previous_id: str | None,
+    previous_value: float | None,
+) -> str:
+    """The stored reason: the human sentence plus the numbers that were compared.
+
+    A forced promotion starts with ``forced:`` and keeps the human reason, so the
+    audit trail says that the policy was overridden instead of hiding it.
+    """
+    value_text = "unmeasured" if value is None else f"{value:g}"
+    if previous_id is None:
+        detail = f"first promotion; {metric} {value_text}"
+    else:
+        previous_text = "unmeasured" if previous_value is None else f"{previous_value:g}"
+        detail = f"{metric} {value_text} vs {previous_text} of {previous_id[:12]}"
+    prefix = "forced: " if forced else ""
+    return f"{prefix}{reason}; {detail}"
+
+
 def _candidate_from_row(row: sqlite3.Row) -> CandidateRecord:
     parent_a = row["parent_a"]
     parent_b = row["parent_b"]
@@ -355,12 +654,33 @@ def _trial_from_row(row: sqlite3.Row) -> TrialRecord:
 
 def _decision_from_row(row: sqlite3.Row) -> DecisionRecord:
     champion = row["champion_id"]
+    detail = row["detail_json"]
     return DecisionRecord(
         id=int(row["id"]),
         candidate_id=str(row["candidate_id"]),
         decision=str(row["decision"]),
         reason=str(row["reason"]),
         champion_id=None if champion is None else str(champion),
+        created_at=str(row["created_at"]),
+        detail_json=None if detail is None else str(detail),
+    )
+
+
+def _promotion_from_row(row: sqlite3.Row) -> ChampionPromotion:
+    previous = row["previous_candidate_id"]
+    metric = row["metric"]
+    value = row["value"]
+    previous_value = row["previous_value"]
+    return ChampionPromotion(
+        id=int(row["id"]),
+        scope=str(row["scope"]),
+        kind=str(row["kind"]),
+        candidate_id=str(row["candidate_id"]),
+        previous_candidate_id=None if previous is None else str(previous),
+        metric=None if metric is None else str(metric),
+        value=None if value is None else float(value),
+        previous_value=None if previous_value is None else float(previous_value),
+        reason=str(row["reason"]),
         created_at=str(row["created_at"]),
     )
 
@@ -837,14 +1157,21 @@ class DiscoveryArchive:
         reason: str,
         *,
         champion_id: str | None = None,
+        detail: Mapping[str, Any] | None = None,
     ) -> DecisionRecord:
-        """Append a champion-gate decision; ``no_trade``/``no_change`` are valid."""
+        """Append a champion-gate decision; ``no_trade``/``no_change`` are valid.
+
+        ``detail`` is the JSON-safe evidence the decision used (metric names and
+        values). It is stored canonically, so a later reader compares numbers
+        instead of parsing a sentence.
+        """
         candidate_id = _require_text(candidate_id, "candidate_id")
         decision = _require_text(decision, "decision")
         if decision not in DECISIONS:
             raise ValueError(f"decision must be one of {sorted(DECISIONS)}, got {decision!r}")
         reason = _require_text(reason, "reason")
         champion_id = _optional_text(champion_id, "champion_id")
+        detail_json = None if detail is None else self._detail_json(detail)
         stamp = _now()
 
         decision_id: int | None = None
@@ -860,10 +1187,11 @@ class DiscoveryArchive:
                         raise UnknownCandidateError(f"unknown candidate {known_id!r}")
                 cursor = tx.execute(
                     """
-                    INSERT INTO decisions (candidate_id, decision, reason, champion_id, created_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO decisions (
+                        candidate_id, decision, reason, champion_id, created_at, detail_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (candidate_id, decision, reason, champion_id, stamp),
+                    (candidate_id, decision, reason, champion_id, stamp, detail_json),
                 )
                 decision_id = cursor.lastrowid
                 if decision_id is None:  # pragma: no cover - sqlite guarantees a rowid
@@ -880,7 +1208,17 @@ class DiscoveryArchive:
             reason=reason,
             champion_id=champion_id,
             created_at=stamp,
+            detail_json=detail_json,
         )
+
+    @staticmethod
+    def _detail_json(detail: Mapping[str, Any]) -> str:
+        if not isinstance(detail, Mapping):
+            raise TypeError(f"detail must be a mapping, got {type(detail).__name__}")
+        try:
+            return _canonical_json(detail)
+        except (TypeError, ValueError) as exc:
+            raise ArchiveError(f"decision detail is not canonical JSON: {exc}") from exc
 
     def decisions(self, candidate_id: str | None = None) -> tuple[DecisionRecord, ...]:
         """Decisions oldest first, optionally only those about one candidate."""
@@ -894,3 +1232,388 @@ class DiscoveryArchive:
                 (candidate_id,),
             ).fetchall()
         return tuple(_decision_from_row(row) for row in rows)
+
+    # ------------------------------------------------------- champion governance
+
+    def promote(
+        self,
+        candidate_id: str,
+        *,
+        scope: str = DEFAULT_SCOPE,
+        reason: str,
+        force: bool = False,
+        metric: str = "expectancy_r",
+    ) -> ChampionRecord:
+        """Make ``candidate_id`` the champion of ``scope`` and record why.
+
+        Refusals leave the champion and the audit trail unchanged. An unknown
+        candidate raises :class:`UnknownCandidateError`; a candidate with no trial
+        on the scope's dataset, a candidate with no *accepted* trial there, and —
+        unless ``force`` — a candidate that does not strictly beat the current
+        champion raise :class:`ArchiveError`.
+
+        ``force`` overrides the comparison only. The evidence gate is not
+        forceable: a rejected candidate cannot be promoted by any flag. A forced
+        promotion requires a reason and its stored reason starts with
+        ``forced:``.
+
+        The metric is read from the newest accepted trial of each side that
+        publishes it. Missing numbers are not wins: an unmeasured candidate, or
+        an unmeasured champion to compare against, is refused rather than
+        treated as zero. Only ``metric`` is compared; this is a one-metric
+        policy, not a scorecard.
+        """
+        candidate_id = _require_text(candidate_id, "candidate_id")
+        scope = _require_scope(scope)
+        if not isinstance(force, bool):
+            raise TypeError(f"force must be a bool, got {type(force).__name__}")
+        if not isinstance(reason, str):
+            raise TypeError(f"reason must be a str, got {type(reason).__name__}")
+        reason = reason.strip()
+        if not reason:
+            raise ValueError(
+                "a forced promotion requires a non-empty reason"
+                if force
+                else "reason must not be empty"
+            )
+        metric = _require_metric(metric)
+        tokens = _scope_tokens(scope)
+        stamp = _now()
+
+        record: ChampionRecord | None = None
+        try:
+            with self._transaction() as tx:
+                known = tx.execute(
+                    "SELECT 1 FROM candidates WHERE candidate_id = ?", (candidate_id,)
+                ).fetchone()
+                if known is None:
+                    raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
+
+                trials = _scope_trials(tx, candidate_id, tokens)
+                if not trials:
+                    raise ArchiveError(
+                        f"candidate {candidate_id!r} has no trial on the dataset of scope "
+                        f"{scope!r}; evaluate it on that dataset before promoting it"
+                    )
+                latest = _latest_accepted(tx, candidate_id, tokens)
+                if latest is None:
+                    rejections = sorted({item for trial in trials for item in trial.rejections})
+                    detail = f": {'; '.join(rejections)}" if rejections else ""
+                    raise ArchiveError(
+                        f"candidate {candidate_id!r} was rejected by the gate on scope "
+                        f"{scope!r}{detail}"
+                    )
+                value = _metric_value(tx, candidate_id, tokens, metric)
+
+                row = tx.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
+                previous_id = None if row is None else str(row["candidate_id"])
+                if previous_id == candidate_id:
+                    raise ArchiveError(
+                        f"candidate {candidate_id!r} is already the champion of {scope!r}"
+                    )
+                previous_value = (
+                    None if previous_id is None else _metric_value(tx, previous_id, tokens, metric)
+                )
+
+                if not force:
+                    if value is None:
+                        raise ArchiveError(
+                            f"the accepted trial of {candidate_id!r} does not publish "
+                            f"{metric!r}; a promotion needs a measured value"
+                        )
+                    if previous_id is not None:
+                        if previous_value is None:
+                            raise ArchiveError(
+                                f"champion {previous_id!r} has no {metric!r} on scope "
+                                f"{scope!r}; refusing a comparison without a baseline"
+                            )
+                        if not value > previous_value:
+                            raise ArchiveError(
+                                f"{metric} {value:g} of {candidate_id!r} does not strictly "
+                                f"beat {previous_value:g} of champion {previous_id!r}"
+                            )
+
+                reason_text = _promotion_reason(
+                    reason=reason,
+                    forced=force,
+                    metric=metric,
+                    value=value,
+                    previous_id=previous_id,
+                    previous_value=previous_value,
+                )
+                cursor = tx.execute(
+                    """
+                    INSERT INTO champion_promotions (
+                        scope, kind, candidate_id, previous_candidate_id,
+                        metric, value, previous_value, reason, created_at
+                    ) VALUES (?, 'promoted', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scope,
+                        candidate_id,
+                        previous_id,
+                        metric,
+                        value,
+                        previous_value,
+                        reason_text,
+                        stamp,
+                    ),
+                )
+                promotion_id = cursor.lastrowid
+                if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
+                    raise ArchiveError("promotion insert returned no id")
+                tx.execute(
+                    """
+                    INSERT INTO champions (scope, candidate_id, promotion_id, promoted_at, reason)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(scope) DO UPDATE SET
+                        candidate_id = excluded.candidate_id,
+                        promotion_id = excluded.promotion_id,
+                        promoted_at = excluded.promoted_at,
+                        reason = excluded.reason
+                    """,
+                    (scope, candidate_id, promotion_id, stamp, reason_text),
+                )
+                tx.execute(
+                    """
+                    INSERT INTO decisions (
+                        candidate_id, decision, reason, champion_id, created_at, detail_json
+                    ) VALUES (?, 'promoted', ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate_id,
+                        reason_text,
+                        candidate_id,
+                        stamp,
+                        self._detail_json(
+                            {
+                                "scope": scope,
+                                "metric": metric,
+                                "value": value,
+                                "previous_candidate_id": previous_id,
+                                "previous_value": previous_value,
+                                "forced": force,
+                                "promotion_id": int(promotion_id),
+                            }
+                        ),
+                    ),
+                )
+                candidate_row = tx.execute(
+                    "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)
+                ).fetchone()
+                if candidate_row is None:  # pragma: no cover - checked above
+                    raise ArchiveError(f"candidate {candidate_id!r} disappeared")
+                record = ChampionRecord(
+                    scope=scope,
+                    candidate=_candidate_from_row(candidate_row),
+                    metrics=dict(latest.metrics),
+                    promotion_id=int(promotion_id),
+                    promoted_at=stamp,
+                    reason=reason_text,
+                    previous_candidate_id=previous_id,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ArchiveError(f"promotion of {candidate_id!r} failed: {exc}") from exc
+
+        if record is None:  # pragma: no cover - the insert just committed
+            raise ArchiveError("promotion record is missing")
+        return record
+
+    def champion(self, scope: str = DEFAULT_SCOPE) -> ChampionRecord | None:
+        """The current champion of ``scope``, or ``None`` before the first
+        promotion."""
+        scope = _require_scope(scope)
+        conn = self._connection()
+        row = conn.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
+        if row is None:
+            return None
+        candidate_id = str(row["candidate_id"])
+        candidate = self.candidate(candidate_id)
+        if candidate is None:  # pragma: no cover - the foreign key prevents this
+            raise ArchiveError(f"champion candidate {candidate_id!r} is missing")
+        latest = _latest_accepted(conn, candidate_id, _scope_tokens(scope))
+        promotion = conn.execute(
+            "SELECT previous_candidate_id FROM champion_promotions WHERE id = ?",
+            (int(row["promotion_id"]),),
+        ).fetchone()
+        if promotion is None:  # pragma: no cover - the foreign key prevents this
+            raise ArchiveError(f"champion promotion {row['promotion_id']!r} is missing")
+        previous = promotion["previous_candidate_id"]
+        return ChampionRecord(
+            scope=scope,
+            candidate=candidate,
+            metrics={} if latest is None else latest.metrics,
+            promotion_id=int(row["promotion_id"]),
+            promoted_at=str(row["promoted_at"]),
+            reason=str(row["reason"]),
+            previous_candidate_id=None if previous is None else str(previous),
+        )
+
+    def rollback(
+        self, scope: str = DEFAULT_SCOPE, *, to_candidate_id: str, reason: str
+    ) -> ChampionRecord:
+        """Restore a candidate that was champion of ``scope`` before.
+
+        Only a previous champion of the same scope can be restored: a candidate
+        that never won is promoted, not rolled back to, and mixing the two would
+        make the audit trail lie about what happened. The replaced champion stays
+        in ``champion_promotions`` and a ``rolled_back`` decision is appended.
+        """
+        scope = _require_scope(scope)
+        to_candidate_id = _require_text(to_candidate_id, "to_candidate_id")
+        reason = _require_text(reason, "reason")
+        tokens = _scope_tokens(scope)
+        stamp = _now()
+
+        record: ChampionRecord | None = None
+        try:
+            with self._transaction() as tx:
+                known = tx.execute(
+                    "SELECT 1 FROM candidates WHERE candidate_id = ?", (to_candidate_id,)
+                ).fetchone()
+                if known is None:
+                    raise UnknownCandidateError(f"unknown candidate {to_candidate_id!r}")
+                row = tx.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
+                if row is None:
+                    raise ArchiveError(f"scope {scope!r} has no champion to roll back from")
+                current = str(row["candidate_id"])
+                if current == to_candidate_id:
+                    raise ArchiveError(
+                        f"candidate {to_candidate_id!r} is already the champion of {scope!r}"
+                    )
+                was_champion = tx.execute(
+                    "SELECT 1 FROM champion_promotions WHERE scope = ? AND candidate_id = ? LIMIT 1",
+                    (scope, to_candidate_id),
+                ).fetchone()
+                if was_champion is None:
+                    raise ArchiveError(
+                        f"candidate {to_candidate_id!r} was never the champion of {scope!r}; "
+                        "promote it instead"
+                    )
+
+                reason_text = f"{reason}; rolled back from {current[:12]}"
+                cursor = tx.execute(
+                    """
+                    INSERT INTO champion_promotions (
+                        scope, kind, candidate_id, previous_candidate_id,
+                        metric, value, previous_value, reason, created_at
+                    ) VALUES (?, 'rolled_back', ?, ?, NULL, NULL, NULL, ?, ?)
+                    """,
+                    (scope, to_candidate_id, current, reason_text, stamp),
+                )
+                promotion_id = cursor.lastrowid
+                if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
+                    raise ArchiveError("rollback insert returned no id")
+                tx.execute(
+                    """
+                    INSERT INTO champions (scope, candidate_id, promotion_id, promoted_at, reason)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(scope) DO UPDATE SET
+                        candidate_id = excluded.candidate_id,
+                        promotion_id = excluded.promotion_id,
+                        promoted_at = excluded.promoted_at,
+                        reason = excluded.reason
+                    """,
+                    (scope, to_candidate_id, promotion_id, stamp, reason_text),
+                )
+                tx.execute(
+                    """
+                    INSERT INTO decisions (
+                        candidate_id, decision, reason, champion_id, created_at, detail_json
+                    ) VALUES (?, 'rolled_back', ?, ?, ?, ?)
+                    """,
+                    (
+                        to_candidate_id,
+                        reason_text,
+                        to_candidate_id,
+                        stamp,
+                        self._detail_json(
+                            {
+                                "scope": scope,
+                                "previous_candidate_id": current,
+                                "promotion_id": int(promotion_id),
+                            }
+                        ),
+                    ),
+                )
+                candidate_row = tx.execute(
+                    "SELECT * FROM candidates WHERE candidate_id = ?", (to_candidate_id,)
+                ).fetchone()
+                if candidate_row is None:  # pragma: no cover - checked above
+                    raise ArchiveError(f"candidate {to_candidate_id!r} disappeared")
+                latest = _latest_accepted(tx, to_candidate_id, tokens)
+                record = ChampionRecord(
+                    scope=scope,
+                    candidate=_candidate_from_row(candidate_row),
+                    metrics={} if latest is None else latest.metrics,
+                    promotion_id=int(promotion_id),
+                    promoted_at=stamp,
+                    reason=reason_text,
+                    previous_candidate_id=current,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ArchiveError(f"rollback to {to_candidate_id!r} failed: {exc}") from exc
+
+        if record is None:  # pragma: no cover - the insert just committed
+            raise ArchiveError("rollback record is missing")
+        return record
+
+    def champion_history(self, scope: str = DEFAULT_SCOPE) -> tuple[ChampionPromotion, ...]:
+        """Every champion change of ``scope``, oldest first, rollbacks included."""
+        scope = _require_scope(scope)
+        rows = (
+            self._connection()
+            .execute("SELECT * FROM champion_promotions WHERE scope = ? ORDER BY id", (scope,))
+            .fetchall()
+        )
+        return tuple(_promotion_from_row(row) for row in rows)
+
+    def compare_to_champion(
+        self,
+        candidate_id: str,
+        scope: str = DEFAULT_SCOPE,
+        metric: str = "expectancy_r",
+    ) -> ChampionComparison:
+        """This candidate's ``metric`` against the champion's, without promoting.
+
+        A comparison is a read: it refuses an unknown candidate and reports
+        missing values as ``None`` with ``better=False``. Lower-is-better metrics
+        are not supported here; promoting on one would invert the rule.
+        """
+        candidate_id = _require_text(candidate_id, "candidate_id")
+        scope = _require_scope(scope)
+        metric = _require_metric(metric)
+        conn = self._connection()
+        if self.candidate(candidate_id) is None:
+            raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
+        tokens = _scope_tokens(scope)
+
+        champion_id: str | None = None
+        champion_value: float | None = None
+        row = conn.execute(
+            "SELECT candidate_id FROM champions WHERE scope = ?", (scope,)
+        ).fetchone()
+        if row is not None:
+            champion_id = str(row["candidate_id"])
+            champion_value = _metric_value(conn, champion_id, tokens, metric)
+        candidate_value = _metric_value(conn, candidate_id, tokens, metric)
+        delta = (
+            None
+            if candidate_value is None or champion_value is None
+            else candidate_value - champion_value
+        )
+        better = (
+            candidate_value is not None
+            and champion_value is not None
+            and candidate_value > champion_value
+        )
+        return ChampionComparison(
+            scope=scope,
+            metric=metric,
+            candidate_id=candidate_id,
+            candidate_value=candidate_value,
+            champion_id=champion_id,
+            champion_value=champion_value,
+            delta=delta,
+            better=better,
+        )
