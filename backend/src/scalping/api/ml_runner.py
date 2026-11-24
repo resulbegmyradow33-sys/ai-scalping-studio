@@ -43,6 +43,7 @@ from typing import Any, Final
 import numpy as np
 import polars as pl
 
+from scalping.api.errors import public_error_text
 from scalping.api.schemas import is_ml_run_id
 from scalping.config import Settings
 from scalping.data.registry import TIMEFRAMES
@@ -810,7 +811,9 @@ class MLRunner:
         try:
             result = load_result(run_dir)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise MLError(f"run {run_id} cannot be loaded: {exc}") from exc
+            raise MLError(
+                f"run {run_id} cannot be loaded: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         frame = self.store.read(result.symbol, result.timeframe)
         if frame.is_empty():
@@ -854,7 +857,9 @@ class MLRunner:
                 compute_regime=regime,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
-            raise MLError(f"run {run_id} cannot be evaluated: {exc}") from exc
+            raise MLError(
+                f"run {run_id} cannot be evaluated: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         return {
             "run_id": run_id,
