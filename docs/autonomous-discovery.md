@@ -455,6 +455,14 @@ evaluator does not split, fold or embargo on its own. `run_discovery` is the
 caller that does this today: it slices the validation split out of the
 manifest and never touches the test slice.
 
+`scalping.discovery.evidence` is the caller that cuts several chronological
+folds across the **train + validation** timeline and records promotion-grade
+evidence: per-fold metrics, cost stress, regime attribution, bootstrap
+intervals and trial context. It still never reads the test split and it is not
+a promotion. The schema, fold geometry, fail-closed codes and remaining gaps
+are documented in
+[`backtesting-methodology.md`](backtesting-methodology.md#candidate-evidence-bundle-discovery).
+
 ## DSL evaluator: `DslEvaluator`
 
 `scalping.discovery.evaluate.DslEvaluator` is the production `Evaluator`. It
@@ -558,6 +566,8 @@ for wins without losses, and a gate that requires it then rejects with
 - **Nested validation inside the evaluator.** It runs one candidate on one
   frame. Chronological folds, purge/embargo geometry and the locked final test
   are a caller/orchestrator concern; the evaluator only refuses a holdout id.
+  `scalping.discovery.evidence` supplies the multi-fold builder; wiring it into
+  promotion policy and the orchestrator is a later slice.
 - **Out-of-sample and forward testing.** No test-slice access and no paper
   period. Those are later gates.
 - **Automatic champion monitoring.** `champion`, `compare_to_champion`,
