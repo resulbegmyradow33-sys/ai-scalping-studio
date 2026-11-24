@@ -115,8 +115,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
 - [x] Config guard (d_model/layers/heads/sequence/batch).
-- [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.
-- [ ] Same evaluator/registry.
+- [x] Memory smoke test and benchmark.
+- [x] Same evaluator/registry.
 - [x] `docs/transformer-models.md`.
 
 ## Phase 8 — Reinforcement learning expansion
