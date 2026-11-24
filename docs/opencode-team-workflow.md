@@ -3,6 +3,44 @@
 This file configures how the owner uses OpenCode Teams in this repository. It
 does not change the trading application's runtime architecture.
 
+## Project authority and external contributor workflow
+
+Resul is the sole project owner and final decision-maker for the product,
+architecture, priorities, scope and acceptance of changes. Lukman is an
+external contributor who works only on tasks explicitly assigned by Resul.
+This is a project governance rule, not a request to install or configure a
+special AI-agent team for Lukman.
+
+Before Lukman or any other contributor uses an AI coding/research agent on this
+repository, that agent must be given and must follow the root `AGENTS.md` and
+`docs/requirements/master-prompt.md`. If the tool does not discover
+`AGENTS.md` automatically, the contributor must provide the instructions
+explicitly. The human contributor remains responsible for the agent's work.
+
+The operating rules are:
+
+1. Start only from a task explicitly assigned by Resul. An issue, PR, comment
+   from another contributor, or an AI-generated plan is not by itself an
+   assignment from Resul.
+2. Follow the exact assigned scope and acceptance criteria. Do not independently
+   change the product goal, architecture, roadmap, strategy-discovery design,
+   safety constraints or priorities.
+3. If the task is ambiguous, blocked, conflicts with project instructions, or
+   appears to require extra files, dependencies or architectural changes, stop
+   and ask Resul. Do not silently expand the assignment.
+4. Technical alternatives may be proposed with evidence and trade-offs, but
+   implementation beyond the assigned scope requires Resul's approval.
+5. Submit work on a branch/PR with tests and honest evidence. A PR is a
+   proposal, not acceptance. Do not merge your own work or bypass review.
+6. All AI agents used for the task inherit the same repository rules; the
+   contributor must ensure they have loaded them before acting.
+
+This repository-level instruction guides cooperating tools and people; it
+cannot technically control a third-party AI service that has not been given
+the instructions. GitHub CODEOWNERS can request Resul's review. To make that
+review a hard merge requirement, repository branch protection/rulesets must
+also require code-owner approval.
+
 ## Owner's environment
 
 - Primary IDE/agent host: OpenCode Desktop on Mac mini M2, 8 GB unified memory.
