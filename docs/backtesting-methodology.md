@@ -534,3 +534,43 @@ distribution simply says it loses consistently.
 
 Neither module reads the test split or retrains anything, so neither can
 manufacture a result that the simulator did not already produce.
+
+## Adversarial coverage (evidence, promotion, holdout, reproduce)
+
+`backend/tests/test_evidence_adversarial.py` attacks the gates with forged input
+instead of replaying a happy path. It covers, one refusal per test:
+
+- a `CandidateEvidence` subclass whose `to_dict` injects a `locked_oos` section,
+  and a plain mapping that resembles a bundle: both are `invalid_evidence`, and
+  `evidence_checksum`/`verify_evidence` raise `TypeError` on the subclass;
+- a locked section with a forged checksum (`locked_oos_checksum`), an
+  `evidence_checksum` bound to another bundle (`locked_oos_evidence_checksum`),
+  wrong `test_rows` or unordered timestamps (`locked_oos_geometry`), a
+  zero-trade section (`insufficient_trades`; the constructor refuses before
+  that), catastrophic metrics, and a CI lower bound of exactly `0.0`
+  (`min_ci_lower_r`, while `1e-9` passes);
+- the public `promote_with_evidence` entry point with an unregistered test
+  policy and with an edited copy of `PROMOTION_V1` (`non_production_policy`),
+  the read-only `PRODUCTION_POLICIES` mapping (`TypeError` on mutation), and the
+  reserved `manual-override` id;
+- direct `DiscoveryArchive._promote_evidence` calls with no capability
+  (`TypeError`), a forged one (`unauthorized`), a valid capability over a
+  tampered payload (checksum mismatch), and a valid capability over evidence the
+  policy rejects (`promotion_rejected`): a capability authorises the caller, it
+  never authorises the numbers;
+- a second promotion without a stored champion bundle
+  (`champion_evidence_missing`), re-promoting the champion itself
+  (`champion_same_spec`), and champion bundles that differ in dataset, dataset
+  checksum, settings, code version or fold geometry;
+- exploratory and manual champions refused by `ChampionProvider`
+  (`NoEvidenceChampion`), and the audited `replaces_non_evidence` transition
+  that records the legacy champion before the first governed promotion;
+- reproduction of a tampered bundle and tampered locked section
+  (`checksum_mismatch`), and a locked bundle that reproduces the historical base
+  checksum while dropping `locked_oos`.
+
+The tests were mutation-checked: disabling the locked-OOS checksum re-derivation,
+the exact-type gate, the archive capability verification, or the champion
+dataset-checksum comparison each makes the matching test fail. The mutations were
+reverted and are not part of the tree. These tests prove the gates refuse hostile
+input; they do not add an edge, a holdout spend, or a profitability claim.
