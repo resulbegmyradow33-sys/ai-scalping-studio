@@ -21,6 +21,8 @@ LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
+- [`docs/runbook.md`](docs/runbook.md) — operator runbook: install, daily flows,
+  orchestrator, troubleshooting and safety rules.
 - [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
   the exact commands that reproduce each claim.
 - [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
