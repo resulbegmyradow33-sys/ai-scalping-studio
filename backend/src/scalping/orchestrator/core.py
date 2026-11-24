@@ -453,19 +453,31 @@ class Orchestrator:
         return self._execute(job, research_disabled, now=now)
 
     def run_until_idle(
-        self, max_jobs: int = 100, *, now: str | datetime | None = None
+        self,
+        max_jobs: int = 100,
+        *,
+        now: str | datetime | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> list[RunOutcome]:
         """Drain due work, stopping at the first call that finds nothing to do.
 
         Only iterations that transitioned a job are returned, so the list is the
         batch's history rather than a log of every empty poll.
+
+        ``should_stop`` is checked before every iteration, including the first. A
+        daemon passes its shutdown flag here so a requested stop does not start
+        up to ``max_jobs`` further jobs.
         """
         if isinstance(max_jobs, bool) or not isinstance(max_jobs, int):
             raise TypeError("max_jobs must be an int")
         if max_jobs < 0:
             raise ValueError("max_jobs must be >= 0")
+        if should_stop is not None and not callable(should_stop):
+            raise TypeError("should_stop must be callable or None")
         outcomes: list[RunOutcome] = []
         while len(outcomes) < max_jobs:
+            if should_stop is not None and should_stop():
+                break
             outcome = self.run_once(now=now)
             if outcome.job is None:
                 break
@@ -555,6 +567,13 @@ class Orchestrator:
                         detail="cancelled before the guard could defer it",
                     )
                 raise
+            if job.status == "failed":
+                # The deferral cap turned a repeated refusal terminal.
+                return RunOutcome(
+                    status="failed",
+                    job=job,
+                    detail=job.error or reason,
+                )
             return RunOutcome(status="resource_refused", job=job, detail=reason)
 
         handler = self._handlers.get(job.kind)

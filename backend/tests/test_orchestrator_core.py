@@ -556,6 +556,20 @@ def test_status_snapshot(tmp_path: Path) -> None:
     assert payload["jobs"]["counts"]["queued"] == 1
 
 
+def test_run_until_idle_can_stop_between_jobs(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    handler = _Recorder()
+    orchestrator = Orchestrator(store, handlers={"work": handler})
+    for index in range(3):
+        _enqueue(store, "work", f"w{index}")
+
+    outcomes = orchestrator.run_until_idle(max_jobs=10, should_stop=lambda: len(handler.calls) >= 1)
+
+    assert len(outcomes) == 1
+    assert len(handler.calls) == 1
+    assert len([job for job in store.list_jobs(status="queued")]) == 2
+
+
 def test_retry_policy_caps_the_backoff() -> None:
     policy = RetryPolicy(base_seconds=10, factor=2, max_seconds=25)
     assert [policy.delay(attempt) for attempt in (1, 2, 3, 10)] == [10.0, 20.0, 25.0, 25.0]
