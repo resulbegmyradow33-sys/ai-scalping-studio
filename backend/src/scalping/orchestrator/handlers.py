@@ -688,7 +688,10 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                 # Re-extract even for a known checksum: the dedupe in
                 # ``extract_hypotheses`` makes this create nothing new, and a
                 # crash between indexing and extraction still converges on a
-                # retry instead of leaving a document with missing drafts.
+                # retry instead of leaving a document with missing drafts. The
+                # same pass backfills table rows added by schema version 2.
+                record = DocumentIngestor(context.knowledge_root).ingest(request.document_path)
+                backfilled = index.backfill_tables(record)
                 sections = len(index.sections(existing.doc_id))
                 extraction = extract_hypotheses(
                     index,
@@ -705,6 +708,7 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                         "checksum": checksum,
                         "sections": sections,
                         "new_drafts": len(extraction.created),
+                        "tables_backfilled": backfilled,
                     },
                 )
                 return HandlerResult.success(

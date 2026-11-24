@@ -4,6 +4,7 @@ import type {
   AutonomyStatus,
   CalibrateRequest,
   CalibrateResponse,
+  DataQuality,
   DataStatus,
   DownloadRequest,
   DownloadResponse,
@@ -42,6 +43,9 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 
 /** `/api/data/download` blocks on the provider, so it outlasts the default. */
 const DOWNLOAD_TIMEOUT_MS = 30_000;
+
+/** `/api/data/quality` validates the whole stored slice before it answers. */
+const QUALITY_TIMEOUT_MS = 20_000;
 
 /** Recalibration labels years of bars; a 5-year H1 grid takes minutes. */
 const CALIBRATE_TIMEOUT_MS = 600_000;
@@ -156,6 +160,24 @@ export const api = {
 
   getDataStatus(symbol: string): Promise<DataStatus> {
     return request<DataStatus>(`/api/data/status?symbol=${encodeURIComponent(symbol)}`);
+  },
+
+  /**
+   * Full-slice quality report. The backend reads and validates the store, so
+   * this gets more headroom than a normal read; `include_outliers=false`
+   * skips only the robust-z pass on large stores.
+   */
+  getDataQuality(
+    symbol: string,
+    timeframe: string,
+    includeOutliers = true,
+  ): Promise<DataQuality> {
+    const params = new URLSearchParams({
+      symbol,
+      timeframe,
+      include_outliers: String(includeOutliers),
+    });
+    return request<DataQuality>(`/api/data/quality?${params.toString()}`, {}, QUALITY_TIMEOUT_MS);
   },
 
   getTimeframes(): Promise<TimeframeSpec[]> {

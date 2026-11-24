@@ -18,6 +18,7 @@ no connection to the paper-trading or order code.
 
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import time
@@ -29,6 +30,7 @@ from pathlib import Path
 from typing import Any, Self
 
 from scalping.knowledge.ingest import DocumentRecord
+from scalping.knowledge.tables import TableRecord, flatten_table
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -38,10 +40,11 @@ __all__ = [
     "KnowledgeIndexError",
     "SearchHit",
     "SectionRecord",
+    "TableHit",
     "split_chunks",
 ]
 
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
 
 #: Chunk size in characters. Small enough for a local reader, large enough to
 #: keep a paragraph's context together. No overlap: offsets stay exact.
@@ -156,7 +159,29 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS hypothesis_experiments_hyp_idx"
             " ON hypothesis_experiments(hypothesis_id, position)"
         ),
-    )
+    ),
+    2: (
+        """
+        CREATE TABLE IF NOT EXISTS tables (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
+            ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+            section_ordinal INTEGER NOT NULL CHECK (section_ordinal >= -1),
+            kind TEXT NOT NULL CHECK (kind IN ('docx', 'html', 'markdown')),
+            caption TEXT NOT NULL DEFAULT '',
+            heading TEXT NOT NULL DEFAULT '',
+            header_json TEXT,
+            rows_json TEXT NOT NULL,
+            text TEXT NOT NULL,
+            row_count INTEGER NOT NULL CHECK (row_count >= 0),
+            col_count INTEGER NOT NULL CHECK (col_count >= 0),
+            char_start INTEGER NOT NULL CHECK (char_start >= 0),
+            char_end INTEGER NOT NULL CHECK (char_end >= char_start),
+            UNIQUE (doc_id, ordinal)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS tables_doc_idx ON tables(doc_id, ordinal)",
+    ),
 }
 
 _FTS_SETUP: tuple[str, ...] = (
@@ -204,6 +229,48 @@ SELECT c.id, c.text, COALESCE(s.heading, '')
 FROM chunks AS c
 JOIN sections AS s ON s.id = c.section_id
 WHERE c.id NOT IN (SELECT rowid FROM chunks_fts)
+"""
+
+#: Table search is a separate FTS object over the flattened table text, caption
+#: and heading. Tables are not shoehorned into ``chunks``: chunks belong to a
+#: section and keep exact section offsets, which a table chunk would break.
+_TABLES_FTS_SETUP: tuple[str, ...] = (
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS tables_fts USING fts5(
+        text,
+        caption,
+        heading,
+        tokenize = 'unicode61'
+    )
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS tables_fts_insert AFTER INSERT ON tables
+    BEGIN
+        INSERT INTO tables_fts(rowid, text, caption, heading)
+        VALUES (new.id, new.text, new.caption, new.heading);
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS tables_fts_delete AFTER DELETE ON tables
+    BEGIN
+        DELETE FROM tables_fts WHERE rowid = old.id;
+    END
+    """,
+    """
+    CREATE TRIGGER IF NOT EXISTS tables_fts_update AFTER UPDATE ON tables
+    BEGIN
+        DELETE FROM tables_fts WHERE rowid = old.id;
+        INSERT INTO tables_fts(rowid, text, caption, heading)
+        VALUES (new.id, new.text, new.caption, new.heading);
+    END
+    """,
+)
+
+_TABLES_FTS_BACKFILL = """
+INSERT INTO tables_fts(rowid, text, caption, heading)
+SELECT t.id, t.text, t.caption, t.heading
+FROM tables AS t
+WHERE t.id NOT IN (SELECT rowid FROM tables_fts)
 """
 
 
@@ -321,6 +388,34 @@ class SearchHit:
             "section_ordinal": self.section_ordinal,
             "chunk_id": self.chunk_id,
             "chunk_ordinal": self.chunk_ordinal,
+            "heading": self.heading,
+            "text": self.text,
+            "score": self.score,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TableHit:
+    """A stored table that matched a table-text query."""
+
+    doc_id: str
+    filename: str
+    table_ordinal: int
+    section_ordinal: int
+    kind: str
+    caption: str
+    heading: str
+    text: str
+    score: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "doc_id": self.doc_id,
+            "filename": self.filename,
+            "table_ordinal": self.table_ordinal,
+            "section_ordinal": self.section_ordinal,
+            "kind": self.kind,
+            "caption": self.caption,
             "heading": self.heading,
             "text": self.text,
             "score": self.score,
@@ -447,6 +542,26 @@ def _chunk_from_row(row: sqlite3.Row) -> ChunkRecord:
     )
 
 
+def _table_from_row(row: sqlite3.Row) -> TableRecord:
+    header_json = row["header_json"]
+    header = (
+        None if header_json is None else tuple(str(cell) for cell in json.loads(str(header_json)))
+    )
+    rows = tuple(tuple(str(cell) for cell in cells) for cells in json.loads(str(row["rows_json"])))
+    return TableRecord(
+        kind=str(row["kind"]),
+        caption=str(row["caption"]),
+        heading=str(row["heading"]),
+        header=header,
+        rows=rows,
+        section_ordinal=int(row["section_ordinal"]),
+        row_count=int(row["row_count"]),
+        col_count=int(row["col_count"]),
+        char_start=int(row["char_start"]),
+        char_end=int(row["char_end"]),
+    )
+
+
 class KnowledgeIndex:
     """One local SQLite file holding the document index and hypotheses.
 
@@ -469,7 +584,7 @@ class KnowledgeIndex:
         try:
             _enable_wal(self._conn)
             self.init_schema()
-            self._search_backend = self._setup_search(self._conn)
+            self._search_backend, self._tables_backend = self._setup_search(self._conn)
         except BaseException:
             self.close()
             raise
@@ -483,8 +598,13 @@ class KnowledgeIndex:
 
     @property
     def search_backend(self) -> str:
-        """``"fts5"`` or ``"like"``, the backend the next search will use."""
+        """``"fts5"`` or ``"like"``, the backend the next chunk search will use."""
         return self._search_backend
+
+    @property
+    def tables_search_backend(self) -> str:
+        """``"fts5"`` or ``"like"``, the backend the next table search will use."""
+        return self._tables_backend
 
     def _connection(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -564,30 +684,44 @@ class KnowledgeIndex:
 
     # ------------------------------------------------------------------- search
 
-    def _setup_search(self, conn: sqlite3.Connection) -> str:
-        """Create the FTS5 table and triggers, or report the LIKE fallback.
+    def _setup_search(self, conn: sqlite3.Connection) -> tuple[str, str]:
+        """Create the FTS5 tables and triggers, or report the LIKE fallback.
 
-        The virtual table is outside the versioned migrations because a Python
-        build without FTS5 must still open the same database. It is created on
-        demand, backfilled from existing chunks, and never claimed unless it was
-        actually created.
+        The virtual tables are outside the versioned migrations because a
+        Python build without FTS5 must still open the same database. They are
+        created on demand, backfilled from existing rows, and never claimed
+        unless actually created. Each search path reports its own backend.
         """
-        table = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'chunks_fts'"
+        chunks = self._setup_fts(conn, "chunks_fts", _FTS_SETUP, _FTS_BACKFILL, "chunk")
+        tables = self._setup_fts(
+            conn, "tables_fts", _TABLES_FTS_SETUP, _TABLES_FTS_BACKFILL, "table"
+        )
+        return chunks, tables
+
+    def _setup_fts(
+        self,
+        conn: sqlite3.Connection,
+        name: str,
+        setup: tuple[str, ...],
+        backfill: str,
+        label: str,
+    ) -> str:
+        existing = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
         ).fetchone()
-        if table is None:
+        if existing is None:
             try:
-                conn.execute(_FTS_SETUP[0])
+                conn.execute(setup[0])
             except sqlite3.OperationalError:
                 return "like"
         try:
-            for statement in _FTS_SETUP[1:]:
+            for statement in setup[1:]:
                 conn.execute(statement)
-            conn.execute(_FTS_BACKFILL)
+            conn.execute(backfill)
         except sqlite3.OperationalError as exc:
-            if table is None:
+            if existing is None:
                 return "like"
-            raise KnowledgeIndexError(f"FTS5 is present but unusable: {exc}") from exc
+            raise KnowledgeIndexError(f"{label} FTS5 is present but unusable: {exc}") from exc
         return "fts5"
 
     def search(self, query: str, limit: int = 10) -> list[SearchHit]:
@@ -658,6 +792,76 @@ class KnowledgeIndex:
             for row in rows
         ]
 
+    def search_tables(self, query: str, limit: int = 10) -> list[TableHit]:
+        """Search flattened table text, captions and table heading paths.
+
+        Tables are searched through a separate FTS object; ``search`` keeps
+        returning paragraph chunks only, because a table hit has no section
+        chunk to cite. FTS5 ranks with ``bm25`` (lower is better, exposed as
+        ``score``); the fallback is a case-insensitive ``LIKE`` with
+        ``score = 0.0``.
+        """
+        if not isinstance(query, str):
+            raise TypeError(f"query must be a str, got {type(query).__name__}")
+        query = query.strip()
+        if not query:
+            raise ValueError("query must not be empty")
+        limit = _require_non_negative(limit, "limit")
+        if limit < 1:
+            raise ValueError("limit must be >= 1")
+        conn = self._connection()
+        if self._tables_backend == "fts5":
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT t.doc_id AS doc_id, t.ordinal AS table_ordinal,
+                           t.section_ordinal AS section_ordinal, t.kind AS kind,
+                           t.caption AS caption, t.heading AS heading, t.text AS text,
+                           d.filename AS filename, bm25(tables_fts) AS score
+                    FROM tables_fts
+                    JOIN tables AS t ON t.id = tables_fts.rowid
+                    JOIN documents AS d ON d.doc_id = t.doc_id
+                    WHERE tables_fts MATCH ?
+                    ORDER BY score, t.doc_id, t.ordinal
+                    LIMIT ?
+                    """,
+                    (_fts_query(query), limit),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                raise KnowledgeIndexError(f"FTS5 table search failed: {exc}") from exc
+        else:
+            pattern = _like_pattern(query)
+            rows = conn.execute(
+                """
+                SELECT t.doc_id AS doc_id, t.ordinal AS table_ordinal,
+                       t.section_ordinal AS section_ordinal, t.kind AS kind,
+                       t.caption AS caption, t.heading AS heading, t.text AS text,
+                       d.filename AS filename, 0.0 AS score
+                FROM tables AS t
+                JOIN documents AS d ON d.doc_id = t.doc_id
+                WHERE t.text LIKE ? ESCAPE '\\'
+                   OR t.caption LIKE ? ESCAPE '\\'
+                   OR t.heading LIKE ? ESCAPE '\\'
+                ORDER BY t.doc_id, t.ordinal
+                LIMIT ?
+                """,
+                (pattern, pattern, pattern, limit),
+            ).fetchall()
+        return [
+            TableHit(
+                doc_id=str(row["doc_id"]),
+                filename=str(row["filename"]),
+                table_ordinal=int(row["table_ordinal"]),
+                section_ordinal=int(row["section_ordinal"]),
+                kind=str(row["kind"]),
+                caption=str(row["caption"]),
+                heading=str(row["heading"]),
+                text=str(row["text"]),
+                score=float(row["score"]),
+            )
+            for row in rows
+        ]
+
     # ----------------------------------------------------------------- documents
 
     def add_document(self, record: DocumentRecord) -> DocumentSummary:
@@ -673,6 +877,7 @@ class KnowledgeIndex:
             raise ValueError("doc_id must equal the checksum")
         existing = self.document(record.doc_id)
         if existing is not None:
+            self.backfill_tables(record)
             return existing
         params = (
             record.doc_id,
@@ -704,6 +909,7 @@ class KnowledgeIndex:
                 )
                 if record.status == "indexed":
                     self._insert_sections(tx, record)
+                    self._insert_tables(tx, record)
         except sqlite3.IntegrityError as exc:
             existing = self.document(record.doc_id)
             if existing is not None:
@@ -758,6 +964,82 @@ class KnowledgeIndex:
                     ),
                 )
             text_start = char_end + 2  # the "\n\n" separator
+
+    def _insert_tables(
+        self,
+        tx: sqlite3.Connection,
+        record: DocumentRecord,
+        *,
+        ordinals: set[int] | None = None,
+    ) -> None:
+        for ordinal, table in enumerate(record.tables):
+            if ordinals is not None and ordinal not in ordinals:
+                continue
+            header_json = (
+                None if table.header is None else json.dumps(list(table.header), ensure_ascii=False)
+            )
+            tx.execute(
+                """
+                INSERT INTO tables (
+                    doc_id, ordinal, section_ordinal, kind, caption, heading,
+                    header_json, rows_json, text, row_count, col_count,
+                    char_start, char_end
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.doc_id,
+                    ordinal,
+                    table.section_ordinal,
+                    table.kind,
+                    table.caption,
+                    table.heading,
+                    header_json,
+                    json.dumps([list(row) for row in table.rows], ensure_ascii=False),
+                    flatten_table(table),
+                    table.row_count,
+                    table.col_count,
+                    table.char_start,
+                    table.char_end,
+                ),
+            )
+
+    def backfill_tables(self, record: DocumentRecord) -> int:
+        """Insert table rows missing from an already stored document.
+
+        A database migrated from schema 1 has documents but no ``tables`` rows;
+        a partial import can also be missing some ordinals. This adds exactly
+        the missing ordinals and never deletes or rewrites a stored table.
+        Returns the number of rows inserted.
+
+        The record must describe a document that is already stored (the
+        duplicate branch of ``knowledge.ingest`` is the production caller).
+        """
+        if not isinstance(record, DocumentRecord):
+            raise TypeError("record must be a DocumentRecord")
+        if record.status != "indexed" or not record.tables:
+            return 0
+        existing = self.document(record.doc_id)
+        if existing is None:
+            raise KnowledgeIndexError(
+                f"cannot backfill tables for unstored document {record.doc_id}"
+            )
+        present = {
+            int(row[0])
+            for row in self._connection()
+            .execute("SELECT ordinal FROM tables WHERE doc_id = ?", (record.doc_id,))
+            .fetchall()
+        }
+        missing = {ordinal for ordinal in range(len(record.tables)) if ordinal not in present}
+        if not missing:
+            return 0
+        try:
+            with self.transaction() as tx:
+                self._insert_tables(tx, record, ordinals=missing)
+        except sqlite3.IntegrityError as exc:
+            raise KnowledgeIndexError(
+                f"table backfill for {record.doc_id} conflicted with a concurrent write: {exc}"
+            ) from exc
+        return len(missing)
 
     def document(self, doc_id: str) -> DocumentSummary | None:
         """Stored metadata for ``doc_id``, or ``None`` when unknown."""
@@ -829,6 +1111,27 @@ class KnowledgeIndex:
             .fetchall()
         )
         return [_chunk_from_row(row) for row in rows]
+
+    def tables(self, doc_id: str) -> list[TableRecord]:
+        """Stored tables of one document in document order."""
+        doc_id = _require_text(doc_id, "doc_id")
+        rows = (
+            self._connection()
+            .execute("SELECT * FROM tables WHERE doc_id = ? ORDER BY ordinal", (doc_id,))
+            .fetchall()
+        )
+        return [_table_from_row(row) for row in rows]
+
+    def table(self, doc_id: str, ordinal: int) -> TableRecord | None:
+        """One stored table by document and ordinal, or ``None``."""
+        doc_id = _require_text(doc_id, "doc_id")
+        ordinal = _require_non_negative(ordinal, "ordinal")
+        row = (
+            self._connection()
+            .execute("SELECT * FROM tables WHERE doc_id = ? AND ordinal = ?", (doc_id, ordinal))
+            .fetchone()
+        )
+        return None if row is None else _table_from_row(row)
 
     def document_text(self, doc_id: str) -> str:
         """The canonical text the section offsets refer to."""
