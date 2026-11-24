@@ -30,7 +30,11 @@ from pathlib import Path
 from typing import Protocol
 from xml.etree import ElementTree
 
-from scalping.knowledge.tables import TableRecord, extract_tables
+from scalping.knowledge.tables import (
+    TableRecord,
+    extract_tables,
+    read_docx_payload,
+)
 
 __all__ = [
     "DocumentIngestionError",
@@ -49,10 +53,6 @@ SOURCES_DIRNAME = "sources"
 #: when a parser change alters the text a document produces. Version 2 adds
 #: structural table records; the paragraph text itself is unchanged.
 PARSER_VERSION = "2"
-
-#: Refuse absurdly large DOCX XML before it is parsed into memory. A real
-#: ``word/document.xml`` is a few megabytes; a zip bomb is not.
-MAX_DOCX_XML_BYTES = 32 * 1024 * 1024
 
 _HASH_CHUNK_BYTES = 1024 * 1024
 
@@ -394,21 +394,24 @@ class _DocxExtractor:
     suffixes = frozenset({".docx"})
 
     def extract(self, path: Path) -> list[Section]:
+        return self.extract_with_payload(path)[0]
+
+    def extract_with_payload(self, path: Path) -> tuple[list[Section], bytes]:
+        """Read ``word/document.xml`` once and return sections plus the payload.
+
+        The ingestor passes the payload to table extraction so a DOCX import
+        opens the archive a single time.
+        """
         try:
-            with zipfile.ZipFile(path) as archive:
-                try:
-                    info = archive.getinfo("word/document.xml")
-                except KeyError as exc:
-                    raise ExtractionError("DOCX has no word/document.xml") from exc
-                if info.file_size > MAX_DOCX_XML_BYTES:
-                    raise ExtractionError(
-                        f"word/document.xml is {info.file_size} bytes, above the "
-                        f"{MAX_DOCX_XML_BYTES} byte limit"
-                    )
-                payload = archive.read(info)
+            payload = read_docx_payload(path)
         except zipfile.BadZipFile as exc:
             raise ExtractionError(f"not a valid DOCX zip archive: {exc}") from exc
+        except ValueError as exc:
+            raise ExtractionError(str(exc)) from exc
+        return self.sections_from_payload(payload), payload
 
+    @staticmethod
+    def sections_from_payload(payload: bytes) -> list[Section]:
         try:
             root = ElementTree.fromstring(payload)
         except ElementTree.ParseError as exc:
@@ -582,16 +585,21 @@ class DocumentIngestor:
         tables: tuple[TableRecord, ...] = ()
         parser = "none"
         parser_version = PARSER_VERSION
+        docx_payload: bytes | None = None
 
         try:
             extractor = _extractor_for(suffix)
             parser = extractor.name
             parser_version = extractor.version
-            sections = tuple(extractor.extract(stored))
+            if isinstance(extractor, _DocxExtractor):
+                extracted, docx_payload = extractor.extract_with_payload(stored)
+                sections = tuple(extracted)
+            else:
+                sections = tuple(extractor.extract(stored))
             if not sections:
                 raise ExtractionError("no extractable text")
             if document_format in _TABLE_FORMATS:
-                tables = extract_tables(stored, sections=sections).tables
+                tables = extract_tables(stored, sections=sections, docx_payload=docx_payload).tables
         except UnsupportedFormat as exc:
             status = "unsupported"
             error = str(exc)

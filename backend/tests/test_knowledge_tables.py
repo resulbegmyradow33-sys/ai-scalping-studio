@@ -19,11 +19,13 @@ from scalping.knowledge import (
     DocumentIngestor,
     DocumentRecord,
     KnowledgeIndex,
+    KnowledgeIndexError,
     TableRecord,
     extract_tables,
     flatten_table,
 )
 from scalping.knowledge.index import _MIGRATIONS, _SCHEMA_VERSION_DDL
+from scalping.knowledge.tables import MAX_TABLE_ROWS
 
 KNOWLEDGE_SRC = Path(__file__).resolve().parents[1] / "src" / "scalping" / "knowledge"
 
@@ -407,6 +409,21 @@ def test_migration_from_v1_keeps_documents_and_backfills_tables(tmp_path: Path) 
             None,
         ),
     )
+    conn.execute(
+        """
+        INSERT INTO sections (doc_id, ordinal, heading, label, text, char_start, char_end)
+        VALUES (?, 0, 'Costs', 'Costs', ?, 0, ?)
+        """,
+        (ingested.doc_id, text, len(text)),
+    )
+    section_id = int(conn.execute("SELECT id FROM sections").fetchone()[0])
+    conn.execute(
+        """
+        INSERT INTO chunks (section_id, ordinal, text, token_count, char_start, char_end)
+        VALUES (?, 0, ?, ?, 0, ?)
+        """,
+        (section_id, text, len(text.split()), len(text)),
+    )
     conn.commit()
     conn.close()
 
@@ -414,6 +431,11 @@ def test_migration_from_v1_keeps_documents_and_backfills_tables(tmp_path: Path) 
     assert index.schema_version == SCHEMA_VERSION == 2
     assert [document.doc_id for document in index.list_documents()] == [ingested.doc_id]
     assert index.tables(ingested.doc_id) == []
+    # The migrated document keeps its sections and chunks, and the existing
+    # FTS object is backfilled from them.
+    assert [section.text for section in index.sections(ingested.doc_id)] == [text]
+    assert index.search("London")
+    assert index.search_tables("London") == []
 
     # Re-importing the same bytes is a duplicate, but the tables are backfilled
     # once so an old database does not need to be rebuilt.
@@ -426,6 +448,17 @@ def test_migration_from_v1_keeps_documents_and_backfills_tables(tmp_path: Path) 
     index.add_document(duplicate)
     assert len(index.tables(ingested.doc_id)) == 1
     index.close()
+
+
+def test_section_ordinal_is_minus_one_when_unresolved(tmp_path: Path) -> None:
+    source = _markdown(tmp_path, "| a |\n|---|\n| 1 |\n", "orphan.md")
+    extraction = extract_tables(source)
+    assert extraction.tables[0].section_ordinal == -1
+    assert extraction.tables[0].heading == ""
+
+    record = DocumentIngestor(tmp_path / "knowledge").ingest(source)
+    resolved = extract_tables(record.stored_path, sections=record.sections)
+    assert resolved.tables[0].section_ordinal == 0
 
 
 def test_tables_are_removed_with_their_document(tmp_path: Path) -> None:
@@ -474,3 +507,282 @@ def test_no_network_eval_or_trading_imports() -> None:
                 assert not name.startswith(forbidden_prefixes), f"{path.name} imports {name}"
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                 assert node.func.id not in forbidden_calls, f"{path.name} calls {node.func.id}"
+
+
+# ------------------------------------------------- P1/P2 regression coverage
+
+
+@pytest.mark.parametrize("separator", ["\f", "\v", "\u2028"])
+def test_markdown_odd_separators_do_not_shift_offsets(tmp_path: Path, separator: str) -> None:
+    text = f"Intro{separator}prose\n\n| a | b |\n|---|---|\n| 1 | 2 |\n"
+    source = _markdown(tmp_path, text, "odd.md")
+
+    extraction = extract_tables(source)
+
+    assert extraction.problems == ()
+    table = extraction.tables[0]
+    assert text[table.char_start : table.char_start + 9] == "| a | b |"
+    assert text[table.char_end - 1 : table.char_end] == "|"
+
+
+def test_markdown_lone_carriage_returns_are_line_breaks(tmp_path: Path) -> None:
+    text = "Intro\r\r| a | b |\r|---|---|\r| 1 | 2 |\r"
+    source = _markdown(tmp_path, text, "old-mac.md")
+
+    extraction = extract_tables(source)
+
+    assert extraction.problems == ()
+    table = extraction.tables[0]
+    assert table.header == ("a", "b")
+    assert table.rows == (("1", "2"),)
+    assert text[table.char_start : table.char_start + 9] == "| a | b |"
+
+
+def test_markdown_bom_is_outside_the_offset_range(tmp_path: Path) -> None:
+    path = tmp_path / "bom.md"
+    path.write_bytes(b"\xef\xbb\xbf" + b"| a | b |\n|---|---|\n| 1 | 2 |\n")
+    text = path.read_text(encoding="utf-8-sig")
+
+    table = extract_tables(path).tables[0]
+
+    assert text[table.char_start : table.char_start + 9] == "| a | b |"
+    assert text[table.char_start : table.char_end].startswith("| a | b |")
+
+
+def _docx_simple_table(text: str) -> str:
+    return "<w:tbl><w:tr><w:tc><w:p><w:r><w:t>" + text + "</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"
+
+
+def test_docx_empty_table_between_real_tables_keeps_spans(tmp_path: Path) -> None:
+    source = _docx(
+        tmp_path / "three.docx",
+        _docx_simple_table("one") + "<w:tbl></w:tbl>" + _docx_simple_table("three"),
+    )
+
+    extraction = extract_tables(source)
+
+    assert [table.rows for table in extraction.tables] == [(("one",),), (("three",),)]
+    assert [problem.reason for problem in extraction.problems] == ["table has no rows"]
+    document_xml = zipfile.ZipFile(source).read("word/document.xml").decode("utf-8")
+    for table in extraction.tables:
+        assert document_xml[table.char_start : table.char_start + 6] == "<w:tbl"
+
+
+def test_docx_gridspan_at_row_end_is_padded(tmp_path: Path) -> None:
+    body = (
+        "<w:tbl>"
+        "<w:tr><w:trPr><w:tblHeader/></w:trPr>"
+        "<w:tc><w:p><w:r><w:t>a</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>b</w:t></w:r></w:p></w:tc>"
+        "<w:tc><w:p><w:r><w:t>c</w:t></w:r></w:p></w:tc></w:tr>"
+        '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="2"/></w:tcPr>'
+        "<w:p><w:r><w:t>x</w:t></w:r></w:p></w:tc></w:tr>"
+        "</w:tbl>"
+    )
+    source = _docx(tmp_path / "span.docx", body)
+
+    table = extract_tables(source).tables[0]
+
+    assert table.rows == (("x", MERGED_CELL, ""),)
+    assert table.col_count == 3
+
+
+def test_docx_corrupt_archive_and_dtd_are_reported(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.docx"
+    broken.write_bytes(b"not a zip")
+    assert "not a DOCX archive" in extract_tables(broken).problems[0].reason
+
+    payload = (
+        '<?xml version="1.0"?>'
+        '<!DOCTYPE w:document [<!ENTITY boom "expanded">]>'
+        f'<w:document xmlns:w="{WORD_NS}"><w:body>'
+        "<w:p><w:r><w:t>&boom;</w:t></w:r></w:p>"
+        "</w:body></w:document>"
+    )
+    dtd = tmp_path / "dtd.docx"
+    with zipfile.ZipFile(dtd, "w") as archive:
+        archive.writestr("word/document.xml", payload)
+
+    extraction = extract_tables(dtd)
+    assert any("DTD" in problem.reason for problem in extraction.problems)
+
+    record = DocumentIngestor(tmp_path / "knowledge").ingest(dtd)
+    assert record.status == "extraction_failed"
+    assert record.error is not None and "DTD" in record.error
+
+
+def test_docx_is_opened_once_per_ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import scalping.knowledge.tables as tables_module
+
+    source = _docx(tmp_path / "once.docx", _heading("H") + DOCX_TABLE)
+    calls = {"count": 0}
+    original = tables_module.zipfile.ZipFile
+
+    class CountingZip:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls["count"] += 1
+            self._inner = original(*args, **kwargs)  # type: ignore[arg-type]
+
+        def __enter__(self) -> object:
+            return self._inner.__enter__()
+
+        def __exit__(self, *args: object) -> object:
+            return self._inner.__exit__(*args)
+
+    monkeypatch.setattr(tables_module.zipfile, "ZipFile", CountingZip)
+
+    record = DocumentIngestor(tmp_path / "knowledge").ingest(source)
+
+    assert record.status == "indexed"
+    assert record.tables
+    assert calls["count"] == 1
+
+
+def test_html_rowspan_is_clipped_to_the_table_height(tmp_path: Path) -> None:
+    html = '<table><tr><td rowspan="4">A</td><td>1</td></tr><tr><td>2</td></tr></table>'
+    source = tmp_path / "clip.html"
+    source.write_text(html, encoding="utf-8")
+
+    table = extract_tables(source).tables[0]
+
+    assert table.rows == (("A", "1"), (MERGED_CELL, "2"))
+    assert table.row_count == 2
+
+
+def test_html_thead_rowspan_reaches_the_body(tmp_path: Path) -> None:
+    html = (
+        '<table><thead><tr><th rowspan="2">H</th><th>B</th></tr></thead>'
+        "<tbody><tr><td>1</td></tr></tbody></table>"
+    )
+    source = tmp_path / "rowspan.html"
+    source.write_text(html, encoding="utf-8")
+
+    extraction = extract_tables(source)
+
+    assert extraction.problems == ()
+    table = extraction.tables[0]
+    assert table.header == ("H", "B")
+    assert table.rows == ((MERGED_CELL, "1"),)
+
+
+def test_html_multi_row_thead_is_reported_and_not_in_the_body(tmp_path: Path) -> None:
+    html = (
+        "<table><thead><tr><th>H1</th></tr><tr><th>H2</th></tr></thead>"
+        "<tbody><tr><td>1</td></tr></tbody></table>"
+    )
+    source = tmp_path / "multi-head.html"
+    source.write_text(html, encoding="utf-8")
+
+    extraction = extract_tables(source)
+
+    table = extraction.tables[0]
+    assert table.header == ("H1",)
+    assert table.rows == (("1",),)
+    assert "thead has 2 rows" in extraction.problems[0].reason
+
+
+def test_html_rows_are_padded_to_the_header_width(tmp_path: Path) -> None:
+    html = "<table><tr><th>a</th><th>b</th><th>c</th></tr><tr><td>x</td></tr></table>"
+    source = tmp_path / "pad.html"
+    source.write_text(html, encoding="utf-8")
+
+    table = extract_tables(source).tables[0]
+
+    assert table.header == ("a", "b", "c")
+    assert table.rows == (("x", "", ""),)
+    assert table.col_count == 3
+    assert flatten_table(table) == "a\tb\tc\nx\t\t"
+
+
+def test_html_empty_cells_caption_markup_and_spaced_close(tmp_path: Path) -> None:
+    html = (
+        "<table><caption>Cost &amp; <b>fees</b></caption>"
+        "<tr><th>a</th><th>b</th></tr>"
+        "<tr><td></td><td>2</td></tr></table >"
+    )
+    source = tmp_path / "caption.html"
+    source.write_text(html, encoding="utf-8")
+
+    table = extract_tables(source).tables[0]
+
+    assert table.caption == "Cost & fees"
+    assert table.rows == (("", "2"),)
+    assert html[table.char_end - 9 : table.char_end] == "</table >"
+
+
+def test_table_row_limit_is_reported(tmp_path: Path) -> None:
+    body = "\n".join(f"| {number} | x |" for number in range(MAX_TABLE_ROWS + 1))
+    source = _markdown(tmp_path, "| a | b |\n|---|---|\n" + body + "\n", "huge.md")
+
+    extraction = extract_tables(source)
+
+    assert extraction.tables == ()
+    assert f"more than {MAX_TABLE_ROWS} rows" in extraction.problems[0].reason
+
+
+def test_table_search_quotes_operators_and_like_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(KnowledgeIndex, "_setup_fts", lambda *args, **kwargs: "like")
+    text = "# Costs\n\n| Session | Cost |\n|---|---|\n| London | 12 |\n"
+    source = _markdown(tmp_path, text, "costs.md")
+    record = DocumentIngestor(tmp_path / "knowledge").ingest(source)
+    index = _knowledge(tmp_path)
+    assert index.search_backend == "like"
+    assert index.tables_search_backend == "like"
+    index.add_document(record)
+
+    assert index.search_tables("london")[0].score == 0.0
+    assert index.search("london")
+    for query in ['London OR "x"', "London*", "(London)"]:
+        assert index.search_tables(query) is not None
+    index.close()
+
+
+def test_table_fts_triggers_follow_updates_and_deletes(tmp_path: Path) -> None:
+    text = "# Costs\n\n| Session | Cost |\n|---|---|\n| London | 12 |\n"
+    record, index = _ingest_table_doc(tmp_path, text)
+    assert index.search_tables("London")
+
+    with index.transaction() as tx:
+        tx.execute("UPDATE tables SET text = ? WHERE doc_id = ?", ("Replaced value", record.doc_id))
+    assert index.search_tables("Replaced")
+    assert index.search_tables("London") == []
+
+    with index.transaction() as tx:
+        tx.execute("DELETE FROM documents WHERE doc_id = ?", (record.doc_id,))
+    assert index.search_tables("Replaced") == []
+    index.close()
+
+
+def test_partial_backfill_adds_only_missing_tables(tmp_path: Path) -> None:
+    text = "| a |\n|---|\n| 1 |\n\n| b |\n|---|\n| 2 |\n"
+    record, index = _ingest_table_doc(tmp_path, text)
+    assert len(index.tables(record.doc_id)) == 2
+    with index.transaction() as tx:
+        tx.execute("DELETE FROM tables WHERE doc_id = ? AND ordinal = 1", (record.doc_id,))
+    assert len(index.tables(record.doc_id)) == 1
+
+    assert index.backfill_tables(record) == 1
+    assert len(index.tables(record.doc_id)) == 2
+    assert index.backfill_tables(record) == 0
+
+    other = DocumentRecord(
+        doc_id="0" * 64,
+        checksum="0" * 64,
+        filename="absent.md",
+        source_path="/tmp/absent.md",
+        stored_path="/tmp/absent.md",
+        size_bytes=0,
+        mtime="2026-01-01T00:00:00+00:00",
+        format="markdown",
+        parser="stdlib-markdown",
+        parser_version="2",
+        imported_at="2026-01-01T00:00:00+00:00",
+        duplicate=False,
+        status="indexed",
+        tables=(record.tables[0],),
+    )
+    with pytest.raises(KnowledgeIndexError, match="unstored"):
+        index.backfill_tables(other)
+    index.close()

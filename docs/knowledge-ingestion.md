@@ -110,8 +110,11 @@ CASCADE`).
 Opening a version-1 database applies migration 2 in place; existing documents,
 sections, chunks and hypotheses are untouched and `tables(doc_id)` returns an
 empty list for them. Re-ingesting the same bytes (a duplicate record) inserts
-the missing tables once instead of requiring a full rebuild. A database with a
-newer version is still refused.
+the missing tables, and the `knowledge.ingest` handler calls
+`KnowledgeIndex.backfill_tables(record)` on its duplicate branch, so the
+production path backfills too. A partially populated document is completed per
+ordinal; stored tables are never deleted or rewritten. A database with a newer
+version is still refused.
 
 ### Offsets
 
@@ -146,7 +149,7 @@ A `TableRecord` carries:
 | `heading` | heading path at the table, same `" > "` convention as sections |
 | `header` | header row, or `None` |
 | `rows` | body rows only; a tuple of tuples of cell strings |
-| `section_ordinal` | section the table belongs to, best effort (`0` when unknown) |
+| `section_ordinal` | section the table belongs to, best effort; `-1` when unknown |
 | `row_count` | header (when present) plus body rows |
 | `col_count` | widest row after merged-cell expansion |
 | `char_start`, `char_end` | citation span, see below |
@@ -158,35 +161,50 @@ Format rules:
   `w:gridSpan` keeps its text in the first slot; the extra slots are
   placeholders. A `w:vMerge` continuation cell becomes one placeholder,
   whatever its (normally empty) text. Rows shorter than the widest row are
-  padded with empty strings. Nested tables are not descended into.
+  padded with empty strings. Nested tables are not descended into. A table
+  whose `<w:tbl>` span cannot be located in the payload is reported, not stored
+  with an empty range.
 - **HTML** — `html.parser` with `<table>`, `<caption>`, `<thead>`, `<tbody>`,
-  `<tr>`, `<th>`, `<td>`. The first `<thead>` row, or the first body row when
-  every cell is `<th>`, is the header. `colspan` expands to placeholders;
-  `rowspan` reserves the covered slots in later rows as placeholders.
-  `script`, `style`, `noscript` and `template` content is ignored.
+  `<tr>`, `<th>`, `<td>`. All rows are expanded in one grid pass, then the
+  `<thead>` rows are separated by index. The first `<thead>` row, or the first
+  body row when every cell is `<th>`, is the header; a multi-row `<thead>`
+  keeps its first row as the header and reports the extra header rows (they are
+  not stored in `rows`). `colspan` expands to placeholders; `rowspan` reserves
+  covered slots in later rows, including rows after a `<thead>`, and is clipped
+  to the real table height so no phantom rows appear. `script`, `style`,
+  `noscript` and `template` content is ignored.
 - **Markdown** — a header line with `|` followed by an alignment delimiter row
   (`---`, `:--`, `--:`, `:-:`); alignment is validated but not stored. Fenced
   code blocks are skipped entirely. Cells are trimmed and `\|` escapes a pipe.
-  Ragged body rows are padded with empty strings (or truncated) and reported.
-  Inline code spans containing `|` are not protected; a pipe inside backticks
-  still splits the cell.
+  Ragged body rows are truncated to the header width and reported; every row is
+  padded to the table width in one place. Inline code spans containing `|` are
+  not protected; a pipe inside backticks still splits the cell.
 
 Merged-cell placeholder policy: the covering cell keeps the text and every
 covered slot holds the literal `[[merged]]` (`MERGED_CELL`). The extractor
 never copies a value into slots it did not occupy, so "merged" is
 distinguishable from "repeated".
 
+Limits, enforced per table and reported as a `TableProblem`:
+
+- more than `MAX_TABLE_COLUMNS` (512) columns after expansion;
+- more than `MAX_TABLE_ROWS` (10,000) rows including the header;
+- a DOCX payload larger than `MAX_DOCX_XML_BYTES` (32 MiB) or one containing a
+  DTD/entity declaration is refused before `ElementTree` sees it.
+
 Character offsets slice the raw text the extractor read:
 
-- Markdown and HTML: the decoded file text, starting at the header line or
-  `<table>`.
+- Markdown and HTML: the decoded file text with any UTF-8 BOM removed
+  (`utf-8-sig`), starting at the header line or `<table>`.
 - DOCX: the decoded `word/document.xml` payload inside the preserved archive,
-  starting at `<w:tbl>`.
+  starting at `<w:tbl>`. The ingestor reads that payload once and passes it to
+  table extraction (`read_docx_payload`), so a DOCX import opens the archive a
+  single time.
 
 The DOCX body has no stable plain-text rendering, so pointing at the payload is
-the honest option; `char_start < char_end` still locates the element. Offsets
-are citations, not a promise that re-parsing the slice alone reproduces the
-record.
+the honest option. The invariant is `0 <= char_start < char_end`: a table with
+no locatable span becomes a problem instead of an empty range. Offsets are
+citations, not a promise that re-parsing the slice alone reproduces the record.
 
 Table text is not added to section text by this module. The existing paragraph
 extractors already include cell text (DOCX cell paragraphs, HTML visible text,
@@ -375,9 +393,16 @@ experiment links.
 
 `backend/tests/test_knowledge_tables.py` covers DOCX header/`w:tblHeader` and
 merged cells, HTML caption/`thead`/`colspan`/`rowspan`, Markdown alignment and
-fenced-code exclusion, malformed-table reporting, deterministic order, index
-round trips, table search (FTS5 and LIKE), v1→v2 migration with existing
-documents, cascade deletion, and the absence of network/`eval`/trading imports.
+fenced-code exclusion, odd line separators (`\f`, `\v`, `\u2028`, lone `\r`) and
+BOM offsets, malformed-table reporting, DOCX empty-table span alignment,
+broken zip/DTD rejection, deterministic order, index round trips, table search
+(FTS5 and a forced LIKE fallback), row limits, FTS trigger synchronisation,
+partial backfill, v1→v2 migration with existing sections/chunks, cascade
+deletion, and the absence of network/`eval`/trading imports.
+
+`backend/tests/test_orchestrator_handlers.py` covers the production duplicate
+path: a version-1 index plus the same file ingested through the handler
+backfills the table rows.
 
 Run:
 
@@ -398,6 +423,12 @@ uv run mypy src
   tables, floating/positioned tables, multi-page tables, vertical merges that
   also carry content) may flatten or lose a cell. DOCX nested tables are not
   descended into.
+- A multi-row HTML `<thead>` stores only its first row as `header`; the extra
+  header rows are reported and are not part of `rows`. A `rowspan` past the last
+  row is clipped rather than materialised as a phantom row.
+- Tables above `MAX_TABLE_ROWS` (10,000 rows) or `MAX_TABLE_COLUMNS` (512
+  columns after expansion) are reported instead of stored; a DOCX payload with
+  a DTD/entity declaration is refused unparsed.
 - DOCX tables are detected by `w:tbl`/`w:tr`/`w:tc` only. Rows wrapped in
   content controls (`w:sdt`) can be missed; column widths and cell borders are
   not stored.

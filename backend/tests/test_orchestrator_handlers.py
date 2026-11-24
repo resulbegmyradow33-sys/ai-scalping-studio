@@ -15,7 +15,9 @@ ledger. The properties pinned here are the ones a queue depends on:
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,7 +30,11 @@ from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
 from scalping.discovery.protocols import TrialResult
-from scalping.knowledge.index import KnowledgeIndex
+from scalping.knowledge.index import (
+    _MIGRATIONS,
+    _SCHEMA_VERSION_DDL,
+    KnowledgeIndex,
+)
 from scalping.orchestrator import JobStore, Orchestrator
 from scalping.orchestrator.handlers import (
     DEFAULT_HANDLER_KINDS,
@@ -217,6 +223,68 @@ def test_ingest_indexes_a_document_and_is_checksum_idempotent(
         assert len(index.list_documents()) == 1
         assert len(index.sections(first["doc_id"])) == first["sections"]
         assert len(index.list_hypotheses()) == 1
+
+
+def test_ingest_duplicate_backfills_tables_for_a_v1_index(harness: Harness, tmp_path: Path) -> None:
+    document = tmp_path / "research" / "table.md"
+    document.parent.mkdir()
+    text = "| Session | Cost |\n|---|---|\n| London | 12 |\n"
+    document.write_text(text, encoding="utf-8")
+    checksum = hashlib.sha256(document.read_bytes()).hexdigest()
+
+    path = harness.context.knowledge_index_path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.execute(_SCHEMA_VERSION_DDL)
+    for statement in _MIGRATIONS[1]:
+        conn.execute(statement)
+    conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, '2026-01-01')")
+    conn.execute(
+        """
+        INSERT INTO documents (
+            doc_id, checksum, filename, source_path, stored_path, size_bytes, mtime,
+            format, parser, parser_version, imported_at, duplicate, status, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            checksum,
+            checksum,
+            document.name,
+            str(document),
+            str(document),
+            document.stat().st_size,
+            "2026-01-01T00:00:00+00:00",
+            "markdown",
+            "stdlib-markdown",
+            "1",
+            "2026-01-01T00:00:00+00:00",
+            0,
+            "indexed",
+            None,
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    _, outcome, row = harness.run(
+        KIND_KNOWLEDGE_INGEST,
+        {"document_path": str(document)},
+        dedupe="ingest-v1-backfill",
+    )
+    assert outcome.status == "succeeded"
+    payload = data_of(row)
+    assert payload["duplicate"] is True
+    assert payload["doc_id"] == checksum
+    backfill_events = [
+        event for event in events_of(harness.store, row.id) if "tables_backfilled" in event
+    ]
+    assert backfill_events and backfill_events[0]["tables_backfilled"] == 1
+
+    with KnowledgeIndex(path) as index:
+        assert index.schema_version == 2
+        tables = index.tables(checksum)
+        assert [table.rows for table in tables] == [(("London", "12"),)]
+        assert index.search_tables("London")
 
 
 def test_ingest_unsupported_format_is_permanent(harness: Harness, tmp_path: Path) -> None:

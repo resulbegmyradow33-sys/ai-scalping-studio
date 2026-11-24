@@ -166,7 +166,7 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             doc_id TEXT NOT NULL REFERENCES documents(doc_id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-            section_ordinal INTEGER NOT NULL CHECK (section_ordinal >= 0),
+            section_ordinal INTEGER NOT NULL CHECK (section_ordinal >= -1),
             kind TEXT NOT NULL CHECK (kind IN ('docx', 'html', 'markdown')),
             caption TEXT NOT NULL DEFAULT '',
             heading TEXT NOT NULL DEFAULT '',
@@ -877,7 +877,7 @@ class KnowledgeIndex:
             raise ValueError("doc_id must equal the checksum")
         existing = self.document(record.doc_id)
         if existing is not None:
-            self._backfill_tables(existing, record)
+            self.backfill_tables(record)
             return existing
         params = (
             record.doc_id,
@@ -965,8 +965,16 @@ class KnowledgeIndex:
                 )
             text_start = char_end + 2  # the "\n\n" separator
 
-    def _insert_tables(self, tx: sqlite3.Connection, record: DocumentRecord) -> None:
+    def _insert_tables(
+        self,
+        tx: sqlite3.Connection,
+        record: DocumentRecord,
+        *,
+        ordinals: set[int] | None = None,
+    ) -> None:
         for ordinal, table in enumerate(record.tables):
+            if ordinals is not None and ordinal not in ordinals:
+                continue
             header_json = (
                 None if table.header is None else json.dumps(list(table.header), ensure_ascii=False)
             )
@@ -995,20 +1003,43 @@ class KnowledgeIndex:
                 ),
             )
 
-    def _backfill_tables(self, existing: DocumentSummary, record: DocumentRecord) -> None:
-        """Add tables to an already stored document without re-indexing it.
+    def backfill_tables(self, record: DocumentRecord) -> int:
+        """Insert table rows missing from an already stored document.
 
-        A database migrated from schema 1 has documents but no ``tables`` rows.
-        Re-importing the same bytes yields a duplicate record; its extracted
-        tables are inserted once, so the migration is recoverable without
-        deleting and rebuilding the index.
+        A database migrated from schema 1 has documents but no ``tables`` rows;
+        a partial import can also be missing some ordinals. This adds exactly
+        the missing ordinals and never deletes or rewrites a stored table.
+        Returns the number of rows inserted.
+
+        The record must describe a document that is already stored (the
+        duplicate branch of ``knowledge.ingest`` is the production caller).
         """
+        if not isinstance(record, DocumentRecord):
+            raise TypeError("record must be a DocumentRecord")
         if record.status != "indexed" or not record.tables:
-            return
-        if self.tables(existing.doc_id):
-            return
-        with self.transaction() as tx:
-            self._insert_tables(tx, record)
+            return 0
+        existing = self.document(record.doc_id)
+        if existing is None:
+            raise KnowledgeIndexError(
+                f"cannot backfill tables for unstored document {record.doc_id}"
+            )
+        present = {
+            int(row[0])
+            for row in self._connection()
+            .execute("SELECT ordinal FROM tables WHERE doc_id = ?", (record.doc_id,))
+            .fetchall()
+        }
+        missing = {ordinal for ordinal in range(len(record.tables)) if ordinal not in present}
+        if not missing:
+            return 0
+        try:
+            with self.transaction() as tx:
+                self._insert_tables(tx, record, ordinals=missing)
+        except sqlite3.IntegrityError as exc:
+            raise KnowledgeIndexError(
+                f"table backfill for {record.doc_id} conflicted with a concurrent write: {exc}"
+            ) from exc
+        return len(missing)
 
     def document(self, doc_id: str) -> DocumentSummary | None:
         """Stored metadata for ``doc_id``, or ``None`` when unknown."""

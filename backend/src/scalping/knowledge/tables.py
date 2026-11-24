@@ -19,14 +19,21 @@ Character offsets
 -----------------
 ``char_start``/``char_end`` slice the *raw textual source* the extractor read:
 
-* Markdown and HTML: the decoded file text.
+* Markdown and HTML: the decoded file text with any UTF-8 BOM removed (the
+  ingest readers use ``utf-8-sig``), so offsets are relative to the BOM-stripped
+  string, not to the byte sequence on disk.
 * DOCX: the decoded ``word/document.xml`` payload, because the DOCX body has no
   stable plain-text rendering to point at.
 
-The offset invariant is ``char_start < char_end`` and the slice starts at the
-table's opening markup (``|`` for Markdown, ``<table`` for HTML, ``<w:tbl`` for
-DOCX). Offsets are advisory citations, not a promise that re-parsing the slice
-alone reproduces the record.
+The offset invariant is ``0 <= char_start < char_end``: a table with no
+locatable span is reported as a problem, not stored with an empty range. The
+slice starts at the table's opening markup (``|`` for Markdown, ``<table`` for
+HTML, ``<w:tbl`` for DOCX). Offsets are advisory citations, not a promise that
+re-parsing the slice alone reproduces the record.
+
+``section_ordinal`` is ``-1`` when no section list was supplied or no section
+heading matches the table's heading path. Zero means the first section and is
+never used as an "unknown" stand-in.
 
 Malformed input
 ---------------
@@ -79,12 +86,23 @@ _SUFFIX_KIND: dict[str, str] = {
 #: expansion. A hostile file must not turn one row into a million cells.
 MAX_TABLE_COLUMNS = 512
 
+#: Refuse a table with more than this many rows. Extraction is linear, but a
+#: 200k-row HTML table would still occupy the single heavy-job budget for
+#: seconds and fill the index with noise; it is reported instead.
+MAX_TABLE_ROWS = 10_000
+
 _WORD_NAMESPACE = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _W = "{" + _WORD_NAMESPACE + "}"
 _DOCX_HEADING_RE = re.compile(r"^(?:heading|titre|überschrift)[ \t_-]*([1-6])$", re.IGNORECASE)
 
-#: Same 32 MiB bound as the text extractor: refuse a zip bomb before reading.
+#: The one DOCX payload bound, shared with the text extractor: refuse a zip
+#: bomb before reading ``word/document.xml`` into memory.
 MAX_DOCX_XML_BYTES = 32 * 1024 * 1024
+
+#: Reject DTD/entity declarations before ElementTree sees them. A research
+#: document has no business defining entities, and expanding them is a
+#: denial-of-service risk on an 8 GB machine.
+_DTD_RE = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
 
 _MD_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _MD_FENCE_RE = re.compile(r"^\s*(```|~~~)")
@@ -121,8 +139,8 @@ class TableRecord:
             raise ValueError(f"unknown table kind: {self.kind!r}")
         if self.header is not None and not self.header:
             raise ValueError("header must be None or a non-empty row")
-        if self.char_start < 0 or self.char_end < self.char_start:
-            raise ValueError("table offsets must satisfy 0 <= char_start <= char_end")
+        if self.char_start < 0 or self.char_end <= self.char_start:
+            raise ValueError("table offsets must satisfy 0 <= char_start < char_end")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,18 +211,23 @@ def _record(
     char_start: int,
     char_end: int,
 ) -> TableRecord:
+    """Build a record and pad every row to the table width in one place."""
     widths = [len(row) for row in rows]
     if header is not None:
         widths.append(len(header))
     col_count = max(widths, default=0)
+    padded_rows = tuple(tuple(list(row) + [""] * (col_count - len(row))) for row in rows)
+    padded_header = (
+        None if header is None else tuple(list(header) + [""] * (col_count - len(header)))
+    )
     return TableRecord(
         kind=kind,
         caption=caption.strip(),
         heading=heading.strip(),
-        header=header,
-        rows=rows,
+        header=padded_header,
+        rows=padded_rows,
         section_ordinal=section_ordinal,
-        row_count=len(rows) + (0 if header is None else 1),
+        row_count=len(padded_rows) + (0 if padded_header is None else 1),
         col_count=col_count,
         char_start=char_start,
         char_end=char_end,
@@ -212,17 +235,18 @@ def _record(
 
 
 def _section_ordinal(heading: str, sections: Sequence[Section] | None) -> int:
-    """Best-effort section lookup by heading path; ``0`` when it cannot match.
+    """Best-effort section lookup by heading path; ``-1`` when it cannot match.
 
     Heading paths repeat in real documents. The first section with the exact
-    path wins, which is deterministic and never invents a section.
+    path wins, which is deterministic and never invents a section. ``-1`` means
+    "unknown", so it cannot be confused with the first section.
     """
-    if not sections:
-        return 0
+    if sections is None:
+        return -1
     for ordinal, section in enumerate(sections):
         if section.heading.strip() == heading.strip():
             return ordinal
-    return 0
+    return -1
 
 
 def _line_starts(text: str) -> list[int]:
@@ -230,6 +254,26 @@ def _line_starts(text: str) -> list[int]:
     for match in re.finditer("\n", text):
         starts.append(match.end())
     return starts
+
+
+def _split_source_lines(text: str) -> tuple[list[str], list[int]]:
+    """Split on ``\\r\\n``, ``\\r`` or ``\\n`` and return matching offsets.
+
+    One splitter produces both the lines and their start offsets, so they can
+    never disagree. ``str.splitlines`` is not used: it also breaks on ``\\f``,
+    ``\\v``, ``\\x1c``–``\\x1e``, ``\\x85`` and ``\\u2028``, which this offset
+    table does not count.
+    """
+    lines: list[str] = []
+    starts: list[int] = []
+    position = 0
+    for match in re.finditer(r"\r\n|\r|\n", text):
+        starts.append(position)
+        lines.append(text[position : match.start()])
+        position = match.end()
+    starts.append(position)
+    lines.append(text[position:])
+    return lines, starts
 
 
 def _offset_at(starts: list[int], line: int, column: int, length: int) -> int:
@@ -279,8 +323,7 @@ def _markdown_delimiter(line: str) -> list[str] | None:
 
 def _extract_markdown(path: Path, sections: Sequence[Section] | None) -> TableExtraction:
     text = path.read_text(encoding="utf-8-sig")
-    lines = text.splitlines()
-    starts = _line_starts(text)
+    lines, starts = _split_source_lines(text)
     tables: list[TableRecord] = []
     problems: list[TableProblem] = []
     stack: list[tuple[int, str]] = []
@@ -346,6 +389,7 @@ def _extract_markdown(path: Path, sections: Sequence[Section] | None) -> TableEx
 
         body: list[tuple[str, ...]] = []
         cursor = index + 2
+        over_limit = False
         while cursor < len(lines):
             candidate = lines[cursor]
             if (
@@ -355,6 +399,10 @@ def _extract_markdown(path: Path, sections: Sequence[Section] | None) -> TableEx
                 or _MD_HEADING_RE.match(candidate)
             ):
                 break
+            if 2 + len(body) > MAX_TABLE_ROWS:
+                over_limit = True
+                cursor += 1
+                continue
             cells = _split_pipe_row(candidate)
             if len(cells) != len(header_cells):
                 problems.append(
@@ -365,9 +413,20 @@ def _extract_markdown(path: Path, sections: Sequence[Section] | None) -> TableEx
                         starts[cursor],
                     )
                 )
-                cells = (cells + [""] * len(header_cells))[: len(header_cells)]
+                cells = cells[: len(header_cells)]
             body.append(tuple(cells))
             cursor += 1
+
+        if over_limit:
+            problems.append(
+                TableProblem(
+                    "markdown",
+                    f"table has more than {MAX_TABLE_ROWS} rows",
+                    starts[index],
+                )
+            )
+            index = cursor
+            continue
 
         caption = ""
         previous = index - 1
@@ -438,10 +497,11 @@ def _span_value(attrs: list[tuple[str, str | None]], name: str) -> int:
 class _HtmlTableParser(HTMLParser):
     """Collect tables, captions, headings and cell spans from HTML text."""
 
-    def __init__(self, line_starts: list[int], text_length: int) -> None:
+    def __init__(self, text: str) -> None:
         super().__init__(convert_charrefs=True)
-        self._starts = line_starts
-        self._text_length = text_length
+        self._text = text
+        self._starts = _line_starts(text)
+        self._text_length = len(text)
         self._skip = 0
         self._heading_stack: list[tuple[int, str]] = []
         self._heading_level: int | None = None
@@ -548,7 +608,9 @@ class _HtmlTableParser(HTMLParser):
             table.group_is_head = False
         elif tag == "table":
             self._close_row(table)
-            table.char_end = self._offset() + len("</table>")
+            end = self._offset()
+            close = self._text.find(">", end)
+            table.char_end = close + 1 if close >= 0 else end + len("</table>")
             self._open.pop()
 
     def handle_data(self, data: str) -> None:
@@ -585,8 +647,11 @@ def _expand_html_rows(
     """Expand colspan/rowspan into a square grid of strings.
 
     The covering cell keeps its text; every covered slot holds
-    :data:`MERGED_CELL`. Missing trailing cells become ``""``.
+    :data:`MERGED_CELL`. A rowspan that would reach past the last row is
+    clipped to the table height, so no phantom rows are invented. Missing
+    trailing cells become ``""``.
     """
+    height = len(raw_rows)
     grid: dict[tuple[int, int], str] = {}
     for row_index, row in enumerate(raw_rows):
         column = 0
@@ -597,21 +662,21 @@ def _expand_html_rows(
             grid[(row_index, column)] = text
             for extra in range(1, cell.colspan):
                 grid[(row_index, column + extra)] = MERGED_CELL
-            for lower in range(row_index + 1, row_index + cell.rowspan):
+            rowspan = min(cell.rowspan, height - row_index)
+            for lower in range(row_index + 1, row_index + rowspan):
                 for extra in range(cell.colspan):
                     grid[(lower, column + extra)] = MERGED_CELL
             column += cell.colspan
     if not grid:
         return [], 0
     width = max(column for _, column in grid) + 1
-    height = max(row for row, _ in grid) + 1
     rows = [tuple(grid.get((row, column), "") for column in range(width)) for row in range(height)]
     return rows, width
 
 
 def _extract_html(path: Path, sections: Sequence[Section] | None) -> TableExtraction:
     text = path.read_text(encoding="utf-8-sig")
-    parser = _HtmlTableParser(_line_starts(text), len(text))
+    parser = _HtmlTableParser(text)
     try:
         parser.feed(text)
         parser.close()
@@ -625,21 +690,44 @@ def _extract_html(path: Path, sections: Sequence[Section] | None) -> TableExtrac
         if not raw.rows:
             collected.append(TableProblem("html", "table has no rows", raw.char_start))
             continue
-        header: tuple[str, ...] | None = None
-        body_rows = raw.rows
-        head_rows = [row for row in body_rows if row.in_thead]
-        if head_rows:
-            header_row = head_rows[0]
-            body_rows = [row for row in body_rows if row is not header_row]
-            expanded, _ = _expand_html_rows([header_row])
-            header = expanded[0] if expanded else None
-        elif (
-            body_rows and body_rows[0].cells and all(cell.is_header for cell in body_rows[0].cells)
-        ):
-            expanded, _ = _expand_html_rows([body_rows[0]])
-            header = expanded[0] if expanded else None
-            body_rows = body_rows[1:]
-        expanded_rows, _ = _expand_html_rows(body_rows)
+        if len(raw.rows) > MAX_TABLE_ROWS:
+            collected.append(
+                TableProblem(
+                    "html",
+                    f"table has more than {MAX_TABLE_ROWS} rows",
+                    raw.char_start,
+                )
+            )
+            continue
+        expanded_rows, _ = _expand_html_rows(raw.rows)
+        head_indexes = [index for index, row in enumerate(raw.rows) if row.in_thead]
+        header: tuple[str, ...] | None
+        if head_indexes:
+            header = expanded_rows[head_indexes[0]]
+            head_set = set(head_indexes)
+            body_rows = tuple(
+                row for index, row in enumerate(expanded_rows) if index not in head_set
+            )
+            if len(head_indexes) > 1:
+                collected.append(
+                    TableProblem(
+                        "html",
+                        f"thead has {len(head_indexes)} rows; only the first is stored as "
+                        "the header",
+                        raw.char_start,
+                    )
+                )
+        elif raw.rows[0].cells and all(cell.is_header for cell in raw.rows[0].cells):
+            header = expanded_rows[0]
+            body_rows = tuple(expanded_rows[1:])
+        else:
+            header = None
+            body_rows = tuple(expanded_rows)
+        if raw.char_end <= raw.char_start:
+            collected.append(
+                TableProblem("html", "table has no locatable source span", raw.char_start)
+            )
+            continue
         caption = _WHITESPACE_RE.sub(" ", "".join(raw.caption)).strip()
         tables.append(
             _record(
@@ -647,10 +735,10 @@ def _extract_html(path: Path, sections: Sequence[Section] | None) -> TableExtrac
                 caption=caption,
                 heading=raw.heading,
                 header=header,
-                rows=tuple(expanded_rows),
+                rows=body_rows,
                 section_ordinal=_section_ordinal(raw.heading, sections),
                 char_start=raw.char_start,
-                char_end=max(raw.char_start, raw.char_end),
+                char_end=raw.char_end,
             )
         )
     return TableExtraction(tables=tuple(tables), problems=tuple(collected))
@@ -761,19 +849,13 @@ def _docx_table_record(
     if rows_raw and _docx_row_is_header(rows_raw[0]):
         header = tuple(_docx_expand_row(rows_raw[0]))
         body_start = 1
-    body = tuple(_docx_expand_row(row) for row in rows_raw[body_start:])
-    widths = [len(row) for row in body]
-    if header is not None:
-        widths.append(len(header))
-    width = max(widths, default=0)
-    padded = tuple(tuple(list(row) + [""] * (width - len(row))) for row in body)
-    padded_header = None if header is None else tuple(list(header) + [""] * (width - len(header)))
+    body = tuple(tuple(_docx_expand_row(row)) for row in rows_raw[body_start:])
     return _record(
         kind="docx",
         caption=caption,
         heading=heading,
-        header=padded_header,
-        rows=padded,
+        header=header,
+        rows=body,
         section_ordinal=_section_ordinal(heading, sections),
         char_start=char_start,
         char_end=char_end,
@@ -792,44 +874,63 @@ def _docx_expand_row(row: ElementTree.Element) -> list[str]:
     return cells
 
 
-def _extract_docx(path: Path, sections: Sequence[Section] | None) -> TableExtraction:
+def read_docx_payload(path: Path) -> bytes:
+    """Read ``word/document.xml`` with the shared size and DTD guards.
+
+    The text extractor and the table extractor both call this, so a DOCX is
+    read once per import and neither path can disagree about the limits.
+    Raises :class:`zipfile.BadZipFile` or :class:`ValueError` with a reason.
+    """
+    with zipfile.ZipFile(path) as archive:
+        try:
+            info = archive.getinfo("word/document.xml")
+        except KeyError as exc:
+            raise ValueError("DOCX has no word/document.xml") from exc
+        if info.file_size > MAX_DOCX_XML_BYTES:
+            raise ValueError(
+                f"word/document.xml is {info.file_size} bytes, above the "
+                f"{MAX_DOCX_XML_BYTES} byte limit"
+            )
+        payload = archive.read(info)
+    if _DTD_RE.search(payload):
+        raise ValueError("word/document.xml contains a DTD or entity declaration")
+    return payload
+
+
+def _extract_docx(
+    path: Path,
+    sections: Sequence[Section] | None,
+    payload: bytes | None = None,
+) -> TableExtraction:
     try:
-        with zipfile.ZipFile(path) as archive:
-            try:
-                info = archive.getinfo("word/document.xml")
-            except KeyError:
-                return TableExtraction(
-                    problems=(TableProblem("docx", "DOCX has no word/document.xml"),)
-                )
-            if info.file_size > MAX_DOCX_XML_BYTES:
-                return TableExtraction(
-                    problems=(
-                        TableProblem(
-                            "docx",
-                            f"word/document.xml is {info.file_size} bytes, above the "
-                            f"{MAX_DOCX_XML_BYTES} byte limit",
-                        ),
-                    )
-                )
-            payload_bytes = archive.read(info)
+        payload_bytes = read_docx_payload(path) if payload is None else payload
     except zipfile.BadZipFile as exc:
         return TableExtraction(problems=(TableProblem("docx", f"not a DOCX archive: {exc}"),))
+    except ValueError as exc:
+        return TableExtraction(problems=(TableProblem("docx", str(exc)),))
+    if _DTD_RE.search(payload_bytes):
+        return TableExtraction(
+            problems=(
+                TableProblem("docx", "word/document.xml contains a DTD or entity declaration"),
+            )
+        )
 
-    payload = payload_bytes.decode("utf-8", errors="replace")
+    payload_text = payload_bytes.decode("utf-8", errors="replace")
     try:
         root = ElementTree.fromstring(payload_bytes)
     except ElementTree.ParseError as exc:
         return TableExtraction(problems=(TableProblem("docx", f"invalid document XML: {exc}"),))
 
-    spans = _docx_table_spans(payload)
+    spans = _docx_table_spans(payload_text)
     tables: list[TableRecord] = []
     problems: list[TableProblem] = []
     stack: list[tuple[int, str]] = []
     heading = ""
     last_paragraph = ""
+    visited = 0
 
     def walk(container: ElementTree.Element) -> None:
-        nonlocal heading, last_paragraph
+        nonlocal heading, last_paragraph, visited
         for child in container:
             if child.tag == f"{_W}p":
                 style = ""
@@ -850,25 +951,40 @@ def _extract_docx(path: Path, sections: Sequence[Section] | None) -> TableExtrac
                 else:
                     last_paragraph = text
             elif child.tag == f"{_W}tbl":
-                index = len(tables)
+                index = visited
+                visited += 1
+                caption = last_paragraph if _TABLE_CAPTION_RE.match(last_paragraph) else ""
+                rows_raw = child.findall(f"{_W}tr")
                 if index >= len(spans):
-                    char_start = 0
-                    char_end = 0
+                    problems.append(
+                        TableProblem(
+                            "docx",
+                            "table has no locatable source span",
+                            spans[0][0] if spans else 0,
+                        )
+                    )
+                elif len(rows_raw) > MAX_TABLE_ROWS:
+                    problems.append(
+                        TableProblem(
+                            "docx",
+                            f"table has more than {MAX_TABLE_ROWS} rows",
+                            spans[index][0],
+                        )
+                    )
+                elif not rows_raw:
+                    problems.append(TableProblem("docx", "table has no rows", spans[index][0]))
                 else:
                     char_start, char_end = spans[index]
-                caption = last_paragraph if _TABLE_CAPTION_RE.match(last_paragraph) else ""
-                table = _docx_table_record(
-                    child,
-                    heading=heading,
-                    caption=caption,
-                    sections=sections,
-                    char_start=char_start,
-                    char_end=char_end,
-                )
-                if table.row_count == 0:
-                    problems.append(TableProblem("docx", "table has no rows", char_start))
-                else:
-                    tables.append(table)
+                    tables.append(
+                        _docx_table_record(
+                            child,
+                            heading=heading,
+                            caption=caption,
+                            sections=sections,
+                            char_start=char_start,
+                            char_end=char_end,
+                        )
+                    )
                 last_paragraph = ""
             elif child.tag in {f"{_W}sdt", f"{_W}sdtContent"}:
                 walk(child)
@@ -885,6 +1001,8 @@ def _extract_docx(path: Path, sections: Sequence[Section] | None) -> TableExtrac
 def extract_tables(
     path: str | Path,
     sections: Sequence[Section] | None = None,
+    *,
+    docx_payload: bytes | None = None,
 ) -> TableExtraction:
     """Extract tables from ``path`` in document order.
 
@@ -892,6 +1010,9 @@ def extract_tables(
     used only to resolve ``section_ordinal`` by exact heading path. A missing
     file raises; a malformed document returns problems instead of raising and
     never aborts the remaining tables.
+
+    ``docx_payload`` lets the ingestor pass the ``word/document.xml`` bytes it
+    already read, so a DOCX is not opened twice. Ignored for other formats.
     """
     if not isinstance(path, (str, Path)):
         raise TypeError(f"path must be a str or Path, got {type(path).__name__}")
@@ -908,6 +1029,6 @@ def extract_tables(
             return _extract_markdown(source, sections)
         if kind == "html":
             return _extract_html(source, sections)
-        return _extract_docx(source, sections)
+        return _extract_docx(source, sections, docx_payload)
     except Exception as exc:  # noqa: BLE001 - untrusted input, report instead of crash
         return TableExtraction(problems=(TableProblem(kind, f"{type(exc).__name__}: {exc}"),))
