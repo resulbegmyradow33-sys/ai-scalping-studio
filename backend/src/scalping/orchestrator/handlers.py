@@ -15,9 +15,9 @@ What a handler may do
   stored symbol/timeframe from the same feature cache every other command uses.
 * ``discovery.run`` — run one bounded, seeded discovery experiment with an
   explicit gate and cost-stress policy and record its decision.
-* ``paper.advance`` — read the **governed champion** of a scope and advance the
-  autonomous paper runner by a bar budget. No champion is NO TRADE with a
-  reason; there is no fallback to the legacy rule.
+* ``paper.advance`` — read the **governed champion** of a scope and advance its
+  continuous paper session to the newest closed stored bar. No champion is NO
+  TRADE with a reason; there is no fallback to the legacy rule.
 * ``paper.analyse`` — summarise closed paper trades only, attributed by spec
   hash and a fingerprint of the bars the session actually saw.
 
@@ -42,6 +42,11 @@ does not parse. A retry would see the same input, so the queue must not spend
 attempts on it. Everything else — an I/O error, a locked database, an
 unexpected bug — propagates and stays retryable. NO TRADE is a success result,
 not a failure.
+
+``paper.advance`` refusals follow the same split with a typed prefix in the job
+error: ``bar_gap`` is retryable because a later ingestion can close the gap,
+while ``bar_order``, ``session_conflict`` and ``continuous_refused`` are
+permanent.
 """
 
 from __future__ import annotations
@@ -89,8 +94,15 @@ from scalping.orchestrator.core import (
     PermanentJobError,
 )
 from scalping.orchestrator.store import Job
-from scalping.paper.autonomous import AutonomousPaperRunner
+from scalping.paper.continuous import (
+    BarGapError,
+    BarOrderError,
+    ContinuousError,
+    ContinuousPaperRunner,
+    SessionMismatchError,
+)
 from scalping.paper.ledger import PaperLedger, PositionRecord
+from scalping.paper.runner import ResumeError
 from scalping.registry.gate import GateCriteria
 
 __all__ = [
@@ -153,6 +165,21 @@ _HASH_CHUNK_BYTES: Final[int] = 1024 * 1024
 
 class PayloadError(ValueError):
     """A job payload is invalid; a retry cannot change it."""
+
+
+class PaperAdvanceError(Exception):
+    """A continuous paper advance was refused; ``reason`` names the typed cause.
+
+    A ``bar_gap`` is retryable: the missing bar may still be ingested, so the
+    queue may spend a bounded retry after its backoff. ``bar_order``,
+    ``session_conflict`` and ``continuous_refused`` cannot heal on their own and
+    are raised as :class:`PermanentJobError` with the same prefix, so the queue
+    does not repeat them.
+    """
+
+    def __init__(self, reason: str, detail: str) -> None:
+        super().__init__(f"{reason}: {detail}")
+        self.reason = reason
 
 
 # --------------------------------------------------------------------------- context
@@ -893,10 +920,12 @@ def _no_trade(
         _jsonable(
             {
                 "action": "no_trade",
+                "mode": "continuous",
                 "reason": reason,
                 "reason_class": reason_class,
                 "scope": scope,
                 "bars_requested": bars,
+                "bars_advanced": 0,
                 "touched": False,
                 "ledger_created": False,
                 "champion": None,
@@ -972,45 +1001,70 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
         ledger_path = context.paper_ledger_path
         with PaperLedger(ledger_path) as ledger:
             try:
-                runner = AutonomousPaperRunner(
+                runner = ContinuousPaperRunner(
                     ledger,
                     champion.spec,
                     request.symbol,
                     request.timeframe,
                     context.settings,
+                    store_root=context.data_root,
                     cache=context.use_feature_cache,
-                    data_root=context.data_root,
+                    scope=scope,
                 )
             except ValueError as exc:
                 raise PermanentJobError(
-                    f"{KIND_PAPER_ADVANCE}: the paper runner refused the scope or the spec: {exc}"
+                    f"{KIND_PAPER_ADVANCE}: the continuous paper runner refused the "
+                    f"scope or the spec: {exc}"
                 ) from exc
-            run = runner.run(bars=request.bars)
-            summary = runner.summary()
-            position = _position_payload(summary.position)
+            try:
+                advance = runner.advance()
+            except BarGapError as exc:
+                # Retryable: the missing bar may still be ingested. The typed
+                # reason is part of the job error so the queue log names it.
+                raise PaperAdvanceError("bar_gap", str(exc)) from exc
+            except BarOrderError as exc:
+                raise PermanentJobError(f"{KIND_PAPER_ADVANCE}: bar_order: {exc}") from exc
+            except SessionMismatchError as exc:
+                raise PermanentJobError(f"{KIND_PAPER_ADVANCE}: session_conflict: {exc}") from exc
+            except ResumeError as exc:
+                # The ledger cannot reproduce this session; a retry would invent state.
+                raise PermanentJobError(f"{KIND_PAPER_ADVANCE}: session_conflict: {exc}") from exc
+            except ContinuousError as exc:
+                raise PermanentJobError(f"{KIND_PAPER_ADVANCE}: continuous_refused: {exc}") from exc
+
+            state = ledger.resume(runner.session_id) if advance.status != "new" else None
+            trades = ledger.trades(runner.session_id) if state is not None else []
+            realized_pnl = float(sum(trade.pnl for trade in trades))
+            position = None if state is None else _position_payload(state.position)
             data = {
                 "action": "advanced",
+                "mode": "continuous",
                 "reason": (
-                    f"governed champion {champion.candidate_id[:12]} advanced {run.steps} bar(s)"
+                    f"governed champion {champion.candidate_id[:12]} advanced"
+                    f" {advance.new_bars} bar(s) in continuous mode"
                 ),
+                "status": advance.status,
                 "scope": scope,
                 "session_id": runner.session_id,
                 "spec_hash": champion.spec_hash,
                 "candidate_id": champion.candidate_id,
                 "promotion_id": champion.promotion_id,
                 "bars_requested": request.bars,
-                "bars_this_call": run.steps,
-                "bars_processed": summary.bars_processed,
-                "trades": summary.trades,
-                "realized_pnl": summary.realized_pnl,
-                "balance": summary.balance,
-                "equity": summary.equity,
+                "bars_advanced": advance.new_bars,
+                "bars_this_call": advance.new_bars,
+                "new_signals": advance.new_signals,
+                "new_trades": advance.new_trades,
+                "bars_processed": advance.bars_processed,
+                "trades": advance.trades,
+                "realized_pnl": realized_pnl,
+                "balance": None if state is None else state.balance,
+                "equity": None if state is None else state.equity,
                 "position": position,
                 "last_bar_ts": (
-                    None if summary.last_bar_ts is None else summary.last_bar_ts.isoformat()
+                    None if advance.last_bar_ts is None else advance.last_bar_ts.isoformat()
                 ),
-                "done": run.done,
-                "done_reason": run.reason,
+                "done": advance.done,
+                "done_reason": advance.reason,
                 "ledger": str(ledger_path),
                 "ledger_created": True,
             }
@@ -1021,7 +1075,9 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
                     "scope": scope,
                     "session_id": runner.session_id,
                     "spec_hash": champion.spec_hash,
-                    "bars": run.steps,
+                    "mode": "continuous",
+                    "bars": advance.new_bars,
+                    "bars_processed": advance.bars_processed,
                 },
             )
             return HandlerResult.success(_jsonable(data))
