@@ -66,7 +66,7 @@ def test_schema_is_created_once_and_versioned(tmp_path: Path) -> None:
     second = JobStore(path)
     assert second.schema_version == SCHEMA_VERSION
     versions = [row["version"] for row in second.connection.execute("SELECT * FROM schema_version")]
-    assert versions == [SCHEMA_VERSION]
+    assert versions == list(range(1, SCHEMA_VERSION + 1))
     second.close()
 
 
@@ -83,6 +83,26 @@ def test_newer_schema_is_refused(tmp_path: Path) -> None:
     conn.close()
     with pytest.raises(StoreError, match="newer than supported"):
         JobStore(path)
+
+
+def test_v1_queue_migrates_the_deferral_columns(tmp_path: Path) -> None:
+    path = tmp_path / "orchestrator.sqlite3"
+    JobStore(path).close()
+
+    # Rebuild the shape a v1 file had: no deferral columns, no v2 row.
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE jobs DROP COLUMN defer_count")
+    conn.execute("ALTER TABLE jobs DROP COLUMN max_deferrals")
+    conn.execute("DELETE FROM schema_version WHERE version = 2")
+    conn.commit()
+    conn.close()
+
+    migrated = JobStore(path)
+    assert migrated.schema_version == SCHEMA_VERSION
+    job, _ = migrated.enqueue("train", dedupe_key="train:migrated", now=T0)
+    assert job.defer_count == 0
+    assert job.max_deferrals == 1440
+    migrated.close()
 
 
 def test_enqueue_is_idempotent_by_dedupe_key(tmp_path: Path) -> None:
@@ -234,6 +254,32 @@ def test_defer_returns_the_job_without_spending_an_attempt(tmp_path: Path) -> No
     assert _claimed(store, now=T0 + timedelta(seconds=15)) == job_id
     claimed = store.get(job_id)
     assert claimed is not None and claimed.attempts == 1
+
+
+def test_defer_cap_fails_the_job_terminally(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    job, _ = store.enqueue("train", dedupe_key="train:defer-cap", max_deferrals=1, now=T0)
+    assert _claimed(store, now=T0) == job.id
+    deferred = store.defer(job.id, "busy", delay_seconds=60, now=T0)
+    assert deferred.status == "queued"
+    assert deferred.defer_count == 1
+
+    assert _claimed(store, now=T0 + timedelta(seconds=60)) == job.id
+    failed = store.defer(job.id, "still busy", delay_seconds=60, now=T0 + timedelta(seconds=60))
+    assert failed.status == "failed"
+    assert failed.defer_count == 1
+    assert failed.max_deferrals == 1
+    assert failed.error is not None and "deferral cap reached" in failed.error
+    assert failed.attempts == 1
+    assert [row.event for row in store.events(job.id)] == [
+        "enqueued",
+        "started",
+        "deferred",
+        "started",
+        "defer_exhausted",
+    ]
+    assert store.stats().deferrals == 1
+    assert _claimed(store, now=T0 + timedelta(days=1)) is None
 
 
 def test_defer_requires_a_running_job(tmp_path: Path) -> None:
