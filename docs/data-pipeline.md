@@ -322,6 +322,27 @@ The endpoint reads the whole stored slice, like `/api/data/validate`, and never
 writes, repairs or backfills. `include_outliers=false` is the escape hatch for
 a large store; it skips only the O(n) robust-z pass.
 
+### Data page quality panel
+
+The Data page (`frontend/src/components/data-quality-panel.tsx`) renders this
+endpoint under "Veri kalitesi". It reuses the page's symbol field and adds a
+timeframe select populated from `GET /api/timeframes`; the report is refetched
+when either changes and does not poll (the backend validates the whole slice).
+
+- The badge shows `ok|warn|fail` plus `status_rule` and the server's verbatim
+  `status_detail`. When the slice is unconfigured, the badge says
+  "Yapılandırılmadı" instead of a fail verdict, because nothing was checked.
+- The counters table (with caption and scoped headers) prints the validator's
+  counts. A `—` cell is a null count: unconfigured slice, or an outlier pass
+  skipped below `outlier_min_rows`. A note under the table states which, and
+  `0` always means "checked and clean".
+- First/last bar, provenance kind (`Sentetik`/`Gerçek`) and source come from the
+  report's `provenance`; a null sidecar prints "Köken kaydı yok".
+- The threshold line shows the effective `thresholds`, so a gap count can be
+  read against the rule that produced it.
+- An unregistered symbol (422) shows the server's `detail` verbatim; the panel
+  never substitutes a local guess for a failed request.
+
 ## Provenance
 
 `scalping/data/provenance.py` writes a sidecar:
