@@ -4,6 +4,18 @@ mode: subagent
 permissions:
   - action: edit
     resource: "*"
+    effect: deny
+  - action: edit
+    resource: "backend/tests/**"
+    effect: allow
+  - action: edit
+    resource: "frontend/**/*.test.*"
+    effect: allow
+  - action: edit
+    resource: "frontend/**/*.spec.*"
+    effect: allow
+  - action: edit
+    resource: "tests/**"
     effect: allow
   - action: shell
     resource: "*"
