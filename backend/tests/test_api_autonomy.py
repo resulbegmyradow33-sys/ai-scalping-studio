@@ -160,7 +160,7 @@ def _seed_archive(path: Path) -> str:
             code_version="test-2026-11-24",
             seed=3,
         )
-        archive.promote(
+        archive.promote_exploratory(
             record.candidate_id,
             scope=SCOPE,
             reason="beats baseline after costs",
@@ -410,7 +410,7 @@ def test_champions_without_metadata_fall_back_to_the_candidate_digest(
             code_version="test-2026-11-24",
             seed=1,
         )
-        archive.promote(
+        archive.promote_exploratory(
             record.candidate_id,
             scope=SCOPE,
             reason="small but measured",
