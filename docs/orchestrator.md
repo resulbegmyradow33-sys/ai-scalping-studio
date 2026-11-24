@@ -20,6 +20,7 @@ process, not an operating-system service.
 | `backend/src/scalping/orchestrator/store.py` | SQLite queue + append-only events + persisted state |
 | `backend/src/scalping/orchestrator/core.py` | Handler registry, controls, claim/run/fail/retry loop |
 | `backend/src/scalping/orchestrator/triggers.py` | `TriggerSource` protocol, `FileTriggerSource`, `scan_once` |
+| `backend/src/scalping/orchestrator/data_triggers.py` | `DataFileTriggerSource`: market-data files → `dataset.build` |
 | `backend/src/scalping/orchestrator/handlers.py` | `HandlerContext`, payload validators, the five pipeline handlers |
 | `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
 | `backend/src/scalping/orchestrator/daemon.py` | `DaemonConfig`, `OrchestratorDaemon`, tick order, background loop, status |
@@ -30,6 +31,7 @@ process, not an operating-system service.
 | `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
 | `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
 | `backend/tests/test_orchestrator_daemon.py` | Tick order, dedupe, controls, guard defer, isolation, start/stop, CLI |
+| `backend/tests/test_data_triggers.py` | Market-data layout inference, dedupe across restart and crash, refusals, caps, CLI |
 | `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
 ## What is not in this slice
@@ -173,6 +175,10 @@ uv run scalping.cli orchestrator run --forever --poll-seconds 5
 # watch a directory: each new/changed file enqueues knowledge.ingest
 uv run scalping.cli orchestrator run --forever --watch-dir docs/research
 
+# watch a market-data root: each new file enqueues dataset.build for its
+# <symbol>/<timeframe>; files outside that layout are refused, never guessed
+uv run scalping.cli orchestrator run --forever --watch-data-dir data
+
 # tests/dev only: no measured guard, status says unmeasured
 uv run scalping.cli orchestrator run --once --profile none
 ```
@@ -182,12 +188,15 @@ uv run scalping.cli orchestrator run --once --profile none
 `--runs-root runs`, `--archive-root data`, with the paper ledger at
 `<archive-root>/paper.sqlite`, matching the API default).
 
-There is no trigger by default: without `--watch-dir` the daemon scans nothing
+There is no trigger by default: without a watch flag the daemon scans nothing
 and the queue is filled by another process. `--watch-dir` binds one
 `FileTriggerSource`; `--watch-kind` defaults to `knowledge.ingest` and the CLI
-adapts the file payload to that handler's `document_path`. `--no-scan` is
-meaningful only in that default mode; combining it with `--watch-dir` is a CLI
-error.
+adapts the file payload to that handler's `document_path`. A raw file payload
+cannot satisfy `dataset.build` (it needs `symbol` and `timeframe`), so
+`--watch-kind dataset.build` is a CLI error and points at `--watch-data-dir`,
+which binds `DataFileTriggerSource` instead. `--no-scan` is meaningful only in
+the default mode; combining it with either watch flag is a CLI error, and the
+two watch flags are mutually exclusive in one process.
 
 `--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
 store error). A job-level handler failure is a recorded job outcome and still
@@ -754,6 +763,119 @@ of the cursor on the next scan.
 one `trigger_scan` event. There is no filesystem watcher; a caller decides how
 often to scan.
 
+### Market-data files (Phase 18)
+
+`DataFileTriggerSource(root, store=..., max_emits=100, since=None)` turns a new
+or changed Parquet/CSV file under a data root into exactly one `dataset.build`.
+It emits the handler's own contract, not the raw file shape, so the queue and
+the handler agree without an adapter:
+
+| Field | Value |
+|---|---|
+| `kind` | `dataset.build` (the only accepted kind) |
+| `dedupe_key` | `dataset.build:data:{sha256[:16]}` |
+| payload | `symbol`, `timeframe`, `notes` (relative path, digest prefix, size) |
+| `max_retries` | `1` by default |
+
+`notes` is audit text; `symbol` and `timeframe` are the two fields the handler
+requires. `scalping.orchestrator.handlers.DatasetRequest.from_payload` accepts
+the payload unchanged, and a test asserts the two modules name the same kind.
+
+#### Layout inference
+
+The accepted shape is `<symbol>/<timeframe>/.../<file>.parquet|.csv`:
+
+```
+data/XAUUSD/M1/2026/01.parquet   -> symbol=XAUUSD timeframe=M1
+data/XAUUSD/H1/bars.csv         -> symbol=XAUUSD timeframe=H1
+```
+
+`symbol` must match the same `^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$` token the
+handler enforces and is upper-cased the way the data registry already resolves
+it. `timeframe` is upper-cased and must be one of `TIMEFRAMES` (`M1`, `M5`,
+`M15`, `M30`, `H1`, `H4`, `D1`). Deeper directories are allowed, so the store's
+`<year>/<month>.parquet` partitions need no special case. Dot-prefixed path
+segments are ignored: that skips `.feature-cache`, dotfiles and atomic-write
+temp files without a name list.
+
+Anything else is **refused, never guessed**:
+
+| `reason` | Example | Effect |
+|---|---|---|
+| `unknown_layout` | `<root>/loose.parquet`, `XAUUSD/bars.parquet` | `data.trigger_refused`, no job |
+| `invalid_symbol` | `../M1/bars.parquet`, `.cache/M1/bars.parquet` | `data.trigger_refused`, no job |
+| `unknown_timeframe` | `XAUUSD/YEARLY/bars.parquet` | `data.trigger_refused`, no job |
+
+The refusal is recorded once per `(relative path, size, mtime)`; a periodic scan
+does not repeat the same line. Renaming the file into a valid layout makes it a
+new relative path and it is evaluated normally. A file that is not
+`.parquet`/`.csv` is ignored silently, because the data root also holds caches
+and metadata written by other stages.
+
+#### Dedupe
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.data:dataset.build:<absolute root>`:
+
+```json
+{"version": 1,
+ "files": {"XAUUSD/M1/2026/01.parquet": {"size": 1024, "mtime_ns": 1, "sha256": "...",
+                                          "symbol": "XAUUSD", "timeframe": "M1",
+                                          "status": "emitted"}},
+ "checksums": {"<sha256>": "XAUUSD/M1/2026/01.parquet"}}
+```
+
+Two layers keep a scan from duplicating work:
+
+1. **Stat fast path.** A file whose `size` and `mtime_ns` match the cursor is
+   skipped without hashing. `checksums` holds every digest this root already
+   emitted, so byte-identical content under another name, or a revert to an
+   earlier version, updates the cursor but emits nothing.
+2. **Job key.** `dataset.build:data:{sha256[:16]}` is stable across scans for the
+   same bytes. If the process crashes between enqueue and `seen`, the cursor is
+   never persisted; the next scan hashes the file again, emits the same key and
+   the store returns the existing job as a duplicate. There is exactly one job
+   for that content, not two.
+
+The full digest is kept in the cursor for audit; the 64-bit prefix in the key is
+short and readable, and a collision would need two different files under one
+root. A changed file has a new digest and emits once; after `seen` the stat path
+suppresses it until it changes again. The checksum set is never pruned, so a
+removed and later re-added identical file is treated as seen.
+
+#### Limits
+
+- **No scheduler and no market clock.** `scan()` is a call. Nothing watches the
+  filesystem, sleeps or decides that a bar has closed. A file written while a
+  scan is running may wait for the next pass.
+- **`mtime` is metadata, not event time.** Copies, restores and some network
+  filesystems preserve a stale mtime, and a clock change can move it backwards.
+  The stat fast path and `since` both trust it; a file whose mtime predates
+  `since` is skipped until it changes.
+- **A file still being written can be seen mid-write.** The source hashes what
+  is on disk when it arrives; an in-place writer produces an intermediate
+  digest, then a second trigger when the file changes again. Write to a temp
+  name and rename (the store's own partition writes do this, and dot-prefixed
+  temp files are ignored) to get one trigger per finished file.
+- **Extension and layout are the only signals.** Content is never parsed here. A
+  stray CSV under a valid symbol/timeframe triggers a rebuild; whether the
+  stored bars are readable is the handler's decision, and an unreadable scope is
+  a permanent job failure.
+- **`max_emits` caps one scan** (default 100, maximum 1000) and writes
+  `data.trigger_deferred` with the count. Files over the cap are left out of the
+  cursor and are re-evaluated next scan; they are delayed, not dropped.
+- **`since` is a wall-clock mtime lower bound** and accepts a timezone-aware
+  `datetime` or an ISO-8601 string with an offset. A naive timestamp is
+  rejected.
+- **`discovery.run` is deliberately not emitted.** Its payload requires a gate,
+  a trial budget and a seed, none of which a filename can supply. Inventing them
+  would turn a data arrival into an unapproved search policy. A caller that
+  wants discovery after a dataset build enqueues it explicitly with that
+  policy.
+- **One process owns the cursor.** The job store is one local SQLite file, same
+  as every other trigger source; two daemons over one database are unsupported
+  here too.
+
 ### Matured paper outcomes (P5 slice 2)
 
 `PaperOutcomeTriggerSource` closes part of the loop: a paper session's completed
@@ -1126,6 +1248,19 @@ real `SystemProbe` on the host; `measure` recording finite wall/CPU/RSS values
 and a failed block without masking it; a bounded sample ring; JSON-safe
 payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
 job with the measured reason in its event log.
+
+The market-data trigger tests (`tests/test_data_triggers.py`) cover: a new
+Parquet/CSV under `<symbol>/<timeframe>` emits one `dataset.build` whose payload
+`DatasetRequest.from_payload` accepts; a second scan is a no-op; the cursor
+survives a store restart; changed bytes emit exactly once; identical bytes under
+another path emit nothing; the three layout refusals are logged once and create
+no job; a missing root is a no-op; a simulated crash between scan and
+acknowledgement leaves one job after the store restart; `max_emits` defers the
+overflow without losing it; `since` skips old mtimes until the file changes;
+symbol/timeframe case is normalised; dot-prefixed paths are ignored; the
+constructor rejects a non-directory root and an unservable kind; and the CLI
+`--watch-data-dir` enqueues once while `--watch-kind dataset.build` and two watch
+roots are rejected.
 
 The paper-outcome trigger tests (`tests/test_paper_outcome_triggers.py`) cover: a
 new fingerprint enqueues one job; the store key dedupes a crash before

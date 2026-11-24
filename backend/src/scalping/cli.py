@@ -1061,6 +1061,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     """Run one tick (``--once``) or a supervised loop (``--forever``)."""
     from scalping.orchestrator.core import Orchestrator
     from scalping.orchestrator.daemon import DaemonConfig, OrchestratorDaemon
+    from scalping.orchestrator.data_triggers import DataFileTriggerSource
     from scalping.orchestrator.handlers import (
         HEAVY_HANDLER_KINDS,
         KIND_DATASET_BUILD,
@@ -1072,8 +1073,15 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     )
     from scalping.orchestrator.store import JobStore
 
-    if args.no_scan and args.watch_dir:
-        raise CliError("--no-scan and --watch-dir cannot be combined")
+    if args.no_scan and (args.watch_dir or args.watch_data_dir):
+        raise CliError("--no-scan cannot be combined with a watch directory")
+    if args.watch_dir and args.watch_data_dir:
+        raise CliError("--watch-dir and --watch-data-dir cannot be combined")
+    if args.watch_dir and args.watch_kind == KIND_DATASET_BUILD:
+        raise CliError(
+            "--watch-kind dataset.build cannot infer symbol/timeframe from a bare file;"
+            " use --watch-data-dir"
+        )
     research_kinds = tuple(
         sorted(
             {
@@ -1106,6 +1114,12 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
             triggers = (_WatchSource(source, args.watch_kind),)
+        elif args.watch_data_dir:
+            try:
+                data_source = DataFileTriggerSource(Path(args.watch_data_dir), store=store)
+            except NotADirectoryError as exc:
+                raise CliError(str(exc)) from exc
+            triggers = (data_source,)
         registry = Orchestrator(store)
         register_default_handlers(
             registry,
@@ -1589,6 +1603,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--watch-kind",
         default="knowledge.ingest",
         help="job kind a watched file enqueues (default knowledge.ingest)",
+    )
+    run.add_argument(
+        "--watch-data-dir",
+        default=None,
+        help=(
+            "watch a market-data root for new Parquet/CSV and enqueue one"
+            " dataset.build per <symbol>/<timeframe>; incompatible with --watch-dir"
+        ),
     )
     run.add_argument(
         "--db", default="runs/orchestrator.sqlite3", help="SQLite job queue (created when missing)"
