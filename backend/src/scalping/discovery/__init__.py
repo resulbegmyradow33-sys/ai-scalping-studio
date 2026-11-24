@@ -28,9 +28,11 @@ from scalping.discovery.evidence import (
     EvidencePolicy,
     FoldEvidence,
     RegimeEvidence,
+    SplitBoundaries,
     StressEvidence,
     bootstrap_ci,
     build_evidence,
+    settings_digest,
     verify_evidence,
 )
 from scalping.discovery.protocols import (
@@ -79,6 +81,7 @@ __all__ = [
     "RegimeEvidence",
     "SearchConfig",
     "SearchResult",
+    "SplitBoundaries",
     "StressEvidence",
     "TrialRecord",
     "TrialResult",
@@ -90,5 +93,6 @@ __all__ = [
     "decide",
     "evolve",
     "run_discovery",
+    "settings_digest",
     "verify_evidence",
 ]
