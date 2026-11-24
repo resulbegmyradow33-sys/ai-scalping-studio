@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import polars as pl
 from anyio import ClosedResourceError
@@ -30,6 +30,7 @@ from scalping.api.schemas import (
     BacktestResponse,
     CalibrateRequest,
     ControlRequest,
+    DataQualityResponse,
     DataStatusResponse,
     DownloadRequest,
     DownloadResponse,
@@ -61,9 +62,10 @@ from scalping.data.base import DataProvider
 from scalping.data.csv_provider import CsvProvider
 from scalping.data.dukascopy import DataUnavailable, DukascopyProvider
 from scalping.data.provenance import build_provenance, load_provenance, save_provenance
+from scalping.data.quality import OutlierConfig
 from scalping.data.registry import SYMBOLS, TIMEFRAMES
 from scalping.data.synthetic import SyntheticProvider
-from scalping.data.validate import validate_bars
+from scalping.data.validate import ValidationReport, validate_bars
 from scalping.regime import classify
 from scalping.strategy.calibrate import calibrate, card_from_report
 from scalping.strategy.card import save_card
@@ -134,6 +136,51 @@ def _checked_ids(symbol: str, timeframe: str) -> None:
         raise HTTPException(status_code=422, detail=f"unknown timeframe {timeframe!r}")
 
 
+#: Floor for the gap tolerance in the quality report, in minutes. The report
+#: uses the larger of this floor and one bar width, so an H1 slice is not
+#: "all gaps" just because its bars are an hour apart. A missing
+#: higher-timeframe bar still exceeds the tolerance (one bar = threshold, a
+#: hole = at least two bars).
+_MIN_GAP_MINUTES: Final[int] = 10
+
+#: Thresholds the validator uses for its statistical warnings. Kept here so the
+#: report can state them instead of leaving the caller to read the source.
+_OUTLIERS: Final[OutlierConfig] = OutlierConfig()
+
+
+def _bar_minutes(timeframe: str) -> int:
+    """Bar width in minutes from the registry rule (``30m``/``4h``/``1d``)."""
+    rule = TIMEFRAMES[timeframe]
+    factors = {"m": 1, "h": 60, "d": 1440}
+    return int(rule[:-1]) * factors[rule[-1]]
+
+
+def _quality_status(
+    report: ValidationReport, provenance: dict[str, Any] | None
+) -> tuple[Literal["ok", "warn", "fail"], str, str]:
+    """Map validator severity onto ``ok|warn|fail`` and name the deciding rule.
+
+    Errors are structural and fail the slice. Warnings (gaps, statistical
+    outliers) only warn; the historical validator already treats them as
+    legitimate market structure. A slice with no sidecar warns because source
+    and synthetic flag are unknown, which is a provenance gap, not a data
+    error.
+    """
+    error = next((issue for issue in report.issues if issue.severity == "error"), None)
+    if error is not None:
+        return "fail", error.code, error.detail
+    warning = next((issue for issue in report.issues if issue.severity == "warning"), None)
+    if warning is not None:
+        return "warn", warning.code, warning.detail
+    if provenance is None:
+        return (
+            "warn",
+            "provenance_missing",
+            "no provenance sidecar; source and synthetic flag are unknown",
+        )
+    return "ok", "clean", "no validation issues"
+
+
 @router.get("/api/data/status", response_model=DataStatusResponse)
 def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> DataStatusResponse:
     _checked_ids(symbol, timeframe)
@@ -172,6 +219,111 @@ def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> 
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
     return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
+
+
+@router.get("/api/data/quality", response_model=DataQualityResponse)
+def data_quality(
+    request: Request,
+    symbol: str,
+    timeframe: str = TIMEFRAME,
+    include_outliers: bool = Query(
+        default=True, description="run the robust-z outlier pass over the slice"
+    ),
+) -> DataQualityResponse:
+    """Read-only quality report for one stored slice.
+
+    This wraps :func:`scalping.data.validate.validate_bars`; it does not add a
+    second validator. The category counts and the status are a mapping from the
+    validator's issue codes, so every number is the validator's own count. The
+    one setting the report adjusts is the gap tolerance: it uses the larger of
+    the validator's 10-minute default and one bar width, so an H1 or D1 slice is
+    not reported as gap-ridden for its normal spacing. The effective value is
+    returned in ``thresholds``. Nothing is written, repaired or backfilled.
+
+    An unregistered ``symbol``/``timeframe`` is a 422. A registered slice with
+    no stored bars is a 200 with ``configured: false`` and null counts, which is
+    explicit about "not checked" instead of reporting a clean zero.
+
+    The validator runs over the whole stored slice, like ``/api/data/validate``;
+    ``include_outliers=false`` skips only the robust-z pass for large stores.
+    """
+    _checked_ids(symbol, timeframe)
+    if symbol not in SYMBOLS:
+        raise HTTPException(status_code=422, detail=f"unknown symbol {symbol!r}")
+
+    store = request.app.state.store
+    provenance = load_provenance(store.root, symbol, timeframe)
+    provenance_payload = None if provenance is None else provenance.to_dict()
+    gap_minutes = max(_MIN_GAP_MINUTES, _bar_minutes(timeframe))
+    thresholds: dict[str, Any] = {
+        "gap_threshold_minutes": gap_minutes,
+        "outlier_return_z": _OUTLIERS.return_z,
+        "outlier_volume_z": _OUTLIERS.volume_z,
+        "outlier_min_rows": _OUTLIERS.min_rows,
+    }
+
+    frame = store.read(symbol, timeframe)
+    if frame.height == 0:
+        return DataQualityResponse(
+            symbol=symbol,
+            timeframe=timeframe,
+            configured=False,
+            status="fail",
+            status_rule="store_empty",
+            status_detail=f"no stored {timeframe} bars for {symbol}",
+            rows=0,
+            first_ts=None,
+            last_ts=None,
+            duplicates=None,
+            gaps=None,
+            ohlc_violations=None,
+            crossed_quotes=None,
+            negative_spread=None,
+            negative_volume=None,
+            outliers=None,
+            outliers_checked=False,
+            provenance=provenance_payload,
+            thresholds=thresholds,
+            issues=[],
+        )
+
+    report = validate_bars(
+        frame,
+        symbol=symbol,
+        timeframe=timeframe,
+        gap_threshold_minutes=gap_minutes,
+        include_outliers=include_outliers,
+    )
+    counts = {issue.code: issue.count for issue in report.issues}
+    outliers_checked = include_outliers and report.rows >= _OUTLIERS.min_rows
+    outliers = (
+        counts.get("price_outliers", 0) + counts.get("volume_outliers", 0)
+        if outliers_checked
+        else None
+    )
+    status, rule, detail = _quality_status(report, provenance_payload)
+    return DataQualityResponse(
+        symbol=symbol,
+        timeframe=timeframe,
+        configured=True,
+        status=status,
+        status_rule=rule,
+        status_detail=detail,
+        rows=report.rows,
+        first_ts=report.first_ts,
+        last_ts=report.last_ts,
+        duplicates=counts.get("duplicate_timestamps", 0),
+        gaps=counts.get("time_gaps", 0),
+        ohlc_violations=counts.get("ohlc_inconsistent", 0),
+        crossed_quotes=counts.get("crossed_quotes", 0),
+        negative_spread=counts.get("negative_spread", 0),
+        negative_volume=counts.get("negative_volume", 0),
+        outliers=outliers,
+        outliers_checked=outliers_checked,
+        provenance=provenance_payload,
+        thresholds=thresholds,
+        issues=[issue.to_dict() for issue in report.issues],
+    )
 
 
 @router.get("/api/regime", response_model=RegimeResponse)
