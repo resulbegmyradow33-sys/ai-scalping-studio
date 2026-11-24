@@ -233,7 +233,39 @@ nn train → nn evaluate` with a tiny model, so the whole path is exercised
 without market data or committed weights. A real TCN/GRU H1 and M15 run still
 needs the local stores.
 
-## 9. Limits and next slices
+## 9. Benchmarking
+
+```bash
+cd backend
+uv run python -m scripts.benchmark_nn \
+  --models mlp,gru,tcn,transformer,patchtst,itransformer \
+  --n-features 59 --window 60 --batch 8 --repeats 5 --hidden 64 \
+  --out ../runs/nn/benchmark.json
+```
+
+`scalping.nn.benchmark_models` builds each model at the same input shape and
+measures:
+
+| Field | Meaning |
+|---|---|
+| `parameters` / `parameter_mb` | exact parameter count and its float32 weight size |
+| `latency_ms_median` | median forward latency over `repeats` runs after `warmup` |
+| `throughput_windows_per_s` | `batch / median latency` |
+| `rss_high_water_mb` | process high-water RSS (`ru_maxrss`, normalised) |
+| `device` | `cpu` or `mps` |
+
+Caveats are part of the result: RSS is process-wide and monotonic, so it is a
+smoke signal rather than isolated per-model memory — run one model per process
+for that. Latency is forward-only on a fixed random tensor; training time,
+optimizer memory, gradient checkpointing and data loading are out of scope.
+`device="mps"` synchronises around each measurement; CPU runs pin one torch
+thread for comparability.
+
+The benchmark does not rank models by accuracy. Prediction metrics come from
+`nn evaluate` (shared evaluator), and trading claims still require the
+simulator plus cost stress.
+
+## 10. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
   loader (Phase 14). Do not silently reduce `window` to make RAM fit — record
