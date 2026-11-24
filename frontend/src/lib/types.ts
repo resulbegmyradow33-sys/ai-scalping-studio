@@ -497,3 +497,100 @@ export interface CalibrateResponse {
   incumbent: RuleMetrics | null;
   card: StrategyCard;
 }
+
+// --- paper ledger (`/api/paper`) ---------------------------------------------
+
+/** Bar sizes a paper session may be opened on (`PaperTimeframe` in the schema). */
+export type PaperTimeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+
+/**
+ * One row of `GET /api/paper/sessions`. `model_version` carries the DSL spec
+ * hash when the autonomous runner opened the session; it is `null` otherwise.
+ */
+export interface PaperSessionItem {
+  session_id: string;
+  symbol: string;
+  timeframe: string;
+  strategy: string;
+  model_version: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+}
+
+/** A position lifecycle; `closed_ts` is set when a trade settles it. */
+export interface PaperPosition {
+  position_id: number;
+  side: string;
+  lot: number;
+  entry_ts: string;
+  entry_price: number;
+  sl: number;
+  tp: number;
+  status: string;
+  closed_ts: string | null;
+  closed_price: number | null;
+}
+
+/** One order attempt; a rejection always carries its reason. */
+export interface PaperOrder {
+  order_id: number;
+  signal_id: number | null;
+  ts: string;
+  side: string;
+  lot: number;
+  requested_price: number | null;
+  status: string;
+  rejection_reason: string | null;
+}
+
+/** One closed trade, exactly as the broker settled it. */
+export interface PaperTrade {
+  trade_id: number;
+  side: string;
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  lot: number;
+  pnl: number;
+  r_multiple: number;
+  exit_reason: string;
+}
+
+/** One account mark. */
+export interface PaperEquityPoint {
+  ts: string;
+  balance: number;
+  equity: number;
+}
+
+/**
+ * `GET /api/paper/sessions/{id}`. `balance`/`equity` stay `null` until the
+ * first equity mark; `trade_count` counts closed trades only.
+ */
+export interface PaperSessionSummary {
+  session_id: string;
+  symbol: string;
+  timeframe: string;
+  strategy: string;
+  model_version: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  balance: number | null;
+  equity: number | null;
+  open_position: PaperPosition | null;
+  trade_count: number;
+  last_bar_ts: string | null;
+  config: Record<string, unknown>;
+}
+
+/** A bounded page: `limit` defaults to 100 server-side and is capped at 1000. */
+export interface PaperPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+

@@ -5,8 +5,9 @@ deterministic session runner, a read/write HTTP API over the ledger, and a
 disabled MT5 demo adapter skeleton. Phase 19 slice A adds an autonomous runner
 that paper-trades a validated DSL strategy spec. Slice B adds incremental
 operation on appended bars and matured-outcome analysis. There is still no
-scheduler and no frontend page; a session row is a record, not a running
-process.
+scheduler; a session row is a record, not a running process. Phase 13 adds the
+read-only Paper Trading page at `/paper`, where closing a session is the only
+write.
 
 ## No real-money execution
 
@@ -449,6 +450,41 @@ runner holds `BEGIN IMMEDIATE`; WAL readers see the last committed snapshot. A
 GET that lands while the first writer is still creating the schema sees an empty
 page instead of a 500.
 
+## Paper Trading page
+
+`/paper` in the frontend is a view of this ledger and nothing else. It calls
+only `/api/paper`, does not open sessions, does not start a runner and has no
+broker path. The one write it performs is closing a running session.
+
+- **Sessions** — newest first, with status, symbol/timeframe, strategy, model
+  version and start/end. An absent ledger is an explicit empty state that says
+  the page does not open sessions; it is not a fabricated list.
+- **Session detail** — balance, equity, the open position, the closed-trade
+  count and the last bar timestamp from `/sessions/{id}`. A `null` balance or
+  equity renders as a dash: there is no placeholder account and no P&L total
+  computed in the browser.
+- **Tables** — positions, orders, closed trades and equity, one endpoint each,
+  requested in 20-row pages. The pager is bounded by
+  `offset + items.length >= total`, so it never asks for a page the ledger does
+  not have. Equity pages *backwards*: `offset=0` is the newest window and each
+  step moves into older marks.
+- **Attribution** — strategy, `model_version` and, when the stored config has
+  them, `extra.dsl.spec_hash`, `extra.dsl.spec_version` and
+  `extra.dataset_id`. A session without a DSL hash says so instead of showing a
+  blank hash.
+- **Close** — a two-step inline confirmation, then
+  `POST /sessions/{id}/close`. A `200` re-reads the summary and the session
+  list. A `409` is presented as "already closed" and refreshes too, because a
+  retry is not an error.
+- **Polling** — only a `running` session is re-read, every 5 seconds. The timer
+  is cleared on unmount, on selection, on pagination and as soon as the session
+  stops running. A failed poll stops the loop and offers a manual retry rather
+  than leaving stale values on screen looking current.
+
+The page shows a visible paper-only notice: no real money, no broker and no
+order entry. It is a ledger view, not a trading terminal — there is no live
+price, no strategy selection and no way to open a session from it.
+
 ## MT5 demo adapter
 
 `scalping/paper/mt5.py` holds `Mt5DemoAdapter`. It is a skeleton, not an
@@ -474,7 +510,6 @@ integration:
   and exposes the summary.
 - A scheduler or daemon for continuous operation. `advance()` is caller-driven;
   nothing polls the store, sleeps or retries, and no endpoint starts a loop.
-- The Paper Trading frontend page (next slice).
 - Limit orders and partial fills. `orders.status` already has `pending`, and
   `resume` reports pending rows, but the runner only sends market orders.
 - Exit fills in `fills`. The broker settles exits as `trades`; the exit price
@@ -522,6 +557,12 @@ the matured batch, the outcome fingerprint is stable and changes when a trade
 matures, appending future bars leaves earlier signals unchanged, and a source
 scan finds no network or legacy strategy reference.
 
+`frontend/src/app/paper/page.test.tsx` covers the page: an empty ledger, a
+loaded session with attribution, a `404` session, close `200` and `409`, bounded
+session and equity pagination, list/detail error states with retry, polling only
+while running with cleanup on unmount, and a ledger with no balance, hash or
+position (dashes and explicit sentences, never invented numbers).
+
 ```bash
 cd backend
 uv run ruff check src tests scripts
@@ -529,4 +570,7 @@ uv run mypy src
 uv run pytest tests/test_api_paper.py tests/test_paper_mt5.py \
   tests/test_paper_autonomous.py tests/test_paper_continuous.py -q
 uv run pytest
+
+cd ../frontend
+npm test -- src/app/paper/page.test.tsx
 ```
