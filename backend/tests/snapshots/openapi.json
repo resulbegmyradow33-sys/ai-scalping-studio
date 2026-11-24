@@ -1,0 +1,1345 @@
+{
+  "models": {
+    "AutonomyChampion": {
+      "properties": {
+        "candidate_id": "string",
+        "mode": "string | null",
+        "policy_digest": "string | null",
+        "policy_id": "string | null",
+        "promoted_at": "string | null",
+        "scope": "string"
+      },
+      "required": [
+        "candidate_id",
+        "scope"
+      ]
+    },
+    "AutonomyChampionList": {
+      "properties": {
+        "configured": "boolean",
+        "items": "array<AutonomyChampion> | null",
+        "readable": "boolean"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
+    "AutonomyDataStatus": {
+      "properties": {
+        "configured": "boolean",
+        "readable": "boolean",
+        "symbols": "array<string> | null"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
+    "AutonomyDiscoveries": {
+      "properties": {
+        "configured": "boolean",
+        "decisions": "integer | null",
+        "readable": "boolean",
+        "runs": "integer | null"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
+    "AutonomyEventItem": {
+      "properties": {
+        "event": "string",
+        "id": "integer",
+        "job_id": "integer | null",
+        "ts": "string"
+      },
+      "required": [
+        "event",
+        "id",
+        "ts"
+      ]
+    },
+    "AutonomyEventPage": {
+      "properties": {
+        "configured": "boolean",
+        "items": "array<AutonomyEventItem> | null",
+        "limit": "integer",
+        "readable": "boolean"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "readable"
+      ]
+    },
+    "AutonomyJobItem": {
+      "properties": {
+        "attempts": "integer",
+        "created_at": "string",
+        "defer_count": "integer",
+        "finished_at": "string | null",
+        "id": "integer",
+        "kind": "string",
+        "priority": "integer",
+        "scheduled_at": "string",
+        "started_at": "string | null",
+        "status": "string"
+      },
+      "required": [
+        "attempts",
+        "created_at",
+        "defer_count",
+        "id",
+        "kind",
+        "priority",
+        "scheduled_at",
+        "status"
+      ]
+    },
+    "AutonomyJobPage": {
+      "properties": {
+        "configured": "boolean",
+        "items": "array<AutonomyJobItem> | null",
+        "limit": "integer",
+        "readable": "boolean"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "readable"
+      ]
+    },
+    "AutonomyLastEvent": {
+      "properties": {
+        "event": "string",
+        "id": "integer",
+        "job_id": "integer | null",
+        "ts": "string"
+      },
+      "required": [
+        "event",
+        "id",
+        "ts"
+      ]
+    },
+    "AutonomyOrchestratorStatus": {
+      "properties": {
+        "configured": "boolean",
+        "failed": "integer | null",
+        "last_event": "AutonomyLastEvent | null",
+        "paused": "boolean | null",
+        "queued": "integer | null",
+        "readable": "boolean",
+        "research_disabled": "boolean | null",
+        "running": "integer | null",
+        "safe_mode": "boolean | null"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
+    "AutonomyPaperStatus": {
+      "properties": {
+        "closed_trades": "integer | null",
+        "configured": "boolean",
+        "open_positions": "integer | null",
+        "readable": "boolean",
+        "sessions": "integer | null"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
+    "AutonomyStatus": {
+      "properties": {
+        "champions": "array<AutonomyChampion>",
+        "champions_readable": "boolean",
+        "data": "AutonomyDataStatus",
+        "discoveries": "AutonomyDiscoveries",
+        "orchestrator": "AutonomyOrchestratorStatus",
+        "paper": "AutonomyPaperStatus"
+      },
+      "required": [
+        "champions",
+        "champions_readable",
+        "data",
+        "discoveries",
+        "orchestrator",
+        "paper"
+      ]
+    },
+    "BacktestRequest": {
+      "properties": {
+        "run_id": "string",
+        "symbol": "string"
+      },
+      "required": [
+        "run_id",
+        "symbol"
+      ]
+    },
+    "BacktestResponse": {
+      "properties": {
+        "metrics": "object",
+        "report_path": "string"
+      },
+      "required": [
+        "metrics",
+        "report_path"
+      ]
+    },
+    "BanditWeight": {
+      "properties": {
+        "strategy": "string",
+        "weight": "number | null"
+      },
+      "required": [
+        "strategy",
+        "weight"
+      ]
+    },
+    "CalibrateRequest": {
+      "enums": {
+        "timeframe": [
+          "M1",
+          "M5",
+          "M15",
+          "M30",
+          "H1",
+          "H4",
+          "D1"
+        ]
+      },
+      "properties": {
+        "dry_run": "boolean",
+        "holdout_fraction": "number",
+        "min_holdout_trades": "integer",
+        "min_train_trades": "integer",
+        "symbol": "string",
+        "timeframe": "enum[M1|M5|M15|M30|H1|H4|D1]"
+      },
+      "required": []
+    },
+    "ControlRequest": {
+      "enums": {
+        "action": [
+          "pause",
+          "resume",
+          "stop",
+          "reset"
+        ]
+      },
+      "properties": {
+        "action": "enum[pause|resume|stop|reset]"
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "DataQualityResponse": {
+      "enums": {
+        "status": [
+          "ok",
+          "warn",
+          "fail"
+        ]
+      },
+      "properties": {
+        "configured": "boolean",
+        "crossed_quotes": "integer | null",
+        "duplicates": "integer | null",
+        "first_ts": "string | null",
+        "gaps": "integer | null",
+        "issues": "array<object>",
+        "last_ts": "string | null",
+        "negative_spread": "integer | null",
+        "negative_volume": "integer | null",
+        "ohlc_violations": "integer | null",
+        "outliers": "integer | null",
+        "outliers_checked": "boolean",
+        "provenance": "object | null",
+        "rows": "integer",
+        "status": "enum[ok|warn|fail]",
+        "status_detail": "string",
+        "status_rule": "string",
+        "symbol": "string",
+        "thresholds": "object",
+        "timeframe": "string"
+      },
+      "required": [
+        "configured",
+        "crossed_quotes",
+        "duplicates",
+        "first_ts",
+        "gaps",
+        "issues",
+        "last_ts",
+        "negative_spread",
+        "negative_volume",
+        "ohlc_violations",
+        "outliers",
+        "outliers_checked",
+        "provenance",
+        "rows",
+        "status",
+        "status_detail",
+        "status_rule",
+        "symbol",
+        "thresholds",
+        "timeframe"
+      ]
+    },
+    "DataStatusResponse": {
+      "properties": {
+        "first_ts": "string | null",
+        "last_ts": "string | null",
+        "provenance": "object | null",
+        "providers": "array<string>",
+        "rows": "integer",
+        "symbol": "string",
+        "timeframe": "string"
+      },
+      "required": [
+        "first_ts",
+        "last_ts",
+        "providers",
+        "rows",
+        "symbol"
+      ]
+    },
+    "DownloadRequest": {
+      "enums": {
+        "provider": [
+          "synthetic",
+          "csv",
+          "dukascopy"
+        ]
+      },
+      "properties": {
+        "end": "string",
+        "path": "string | null",
+        "provider": "enum[synthetic|csv|dukascopy]",
+        "seed": "integer | null",
+        "start": "string",
+        "symbol": "string",
+        "tz_offset": "integer | null"
+      },
+      "required": [
+        "end",
+        "provider",
+        "start",
+        "symbol"
+      ]
+    },
+    "DownloadResponse": {
+      "properties": {
+        "rows": "integer"
+      },
+      "required": [
+        "rows"
+      ]
+    },
+    "EvaluateRequest": {
+      "properties": {
+        "folds": "integer",
+        "run_id": "string",
+        "symbol": "string"
+      },
+      "required": [
+        "run_id",
+        "symbol"
+      ]
+    },
+    "EvaluateResponse": {
+      "properties": {
+        "data_hash": "string",
+        "eval_data_hash": "string",
+        "eval_start": "string | null",
+        "folds": "array<FoldSummary>",
+        "in_sample": "boolean",
+        "method": "string",
+        "overall": "object",
+        "overfit_warning": "boolean",
+        "report_path": "string",
+        "stress": "array<StressSummary>",
+        "train_end": "string | null"
+      },
+      "required": [
+        "data_hash",
+        "eval_data_hash",
+        "folds",
+        "overall",
+        "overfit_warning",
+        "report_path",
+        "stress"
+      ]
+    },
+    "FoldSummary": {
+      "properties": {
+        "evaluated_range": "array<string>",
+        "metrics": "object",
+        "test_range": "array<string>",
+        "train_expectancy": "number | null",
+        "train_range": "array<string>"
+      },
+      "required": [
+        "evaluated_range",
+        "metrics",
+        "test_range",
+        "train_range"
+      ]
+    },
+    "HTTPValidationError": {
+      "properties": {
+        "detail": "array<ValidationError>"
+      },
+      "required": []
+    },
+    "HealthResponse": {
+      "properties": {
+        "device": "string",
+        "status": "string",
+        "version": "string"
+      },
+      "required": [
+        "device",
+        "status",
+        "version"
+      ]
+    },
+    "MLCalibration": {
+      "properties": {
+        "brier": "number | null",
+        "ece": "number | null",
+        "log_loss": "number | null",
+        "mce": "number | null"
+      },
+      "required": []
+    },
+    "MLControlRequest": {
+      "properties": {
+        "action": "string"
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "MLEvaluateRequest": {
+      "enums": {
+        "split": [
+          "train",
+          "validation",
+          "test"
+        ]
+      },
+      "properties": {
+        "exit_threshold": "number",
+        "regime": "boolean",
+        "run_id": "string",
+        "split": "enum[train|validation|test]",
+        "stress": "array<number>",
+        "threshold": "number",
+        "window": "integer"
+      },
+      "required": [
+        "run_id"
+      ]
+    },
+    "MLEvaluateResponse": {
+      "properties": {
+        "dataset_id": "string",
+        "exit_threshold": "number",
+        "hold": "object",
+        "metrics": "object",
+        "regime": "object",
+        "run_id": "string",
+        "split": "string",
+        "stress": "object",
+        "symbol": "string",
+        "threshold": "number",
+        "timeframe": "string"
+      },
+      "required": [
+        "dataset_id",
+        "exit_threshold",
+        "hold",
+        "metrics",
+        "regime",
+        "run_id",
+        "split",
+        "stress",
+        "symbol",
+        "threshold",
+        "timeframe"
+      ]
+    },
+    "MLRunDetail": {
+      "properties": {
+        "baseline": "object | null",
+        "calibration": "MLCalibration | null",
+        "columns": "array<string>",
+        "config": "object",
+        "created_at": "string | null",
+        "dataset_id": "string | null",
+        "error": "string | null",
+        "finished_at": "string | null",
+        "model": "string | null",
+        "run_id": "string",
+        "spec": "object",
+        "split_counts": "object",
+        "status": "string",
+        "symbol": "string | null",
+        "test": "object | null",
+        "timeframe": "string | null",
+        "validation": "object | null"
+      },
+      "required": [
+        "run_id",
+        "status"
+      ]
+    },
+    "MLRunSummary": {
+      "properties": {
+        "created_at": "string | null",
+        "dataset_id": "string | null",
+        "model": "string | null",
+        "run_id": "string",
+        "status": "string",
+        "symbol": "string | null",
+        "timeframe": "string | null"
+      },
+      "required": [
+        "run_id",
+        "status"
+      ]
+    },
+    "MLTrainRequest": {
+      "enums": {
+        "split": [
+          "train",
+          "validation",
+          "test"
+        ],
+        "timeframe": [
+          "M1",
+          "M5",
+          "M15",
+          "M30",
+          "H1",
+          "H4",
+          "D1"
+        ]
+      },
+      "properties": {
+        "embargo_bars": "integer",
+        "evaluate_test": "boolean",
+        "exit_threshold": "number",
+        "groups": "array<string> | null",
+        "horizon": "integer",
+        "include_flat": "boolean",
+        "model": "string",
+        "purge_bars": "integer",
+        "regime": "boolean",
+        "seed": "integer",
+        "split": "enum[train|validation|test]",
+        "stress": "array<number>",
+        "symbol": "string",
+        "threshold": "number",
+        "timeframe": "enum[M1|M5|M15|M30|H1|H4|D1]",
+        "train_fraction": "number",
+        "validation_fraction": "number",
+        "window": "integer"
+      },
+      "required": [
+        "symbol"
+      ]
+    },
+    "MLTrainResponse": {
+      "properties": {
+        "run_id": "string"
+      },
+      "required": [
+        "run_id"
+      ]
+    },
+    "OkResponse": {
+      "properties": {
+        "ok": "boolean"
+      },
+      "required": [
+        "ok"
+      ]
+    },
+    "PaperEquityPage": {
+      "properties": {
+        "items": "array<PaperEquityPoint>",
+        "limit": "integer",
+        "offset": "integer",
+        "total": "integer"
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "total"
+      ]
+    },
+    "PaperEquityPoint": {
+      "properties": {
+        "balance": "number",
+        "equity": "number",
+        "ts": "string"
+      },
+      "required": [
+        "balance",
+        "equity",
+        "ts"
+      ]
+    },
+    "PaperOrder": {
+      "properties": {
+        "lot": "number",
+        "order_id": "integer",
+        "rejection_reason": "string | null",
+        "requested_price": "number | null",
+        "side": "string",
+        "signal_id": "integer | null",
+        "status": "string",
+        "ts": "string"
+      },
+      "required": [
+        "lot",
+        "order_id",
+        "rejection_reason",
+        "requested_price",
+        "side",
+        "signal_id",
+        "status",
+        "ts"
+      ]
+    },
+    "PaperOrderPage": {
+      "properties": {
+        "items": "array<PaperOrder>",
+        "limit": "integer",
+        "offset": "integer",
+        "total": "integer"
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "total"
+      ]
+    },
+    "PaperPosition": {
+      "properties": {
+        "closed_price": "number | null",
+        "closed_ts": "string | null",
+        "entry_price": "number",
+        "entry_ts": "string",
+        "lot": "number",
+        "position_id": "integer",
+        "side": "string",
+        "sl": "number",
+        "status": "string",
+        "tp": "number"
+      },
+      "required": [
+        "closed_price",
+        "closed_ts",
+        "entry_price",
+        "entry_ts",
+        "lot",
+        "position_id",
+        "side",
+        "sl",
+        "status",
+        "tp"
+      ]
+    },
+    "PaperPositionPage": {
+      "properties": {
+        "items": "array<PaperPosition>",
+        "limit": "integer",
+        "offset": "integer",
+        "total": "integer"
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "total"
+      ]
+    },
+    "PaperSessionCreate": {
+      "enums": {
+        "timeframe": [
+          "M1",
+          "M5",
+          "M15",
+          "M30",
+          "H1",
+          "H4",
+          "D1"
+        ]
+      },
+      "properties": {
+        "config": "object | null",
+        "model_version": "string | null",
+        "strategy": "string",
+        "symbol": "string",
+        "timeframe": "enum[M1|M5|M15|M30|H1|H4|D1]"
+      },
+      "required": [
+        "symbol"
+      ]
+    },
+    "PaperSessionCreated": {
+      "properties": {
+        "session_id": "string",
+        "started_at": "string",
+        "status": "string"
+      },
+      "required": [
+        "session_id",
+        "started_at",
+        "status"
+      ]
+    },
+    "PaperSessionItem": {
+      "properties": {
+        "ended_at": "string | null",
+        "model_version": "string | null",
+        "session_id": "string",
+        "started_at": "string",
+        "status": "string",
+        "strategy": "string",
+        "symbol": "string",
+        "timeframe": "string"
+      },
+      "required": [
+        "ended_at",
+        "model_version",
+        "session_id",
+        "started_at",
+        "status",
+        "strategy",
+        "symbol",
+        "timeframe"
+      ]
+    },
+    "PaperSessionPage": {
+      "properties": {
+        "items": "array<PaperSessionItem>",
+        "limit": "integer",
+        "offset": "integer",
+        "total": "integer"
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "total"
+      ]
+    },
+    "PaperSessionSummary": {
+      "properties": {
+        "balance": "number | null",
+        "config": "object",
+        "ended_at": "string | null",
+        "equity": "number | null",
+        "last_bar_ts": "string | null",
+        "model_version": "string | null",
+        "open_position": "PaperPosition | null",
+        "session_id": "string",
+        "started_at": "string",
+        "status": "string",
+        "strategy": "string",
+        "symbol": "string",
+        "timeframe": "string",
+        "trade_count": "integer"
+      },
+      "required": [
+        "balance",
+        "config",
+        "ended_at",
+        "equity",
+        "last_bar_ts",
+        "model_version",
+        "open_position",
+        "session_id",
+        "started_at",
+        "status",
+        "strategy",
+        "symbol",
+        "timeframe",
+        "trade_count"
+      ]
+    },
+    "PaperTrade": {
+      "properties": {
+        "entry_price": "number",
+        "entry_ts": "string",
+        "exit_price": "number",
+        "exit_reason": "string",
+        "exit_ts": "string",
+        "lot": "number",
+        "pnl": "number",
+        "r_multiple": "number",
+        "side": "string",
+        "trade_id": "integer"
+      },
+      "required": [
+        "entry_price",
+        "entry_ts",
+        "exit_price",
+        "exit_reason",
+        "exit_ts",
+        "lot",
+        "pnl",
+        "r_multiple",
+        "side",
+        "trade_id"
+      ]
+    },
+    "PaperTradePage": {
+      "properties": {
+        "items": "array<PaperTrade>",
+        "limit": "integer",
+        "offset": "integer",
+        "total": "integer"
+      },
+      "required": [
+        "items",
+        "limit",
+        "offset",
+        "total"
+      ]
+    },
+    "RegimeCount": {
+      "properties": {
+        "bars": "integer",
+        "regime": "string",
+        "share": "number"
+      },
+      "required": [
+        "bars",
+        "regime",
+        "share"
+      ]
+    },
+    "RegimeCurrent": {
+      "properties": {
+        "breakout": "string",
+        "expansion": "string",
+        "regime": "string",
+        "trend": "string",
+        "trend_strength": "string",
+        "ts": "string",
+        "unusual": "boolean",
+        "volatility": "string"
+      },
+      "required": [
+        "breakout",
+        "expansion",
+        "regime",
+        "trend",
+        "trend_strength",
+        "ts",
+        "unusual",
+        "volatility"
+      ]
+    },
+    "RegimePoint": {
+      "properties": {
+        "regime": "string",
+        "trend": "string",
+        "ts": "string",
+        "volatility": "string"
+      },
+      "required": [
+        "regime",
+        "trend",
+        "ts",
+        "volatility"
+      ]
+    },
+    "RegimeResponse": {
+      "properties": {
+        "counts": "array<RegimeCount>",
+        "current": "RegimeCurrent | null",
+        "rows": "integer",
+        "series": "array<RegimePoint>",
+        "symbol": "string",
+        "timeframe": "string"
+      },
+      "required": [
+        "counts",
+        "current",
+        "rows",
+        "series",
+        "symbol",
+        "timeframe"
+      ]
+    },
+    "RunControlRequest": {
+      "enums": {
+        "action": [
+          "pause",
+          "resume",
+          "stop"
+        ]
+      },
+      "properties": {
+        "action": "enum[pause|resume|stop]"
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "RunDetail": {
+      "properties": {
+        "bandit": "array<BanditWeight> | null",
+        "config": "object",
+        "metrics": "object",
+        "series": "object | null",
+        "status": "string",
+        "step": "integer",
+        "total_steps": "integer | null"
+      },
+      "required": [
+        "config",
+        "metrics",
+        "status"
+      ]
+    },
+    "RunSummary": {
+      "properties": {
+        "baseline_hold_net_profit": "number | null",
+        "created_at": "string | null",
+        "degenerate": "boolean | null",
+        "reward_mean": "number | null",
+        "reward_mean_normalized": "number | null",
+        "run_id": "string",
+        "status": "string",
+        "steps": "integer"
+      },
+      "required": [
+        "created_at",
+        "reward_mean",
+        "run_id",
+        "status",
+        "steps"
+      ]
+    },
+    "StartRequest": {
+      "properties": {
+        "mode": "string",
+        "speed": "number"
+      },
+      "required": []
+    },
+    "StartResponse": {
+      "properties": {
+        "session_id": "string"
+      },
+      "required": [
+        "session_id"
+      ]
+    },
+    "StressSummary": {
+      "properties": {
+        "metrics": "object",
+        "multiplier": "number"
+      },
+      "required": [
+        "metrics",
+        "multiplier"
+      ]
+    },
+    "TimeframeSpec": {
+      "properties": {
+        "rule": "string",
+        "timeframe": "string"
+      },
+      "required": [
+        "rule",
+        "timeframe"
+      ]
+    },
+    "TrainRequest": {
+      "properties": {
+        "entry_penalty": "number",
+        "gate_signals": "boolean",
+        "max_bars_in_trade": "integer",
+        "n_envs": "integer",
+        "seed": "integer",
+        "sl_atr_mult": "number",
+        "symbol": "string",
+        "timeframe": "string",
+        "total_steps": "integer",
+        "tp_atr_mult": "number",
+        "train_end": "string | null",
+        "use_strategy": "boolean",
+        "window": "integer"
+      },
+      "required": [
+        "symbol"
+      ]
+    },
+    "TrainResponse": {
+      "properties": {
+        "run_id": "string"
+      },
+      "required": [
+        "run_id"
+      ]
+    },
+    "TrainingPoint": {
+      "properties": {
+        "step": "integer",
+        "value": "number"
+      },
+      "required": [
+        "step",
+        "value"
+      ]
+    },
+    "ValidationError": {
+      "properties": {
+        "ctx": "object",
+        "input": "unknown",
+        "loc": "array<integer | string>",
+        "msg": "string",
+        "type": "string"
+      },
+      "required": [
+        "loc",
+        "msg",
+        "type"
+      ]
+    }
+  },
+  "operations": {
+    "GET /api/autonomy/champions": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "AutonomyChampionList"
+      }
+    },
+    "GET /api/autonomy/events": {
+      "query": {
+        "limit": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "AutonomyEventPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/autonomy/jobs": {
+      "query": {
+        "limit": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "AutonomyJobPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/autonomy/status": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "AutonomyStatus"
+      }
+    },
+    "GET /api/data/quality": {
+      "query": {
+        "include_outliers": "boolean",
+        "symbol": "string!",
+        "timeframe": "string"
+      },
+      "request": null,
+      "responses": {
+        "200": "DataQualityResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/data/status": {
+      "query": {
+        "symbol": "string!",
+        "timeframe": "string"
+      },
+      "request": null,
+      "responses": {
+        "200": "DataStatusResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/data/validate": {
+      "query": {
+        "symbol": "string!",
+        "timeframe": "string"
+      },
+      "request": null,
+      "responses": {
+        "200": "object",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/health": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "HealthResponse"
+      }
+    },
+    "GET /api/ml/models": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "array<string>"
+      }
+    },
+    "GET /api/ml/runs": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "array<MLRunSummary>"
+      }
+    },
+    "GET /api/ml/runs/{run_id}": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "MLRunDetail",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions": {
+      "query": {
+        "limit": "integer",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "PaperSessionPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions/{session_id}": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "PaperSessionSummary",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions/{session_id}/equity": {
+      "query": {
+        "limit": "integer",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "PaperEquityPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions/{session_id}/history": {
+      "query": {
+        "limit": "integer",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "PaperTradePage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions/{session_id}/orders": {
+      "query": {
+        "limit": "integer",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "PaperOrderPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/paper/sessions/{session_id}/positions": {
+      "query": {
+        "limit": "integer",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "PaperPositionPage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/regime": {
+      "query": {
+        "limit": "integer",
+        "symbol": "string!",
+        "timeframe": "string"
+      },
+      "request": null,
+      "responses": {
+        "200": "RegimeResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/runs": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "array<RunSummary>"
+      }
+    },
+    "GET /api/runs/{run_id}": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "RunDetail",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/strategy/card": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "object"
+      }
+    },
+    "GET /api/symbols": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "array<object>"
+      }
+    },
+    "GET /api/timeframes": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "array<TimeframeSpec>"
+      }
+    },
+    "POST /api/backtest": {
+      "query": {},
+      "request": "BacktestRequest",
+      "responses": {
+        "200": "BacktestResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/data/download": {
+      "query": {},
+      "request": "DownloadRequest",
+      "responses": {
+        "200": "DownloadResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/evaluate": {
+      "query": {},
+      "request": "EvaluateRequest",
+      "responses": {
+        "200": "EvaluateResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/ml/evaluate": {
+      "query": {},
+      "request": "MLEvaluateRequest",
+      "responses": {
+        "200": "MLEvaluateResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/ml/runs/{run_id}/control": {
+      "query": {},
+      "request": "MLControlRequest",
+      "responses": {
+        "200": "OkResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/ml/train": {
+      "query": {},
+      "request": "MLTrainRequest",
+      "responses": {
+        "202": "MLTrainResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/paper/sessions": {
+      "query": {},
+      "request": "PaperSessionCreate",
+      "responses": {
+        "201": "PaperSessionCreated",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/paper/sessions/{session_id}/close": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "PaperSessionSummary",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/runs/{run_id}/control": {
+      "query": {},
+      "request": "RunControlRequest",
+      "responses": {
+        "200": "OkResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/sim/control": {
+      "query": {},
+      "request": "ControlRequest",
+      "responses": {
+        "200": "OkResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/sim/start": {
+      "query": {},
+      "request": "StartRequest",
+      "responses": {
+        "200": "StartResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/strategy/calibrate": {
+      "query": {},
+      "request": "CalibrateRequest",
+      "responses": {
+        "200": "object",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/train": {
+      "query": {},
+      "request": "TrainRequest",
+      "responses": {
+        "202": "TrainResponse",
+        "422": "HTTPValidationError"
+      }
+    }
+  },
+  "path_prefix": "/api/",
+  "schema": "scalping-public-api",
+  "version": 1
+}

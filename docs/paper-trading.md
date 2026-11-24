@@ -433,6 +433,10 @@ the default, because synthetic data must not become real market evidence.
 ledger record; it does not start a runner, so an opened session stays `running`
 until something drives it and calls close.
 
+The shapes below are part of the guarded public contract: any change to a path,
+field, required key or enum fails `tests/test_openapi_snapshot.py` until the
+snapshot is reviewed and rewritten. See `docs/api-contracts.md`.
+
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/paper/sessions` | Open a session record; `201` with the generated id, status and start stamp |
