@@ -20,10 +20,16 @@ Design decisions
   therefore advances exactly ``N`` decisions (the previous tail becomes
   decidable, the new tail stays provisional).
 * **Typed refusal instead of silent skipping.** Out-of-order or duplicate bars
-  raise :class:`BarOrderError`; a missing bar in the pending range raises
-  :class:`BarGapError`. A jump is allowed only when the missing instants fall
-  inside the registry's closed session window (a weekend or a daily close).
-  Nothing is written before those checks pass.
+  raise :class:`BarOrderError` under every policy. A cadence gap is governed by
+  :data:`GapPolicy`: ``strict`` (the default) raises :class:`BarGapError` when
+  a missing instant falls inside the registry's open session;
+  ``session_aware`` and ``skip_with_report`` tolerate the gap, record it in the
+  ledger's append-only ``paper_gaps`` table and continue on the next stored
+  bar. No bar is ever invented for a skipped instant.
+* **Closed windows are not gaps.** A jump whose missing instants all lie
+  outside the symbol's session window (a weekend or a daily close) contains no
+  missing market bars, so it is allowed under every policy and is not recorded
+  as a data gap. Nothing is written before those checks pass.
 * **Idempotency by bar timestamp.** The runner never writes the ledger itself;
   :class:`PaperSession` replays the recorded actions and only then appends. The
   stored signal timestamps are checked against the feature timeline, so a
@@ -50,7 +56,7 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 import numpy as np
 import polars as pl
@@ -68,6 +74,7 @@ from scalping.features.cache import (
 )
 from scalping.paper.autonomous import _SpecPolicy
 from scalping.paper.ledger import (
+    GAP_POLICIES,
     PaperLedger,
     SessionRecord,
     SignalRecord,
@@ -85,6 +92,7 @@ __all__ = [
     "BarOrderError",
     "ContinuousError",
     "ContinuousPaperRunner",
+    "GapPolicy",
     "OutcomeBatch",
     "OutcomeError",
     "OutcomeRow",
@@ -92,6 +100,21 @@ __all__ = [
     "matured_outcomes",
     "outcome_fingerprint",
 ]
+
+#: How a cadence gap in the stored slice is treated.
+#:
+#: ``strict``
+#:     Refuse any missing instant that falls inside the symbol's open session.
+#:     A jump that lies entirely in a closed window (weekend, daily close) is
+#:     not a data gap and is allowed. This is the default.
+#: ``session_aware``
+#:     Allow a gap inside the open session, because a real feed can skip a thin
+#:     bar; record the gap in ``paper_gaps``. The symbol must be in the registry
+#:     so "inside the session" is knowable.
+#: ``skip_with_report``
+#:     Allow any gap, record it, and continue on the next stored bar. Used when
+#:     the session window is unknown; nothing is interpolated either way.
+GapPolicy = Literal["strict", "session_aware", "skip_with_report"]
 
 #: Bar-size grammar for the registry's resampling rules (``1m``/``4h``/``1d``).
 _RESAMPLE_RULE: Final[re.Pattern[str]] = re.compile(r"^(?P<count>\d+)(?P<unit>[mhd])$")
@@ -129,7 +152,9 @@ class AdvanceSummary:
     ``new_bars``, ``new_signals`` and ``new_trades`` are the deltas written by
     this call. ``bars_processed``, ``trades`` and ``last_bar_ts`` are the
     durable totals read back from the ledger. ``status`` is ``"new"`` before the
-    first session row exists.
+    first session row exists. ``gaps_skipped``/``missing_bars`` describe the
+    tolerated gaps this call scanned (also during warm-up, before a session row
+    exists); ``gaps_recorded`` counts the audit rows it actually appended.
     """
 
     session_id: str
@@ -144,6 +169,19 @@ class AdvanceSummary:
     last_bar_ts: datetime | None
     done: bool
     reason: str | None
+    gap_policy: str = "strict"
+    gaps_skipped: int = 0
+    missing_bars: int = 0
+    gaps_recorded: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _Gap:
+    """A tolerated jump on the cadence grid; ``missing_bars`` are in-session."""
+
+    from_ts: datetime
+    to_ts: datetime
+    missing_bars: int
 
 
 class ContinuousPaperRunner:
@@ -173,6 +211,7 @@ class ContinuousPaperRunner:
         window: int = 60,
         cache: bool | FeatureCache = True,
         scope: str | None = None,
+        gap_policy: GapPolicy = "strict",
     ) -> None:
         # First gate: no state may exist if the strategy is not executable.
         validate(spec)
@@ -202,6 +241,12 @@ class ContinuousPaperRunner:
             scope_value = scope
         else:
             raise ValueError("scope must be a non-empty string or None")
+        if not isinstance(gap_policy, str):
+            raise TypeError(f"gap_policy must be a str, got {type(gap_policy).__name__}")
+        if gap_policy not in GAP_POLICIES:
+            raise ValueError(
+                f"gap_policy must be one of {sorted(GAP_POLICIES)}, got {gap_policy!r}"
+            )
 
         self._ledger = ledger
         self._spec = spec
@@ -212,6 +257,7 @@ class ContinuousPaperRunner:
         self._window = window
         self._cache = cache_value
         self._scope = scope_value
+        self._gap_policy: GapPolicy = gap_policy
         self._store = ParquetStore(store_root)
         self._session_id = f"auto-{symbol}-{timeframe}-{self._spec_hash[:16]}"
         self._step = _step_delta(timeframe)
@@ -244,6 +290,11 @@ class ContinuousPaperRunner:
         """Observation window the session was created with."""
         return self._window
 
+    @property
+    def gap_policy(self) -> str:
+        """How the runner treats a cadence gap; part of the session identity."""
+        return self._gap_policy
+
     # ------------------------------------------------------------------ advance
 
     def advance(self) -> AdvanceSummary:
@@ -273,7 +324,7 @@ class ContinuousPaperRunner:
                 done=False,
                 reason="no_new_bars",
             )
-        self._validate_cadence(bars, start, last_ts)
+        gaps = self._scan_gaps(bars, start, last_ts)
 
         frame = self._build_frame(bars)
         first_index = max(frame.valid_from + self._window - 1, self._window - 1)
@@ -287,6 +338,7 @@ class ContinuousPaperRunner:
                 new_trades=0,
                 done=False,
                 reason="warming_up" if not signals else "awaiting_closed_bar",
+                gaps=gaps,
             )
 
         data = None if record is not None else self._data_block(bars)
@@ -309,8 +361,13 @@ class ContinuousPaperRunner:
                 new_trades=0,
                 done=False,
                 reason="no_closed_bar",
+                gaps=gaps,
             )
 
+        # The session is reproducible and the slice is decidable. Audit the
+        # tolerated gaps before appending this call's signals: a crash in
+        # between keeps the gap recorded and the retry is idempotent.
+        gaps_recorded = self._record_gaps(gaps)
         before_trades = self._ledger.count_trades(self._session_id)
         result = session.run(limit)
         if result.steps == 0 and result.done:
@@ -341,6 +398,10 @@ class ContinuousPaperRunner:
             last_bar_ts=_last_signal_ts(after_signals),
             done=result.done,
             reason=result.reason,
+            gap_policy=self._gap_policy,
+            gaps_skipped=len(gaps),
+            missing_bars=sum(gap.missing_bars for gap in gaps),
+            gaps_recorded=gaps_recorded,
         )
 
     # ------------------------------------------------------------------ internal
@@ -368,6 +429,7 @@ class ContinuousPaperRunner:
         config: dict[str, Any] = {
             "origin": "continuous",
             "scope": self._scope,
+            "gap_policy": self._gap_policy,
             "dsl": {
                 "spec_version": self._spec.spec_version,
                 "spec_hash": self._spec_hash,
@@ -469,6 +531,19 @@ class ContinuousPaperRunner:
             raise SessionMismatchError(
                 f"session {self._session_id!r} was created with seed {config.get('seed')!r}"
             )
+        # A session created before the policy existed recorded none; it ran
+        # under the historical strict refusal, so that is its stored policy.
+        stored_policy: object = config.get("gap_policy")
+        extra = config.get("extra")
+        if stored_policy is None and isinstance(extra, Mapping):
+            stored_policy = extra.get("gap_policy")
+        if stored_policy is None:
+            stored_policy = "strict"
+        if stored_policy != self._gap_policy:
+            raise SessionMismatchError(
+                f"session {self._session_id!r} was created with gap_policy"
+                f" {stored_policy!r}, not {self._gap_policy!r}"
+            )
         for name in ("contract", "risk", "costs"):
             if config.get(name) != asdict(getattr(self._settings, name)):
                 raise SessionMismatchError(
@@ -498,53 +573,114 @@ class ContinuousPaperRunner:
                 f" but the store is now synthetic={current_synthetic!r}"
             )
 
-    def _validate_cadence(
+    def _scan_gaps(
         self,
         bars: pl.DataFrame,
         start: int,
         last_ts: datetime | None,
-    ) -> None:
-        """Require one bar per timeframe slot in the range about to be processed.
+    ) -> list[_Gap]:
+        """Check the pending range's cadence and return the tolerated gaps.
 
         History before the ledger cursor is not re-checked for cadence: those
-        bars are already reflected in recorded decisions. Ordering is checked
-        everywhere by :func:`_validate_ordering`.
+        bars are already reflected in recorded decisions (and in the gap audit
+        of the call that processed them). Ordering is checked everywhere by
+        :func:`_validate_ordering`. A missing instant that the policy refuses
+        raises :class:`BarGapError` before any write.
         """
         delta = self._step
         if delta is None:
-            return
+            # Unknown bar size: the registry cannot say what one slot is, so
+            # only ordering is enforced (the documented pre-existing rule).
+            return []
         stamps: list[datetime] = bars.get_column("ts").to_list()
+        gaps: list[_Gap] = []
         if last_ts is not None:
-            expected = last_ts + delta
-            first = stamps[start]
-            if first < expected:
-                raise BarGapError(
-                    f"session {self._session_id!r}: stored bar {first.isoformat()} is"
-                    f" before the expected next slot {expected.isoformat()}"
-                )
-            if first > expected and not self._is_closed(expected):
-                raise BarGapError(
-                    f"session {self._session_id!r}: missing bar at {expected.isoformat()}"
-                    f" before {first.isoformat()}"
-                )
-        for index in range(max(start, 1), len(stamps)):
-            expected = stamps[index - 1] + delta
-            actual = stamps[index]
-            if actual < expected:
-                raise BarGapError(
-                    f"session {self._session_id!r}: bar {actual.isoformat()} is off the"
-                    f" {self._timeframe} grid after {stamps[index - 1].isoformat()}"
-                )
-            if actual > expected and not self._is_closed(expected):
-                raise BarGapError(
-                    f"session {self._session_id!r}: missing bar at {expected.isoformat()}"
-                    f" before {actual.isoformat()}"
-                )
+            self._check_pair(last_ts, stamps[start], delta, gaps)
+            first_index = start + 1
+        else:
+            first_index = max(start, 1)
+        for index in range(first_index, len(stamps)):
+            self._check_pair(stamps[index - 1], stamps[index], delta, gaps)
+        return gaps
 
-    def _is_closed(self, stamp: datetime) -> bool:
-        """A jump is legitimate only across a closed session window."""
+    def _check_pair(
+        self,
+        previous: datetime,
+        following: datetime,
+        delta: timedelta,
+        gaps: list[_Gap],
+    ) -> None:
+        """Classify one consecutive pair; append a tolerated gap or raise."""
+        span = following - previous
+        steps = span // delta
+        if steps < 1 or span - steps * delta != timedelta(0):
+            raise BarGapError(
+                f"session {self._session_id!r}: bar {following.isoformat()} is off the"
+                f" {self._timeframe} grid after {previous.isoformat()}"
+            )
+        missing = steps - 1
+        if missing <= 0:
+            return
+        inside, first_inside = self._classify_missing(previous, delta, steps)
+        if self._gap_policy == "strict":
+            if inside:
+                assert first_inside is not None  # inside implies a first moment
+                raise BarGapError(
+                    f"session {self._session_id!r}: missing bar at"
+                    f" {first_inside.isoformat()} before {following.isoformat()}"
+                )
+            return  # a closed window holds no market bars, so nothing is missing
+        if self._gap_policy == "session_aware" and self._session_spec is None:
+            raise BarGapError(
+                f"session {self._session_id!r}: cannot classify the gap from"
+                f" {previous.isoformat()} to {following.isoformat()}: symbol is not in"
+                " the registry; use gap_policy='skip_with_report' to skip it explicitly"
+            )
+        # ``skip_with_report`` tolerates every gap; ``session_aware`` tolerates a
+        # gap whose missing instants are in the open session. Both record only
+        # real missing market bars: a jump across a closed window is not a gap.
+        if inside:
+            gaps.append(_Gap(from_ts=previous, to_ts=following, missing_bars=inside))
+
+    def _classify_missing(
+        self, anchor: datetime, delta: timedelta, steps: int
+    ) -> tuple[int, datetime | None]:
+        """Count the missing instants inside the open session.
+
+        Returns ``(count, first_inside)``. An unknown symbol has no session
+        window, so every missing instant is unaccounted for and counts as
+        inside; the caller decides whether that is a refusal or a report.
+        """
         spec = self._session_spec
-        return spec is not None and not spec.is_open(stamp)
+        inside = 0
+        first_inside: datetime | None = None
+        for offset in range(1, steps):
+            moment = anchor + delta * offset
+            if spec is None or spec.is_open(moment):
+                inside += 1
+                if first_inside is None:
+                    first_inside = moment
+        return inside, first_inside
+
+    def _record_gaps(self, gaps: list[_Gap]) -> int:
+        """Append the tolerated gaps; returns how many rows this call created.
+
+        Called only after the session row exists, so every gap has a session to
+        belong to. Re-recording is idempotent in the ledger, which matters when
+        a crash happened after the audit write and before the signal write.
+        """
+        if not gaps:
+            return 0
+        before = self._ledger.count_gaps(self._session_id)
+        for gap in gaps:
+            self._ledger.record_gap(
+                self._session_id,
+                from_ts=gap.from_ts,
+                to_ts=gap.to_ts,
+                missing_bars=gap.missing_bars,
+                policy=self._gap_policy,
+            )
+        return self._ledger.count_gaps(self._session_id) - before
 
     def _verify_signal_timestamps(
         self,
@@ -583,7 +719,10 @@ class ContinuousPaperRunner:
         new_trades: int,
         done: bool,
         reason: str | None,
+        gaps: list[_Gap] | None = None,
+        gaps_recorded: int = 0,
     ) -> AdvanceSummary:
+        found: list[_Gap] = [] if gaps is None else gaps
         trades = self._ledger.count_trades(self._session_id) if record is not None else 0
         return AdvanceSummary(
             session_id=self._session_id,
@@ -598,6 +737,10 @@ class ContinuousPaperRunner:
             last_bar_ts=_last_signal_ts(signals),
             done=done,
             reason=reason,
+            gap_policy=self._gap_policy,
+            gaps_skipped=len(found),
+            missing_bars=sum(gap.missing_bars for gap in found),
+            gaps_recorded=gaps_recorded,
         )
 
 
