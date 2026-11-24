@@ -307,7 +307,11 @@ validation slice.
 The locked final OOS section is now mandatory for the production policy. Until
 the holdout slice attaches it, every `PROMOTION_V1` decision rejects with
 `missing_locked_oos`, so **no evidence promotion can happen**. That is the
-intended fail-closed state; do not relax it to make a test pass.
+intended fail-closed state; do not relax it to make a test pass. To spend the
+holdout without weakening production, the pre-holdout eligibility check uses a
+sealed decision from `evaluate_promotion` with the same policy id/version and
+`require_locked_oos=False`; after `attach_holdout` the final promotion
+re-evaluates the bundle with `PROMOTION_V1` (`require_locked_oos=True`).
 
 Two structural limits are worth stating. The bundle records its fold/CI
 `EvidencePolicy` but not the promotion policy id/version, so the decision,

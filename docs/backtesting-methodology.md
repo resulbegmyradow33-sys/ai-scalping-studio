@@ -261,6 +261,17 @@ build is the same holdout.
    is one conditional `UPDATE`, so concurrent unlock attempts produce exactly
    one winner. A second unlock for the same `(dataset_id, dataset_checksum)`
    raises `HoldoutSpent`, even when it names a different spec.
+
+   The decision must be **sealed** by `evaluate_promotion` and its
+   `policy_digest` must match the supplied policy; a hand-constructed or
+   mutated decision is refused. Because `PROMOTION_V1` requires the
+   `locked_oos` section that does not exist before the spend, the pre-holdout
+   eligibility check uses the same named policy/version with
+   `require_locked_oos=False`. That check authorises the one spend; the final
+   promotion later re-evaluates the attached bundle with `PROMOTION_V1`
+   (`require_locked_oos=True`). The holdout result records the digest of the
+   decision that actually unlocked it, so the audit distinguishes the two
+   checks.
 3. **Evaluate once.** `evaluate_holdout(features_or_bundle, spec, config,
    ledger=..., unlock_token=...)` validates the single-use token, claims the one
    evaluation slot, slices the manifest's final test rows, and runs the existing
