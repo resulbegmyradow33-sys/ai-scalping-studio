@@ -149,7 +149,7 @@ correctly, never that the candidate has an edge.
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
-| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with

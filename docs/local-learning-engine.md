@@ -182,7 +182,10 @@ policy:
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
 champion_spec_hash=None, expected_identity=None)` runs `verify_evidence` against
-the **expected** code version, dataset checksum and settings digest, then the
+the **expected** code version, dataset checksum and settings digest. Build that
+object with `ExpectedIdentity.current(dataset_checksum=manifest.checksum)`: it
+takes the live `code_version()`, `Settings()` digest and the manifest checksum
+from the store, instead of trusting strings a caller supplies. then the
 structural and threshold checks, and returns a sealed `PromotionDecision`:
 `accepted`, a tuple of `PromotionRejection(code, message, observed, required)`,
 the policy id/version/digest, the re-derived evidence checksum, the dataset
@@ -227,7 +230,10 @@ a wider window.
 | `min_bootstrap_samples` / `min_bootstrap_confidence` | the aggregate interval is weaker than the policy |
 | `cost_stress` | a required stressed fold is not profitable or has PF <= 1 |
 | `stress_degradation` | a stressed fold loses more expectancy than `max_stress_degradation` allows |
-| `missing_locked_oos` | the bundle has no valid `locked_oos` dataclass section, or its identity/policy/test range does not match; **the normal state until the holdout slice lands** |
+| `missing_locked_oos` | the bundle has no `locked_oos` dataclass section; **the normal state until the holdout slice lands** |
+| `locked_oos_checksum` / `locked_oos_evidence_checksum` | the section's own checksum, or its pre-attach evidence checksum, does not re-derive |
+| `locked_oos_identity` | section identity/policy/spec/version does not match the bundle or applied policy |
+| `locked_oos_geometry` | wrong test rows, rows outside the test split, or bad/overlapping timestamps |
 | `non_production_policy` | the policy digest is not in `PRODUCTION_POLICIES` (constructor/refusal text, not a `PromotionRejection`) |
 | `stale_trial_evidence` | the accepted trial lacks the same `dataset_checksum`/`settings_digest`, or predates schema v4 |
 | `champion_evidence_missing` / `champion_identity_missing` | a champion was named without its bundle or without a spec hash |
@@ -310,7 +316,15 @@ validation.
 ### Locked-OOS contract (for the holdout slice)
 
 `CandidateEvidence.locked_oos` is a real frozen `LockedOOSEvidence` field, not a
-dictionary read from `to_dict`. It must carry: `checksum`, `evidence_checksum`,
+dictionary read from `to_dict`. Its `checksum` is
+`locked_oos_checksum(section)`: canonical JSON sha256 over every field except
+`checksum` and `created_at` (matching the holdout ledger). Its
+`evidence_checksum` is the **pre-attach** checksum of the bundle, because the
+post-attach `CandidateEvidence.checksum` includes this section and embedding it
+would be circular. `test_rows == test_end_row - test_start_row`, the rows must be
+exactly `splits.test_start_row/test_end_row`, the start must be at/after the
+validation boundary, and the ISO UTC timestamps must start before they end and
+after the last fold. It must carry: `checksum`, `evidence_checksum`,
 `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `spec_hash`,
 `spec_version`, `complexity`, `code_version`, `settings_digest`, `policy_id`,
 `policy_version`, `test_start_row`, `test_end_row`, `test_rows`,
@@ -319,10 +333,13 @@ dictionary read from `to_dict`. It must carry: `checksum`, `evidence_checksum`,
 `expectancy_r_ci95_low/high`, `total_r_ci95_low/high`, `bootstrap_samples`,
 `bootstrap_confidence`, `bootstrap_method`, `regime_coverage`, plus optional
 `regimes`, `stress`, `created_at` and `schema_version`. The section enters the
-bundle checksum. `_locked_oos` requires its identity, policy id/version, symbol,
-timeframe, spec version and test-row range to match the bundle and the applied
-policy; a subclass overriding `to_dict` cannot inject one because the policy
-requires `type(evidence) is CandidateEvidence`.
+bundle checksum. `_locked_oos` requires its identity, policy id/version, symbol, timeframe, spec
+version and test-row range to match the bundle and the applied policy. It also
+applies the **same metric gate as the folds** (`min_trades`, expectancy, PF,
+drawdown, regime coverage, CI lower bound, bootstrap samples/confidence and
+stress profitability/degradation) to the locked result. A subclass overriding
+`to_dict` cannot inject one because the policy requires
+`type(evidence) is CandidateEvidence`.
 
 ### What acceptance means
 

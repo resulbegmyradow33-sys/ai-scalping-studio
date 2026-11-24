@@ -37,7 +37,7 @@ from scalping.discovery.archive import (
     ChampionRecord,
     DiscoveryArchive,
 )
-from scalping.discovery.promotion import is_production_policy_digest
+from scalping.discovery.promotion import PRODUCTION_POLICIES
 from scalping.strategy.dsl import StrategySpec
 from scalping.strategy.dsl.nodes import DslValidationError
 
@@ -179,14 +179,20 @@ class ChampionProvider:
                 f"promoted in {record.mode!r} mode; only an evidence-mode champion may "
                 "trade paper"
             )
+        registered = (
+            None
+            if record.policy_digest is None
+            else PRODUCTION_POLICIES.get(record.policy_digest)
+        )
         if (
-            not is_production_policy_digest(record.policy_digest)
-            or record.policy_id is None
-            or record.policy_version is None
+            registered is None
+            or record.policy_id != registered.policy_id
+            or record.policy_version != registered.version
         ):
             raise NoEvidenceChampion(
                 f"champion {record.candidate.candidate_id!r} in scope {resolved!r} was "
-                "promoted by a policy that is not in the production allow-list"
+                "promoted by a policy that is not in the production allow-list, or its "
+                "stored id/version disagrees with the registered policy"
             )
         spec = self._load(record)
         return ChampionSpec(

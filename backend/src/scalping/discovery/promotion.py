@@ -73,9 +73,11 @@ import hashlib
 import hmac
 import math
 import secrets
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Any, Final
 
 from scalping.discovery._evidence_auth import issue as _issue_authorization
@@ -93,6 +95,7 @@ from scalping.discovery.evidence import (
     SplitBoundaries,
     evidence_checksum,
     evidence_from_dict,
+    locked_oos_checksum,
     verify_evidence,
 )
 from scalping.discovery.protocols import canonical_json
@@ -102,6 +105,7 @@ __all__ = [
     "PRODUCTION_POLICIES",
     "PROMOTION_V1",
     "EvidenceIdentity",
+    "ExpectedIdentity",
     "ManualOverride",
     "PromotionDecision",
     "PromotionPolicy",
@@ -365,11 +369,34 @@ PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     max_selection_fold_share=0.4,
 )
 
-#: The only policies the public production path accepts, keyed by field digest.
-#: A modified copy has a different digest and is refused with
-#: ``non_production_policy``. Tests may add their own entry explicitly to exercise
-#: the provider; production code must not.
-PRODUCTION_POLICIES: Final[dict[str, PromotionPolicy]] = {PROMOTION_V1.digest: PROMOTION_V1}
+_PRODUCTION_POLICY_REGISTRY: dict[str, PromotionPolicy] = {PROMOTION_V1.digest: PROMOTION_V1}
+
+#: Read-only view of the policies the public production path accepts. A modified
+#: copy has a different digest and is refused with ``non_production_policy``.
+PRODUCTION_POLICIES: Final[Mapping[str, PromotionPolicy]] = MappingProxyType(
+    _PRODUCTION_POLICY_REGISTRY
+)
+
+
+@contextmanager
+def _test_policies(*policies: PromotionPolicy) -> Iterator[None]:
+    """Private test-only registration; restores the registry on exit."""
+    added: list[str] = []
+    for policy in policies:
+        if not isinstance(policy, PromotionPolicy):
+            raise TypeError("only PromotionPolicy objects can be registered")
+        existing = _PRODUCTION_POLICY_REGISTRY.get(policy.digest)
+        if existing is not None:
+            if existing is not policy:
+                raise ValueError("a different policy already owns this digest")
+            continue
+        _PRODUCTION_POLICY_REGISTRY[policy.digest] = policy
+        added.append(policy.digest)
+    try:
+        yield
+    finally:
+        for digest in added:
+            _PRODUCTION_POLICY_REGISTRY.pop(digest, None)
 
 
 def is_production_policy(policy: PromotionPolicy) -> bool:
@@ -408,12 +435,13 @@ class PromotionRejection:
 
 
 @dataclass(frozen=True, slots=True)
-class EvidenceIdentity:
-    """The execution universe a promotion is expected to belong to.
+class ExpectedIdentity:
+    """The **current** execution universe a promotion must belong to.
 
-    The verifier compares these with the bundle's fields, so an old code version,
-    dataset build or settings digest is rejected as stale instead of silently
-    accepted because the bundle agrees with itself.
+    Do not build this from strings the caller happens to have. Use
+    :meth:`current`, which derives the code version, execution-settings digest
+    and dataset manifest checksum from the live process/store, so an old trial
+    or bundle is rejected as stale instead of agreeing with itself.
     """
 
     code_version: str
@@ -426,28 +454,56 @@ class EvidenceIdentity:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty string")
 
+    @classmethod
+    def current(
+        cls,
+        *,
+        dataset_checksum: str,
+        settings: Any | None = None,
+        code_version: str | None = None,
+    ) -> ExpectedIdentity:
+        """Build the identity from the running code, ``Settings`` and manifest.
 
-class _DecisionSealer:
-    """Per-process HMAC key for genuine decisions; never a public sentinel.
+        ``dataset_checksum`` is the value read from the dataset manifest/store;
+        it is not inferred, because the same process can hold several builds.
+        """
+        from scalping.config import Settings
+        from scalping.discovery.evidence import settings_digest
+        from scalping.discovery.run import code_version as current_code_version
 
-    ``evaluate_promotion`` signs the canonical payload. A hand-built decision has
-    no valid tag, and ``dataclasses.replace`` of a real decision with a changed
-    field fails verification because the payload no longer matches its tag.
+        resolved_settings = Settings() if settings is None else settings
+        return cls(
+            code_version=(current_code_version() if code_version is None else code_version),
+            dataset_checksum=dataset_checksum,
+            settings_digest=settings_digest(resolved_settings),
+        )
+
+
+#: Backward-compatible name; new code should use :class:`ExpectedIdentity`.
+EvidenceIdentity = ExpectedIdentity
+
+
+def _make_decision_sealer() -> tuple[Any, Any]:
+    """A per-process HMAC key captured by closures, not a module sentinel.
+
+    The signing function is used only by :func:`_sealed_decision`; the verifier
+    only by ``PromotionDecision.__post_init__``. There is no ``_SEALER`` object to
+    import and call. This is a separation boundary, not a cryptographic boundary
+    against code already running in this process.
     """
+    key = secrets.token_bytes(32)
 
-    __slots__ = ("_key",)
+    def sign(payload: str) -> str:
+        return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
-    def __init__(self) -> None:
-        self._key = secrets.token_bytes(32)
+    def verify(payload: str, tag: object) -> bool:
+        return isinstance(tag, str) and hmac.compare_digest(sign(payload), tag)
 
-    def sign(self, payload: str) -> str:
-        return hmac.new(self._key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    def verify(self, payload: str, tag: object) -> bool:
-        return isinstance(tag, str) and hmac.compare_digest(self.sign(payload), tag)
+    return sign, verify
 
 
-_SEALER = _DecisionSealer()
+_sign_decision, _verify_decision = _make_decision_sealer()
+del _make_decision_sealer
 
 
 @dataclass(frozen=True, slots=True)
@@ -482,7 +538,7 @@ class PromotionDecision:
     _seal: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if not _SEALER.verify(self._content(), self._seal):
+        if not _verify_decision(self._content(), self._seal):
             raise ValueError("a PromotionDecision must be produced by evaluate_promotion")
         if not isinstance(self.accepted, bool):
             raise TypeError(f"accepted must be a bool, got {type(self.accepted).__name__}")
@@ -548,7 +604,7 @@ def _sealed_decision(**kwargs: Any) -> PromotionDecision:
     decision = object.__new__(PromotionDecision)
     for name, value in kwargs.items():
         object.__setattr__(decision, name, value)
-    object.__setattr__(decision, "_seal", _SEALER.sign(decision._content()))
+    object.__setattr__(decision, "_seal", _sign_decision(decision._content()))
     decision.__post_init__()
     return decision
 
@@ -655,37 +711,169 @@ def _stress_row(fold_stress: Sequence[Any], multiplier: float) -> Any | None:
     return None
 
 
-def _locked_oos(evidence: CandidateEvidence, policy: PromotionPolicy) -> bool:
-    """True when a valid locked-holdout section is attached to this bundle.
+def _base_evidence_checksum(evidence: CandidateEvidence) -> str:
+    """Checksum of the bundle **before** the locked section was attached.
 
-    The section is the real ``CandidateEvidence.locked_oos`` dataclass field, so
-    a subclass overriding ``to_dict`` cannot invent one. Its own checksum,
-    identity, policy and test-row range must match this bundle and policy.
+    The final ``CandidateEvidence.checksum`` includes the locked section, so it
+    cannot be embedded in that same section without a fixed point. The holdout
+    ledger stores the pre-attach checksum in ``evidence_checksum``; this helper
+    re-derives exactly that. ``locked_oos_checksum`` binds the section's own
+    content, and the final bundle checksum binds the pair.
+    """
+    payload = evidence.to_dict()
+    payload.pop("locked_oos", None)
+    payload.pop("checksum", None)
+    payload.pop("created_at", None)
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _iso_utc(value: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _locked_oos(
+    evidence: CandidateEvidence,
+    policy: PromotionPolicy,
+    rejections: list[PromotionRejection],
+    observed: dict[str, Any],
+) -> None:
+    """Validate the locked holdout as evidence, not as a present field.
+
+    Checks its own canonical checksum, the pre-attach evidence checksum, the
+    exact test-row range and timestamps, and the same metric/stress thresholds
+    as the walk-forward folds. A section with bad metrics or a fabricated
+    checksum is a rejection even though the field exists.
     """
     section = evidence.locked_oos
     if section is None:
-        return False
-    if len(section.checksum) != 64 or len(section.evidence_checksum) != 64:
-        return False
-    if section.trades <= 0:
-        return False
-    for observed, expected in (
-        (section.dataset_id, evidence.dataset_id),
-        (section.dataset_checksum, evidence.dataset_checksum),
-        (section.symbol, evidence.symbol),
-        (section.timeframe, evidence.timeframe),
-        (section.spec_hash, evidence.spec_hash),
-        (section.spec_version, evidence.spec_version),
-        (section.code_version, evidence.code_version),
-        (section.settings_digest, evidence.settings_digest),
-        (section.policy_id, policy.policy_id),
-        (section.policy_version, policy.version),
-        (section.test_start_row, evidence.splits.test_start_row),
-        (section.test_end_row, evidence.splits.test_end_row),
+        _reject(
+            rejections,
+            "missing_locked_oos",
+            "the policy requires a locked out-of-sample section and the bundle has none",
+            observed="absent",
+            required="locked_oos",
+        )
+        return
+
+    if section.checksum != locked_oos_checksum(section):
+        _reject(
+            rejections,
+            "locked_oos_checksum",
+            "the locked-OOS section checksum does not re-derive from its fields",
+            observed=section.checksum[:12],
+            required=locked_oos_checksum(section)[:12],
+        )
+    base_checksum = _base_evidence_checksum(evidence)
+    if section.evidence_checksum != base_checksum:
+        _reject(
+            rejections,
+            "locked_oos_evidence_checksum",
+            "the locked-OOS section is not bound to this evidence bundle",
+            observed=section.evidence_checksum[:12],
+            required=base_checksum[:12],
+        )
+    for observed_value, expected, name in (
+        (section.dataset_id, evidence.dataset_id, "dataset_id"),
+        (section.dataset_checksum, evidence.dataset_checksum, "dataset_checksum"),
+        (section.symbol, evidence.symbol, "symbol"),
+        (section.timeframe, evidence.timeframe, "timeframe"),
+        (section.spec_hash, evidence.spec_hash, "spec_hash"),
+        (section.spec_version, evidence.spec_version, "spec_version"),
+        (section.code_version, evidence.code_version, "code_version"),
+        (section.settings_digest, evidence.settings_digest, "settings_digest"),
+        (section.policy_id, policy.policy_id, "policy_id"),
+        (section.policy_version, policy.version, "policy_version"),
     ):
-        if observed != expected:
-            return False
-    return True
+        if observed_value != expected:
+            _reject(
+                rejections,
+                "locked_oos_identity",
+                f"locked-OOS {name} does not match the evidence/policy",
+                observed=observed_value,
+                required=expected,
+            )
+
+    expected_rows = section.test_end_row - section.test_start_row
+    if section.test_rows != expected_rows or section.test_rows <= 0:
+        _reject(
+            rejections,
+            "locked_oos_geometry",
+            "locked-OOS test_rows does not equal its half-open row range",
+            observed=section.test_rows,
+            required=expected_rows,
+        )
+    if (
+        section.test_start_row != evidence.splits.test_start_row
+        or section.test_end_row != evidence.splits.test_end_row
+    ):
+        _reject(
+            rejections,
+            "locked_oos_geometry",
+            "the locked-OOS rows are not the dataset's test split",
+            observed=f"{section.test_start_row}-{section.test_end_row}",
+            required=f"{evidence.splits.test_start_row}-{evidence.splits.test_end_row}",
+        )
+    if section.test_start_row < evidence.splits.validation_end_row:
+        _reject(
+            rejections,
+            "locked_oos_geometry",
+            "the locked-OOS section starts before the validation boundary",
+            observed=section.test_start_row,
+            required=f">= {evidence.splits.validation_end_row}",
+        )
+    start_ts = _iso_utc(section.test_start_ts)
+    end_ts = _iso_utc(section.test_end_ts)
+    if start_ts is None or end_ts is None or start_ts >= end_ts:
+        _reject(
+            rejections,
+            "locked_oos_geometry",
+            "the locked-OOS timestamps are not ordered ISO-8601 UTC instants",
+            observed=f"{section.test_start_ts}/{section.test_end_ts}",
+            required="UTC start before end",
+        )
+    elif evidence.folds:
+        last_fold_ts = _iso_utc(evidence.folds[-1].test_end_ts)
+        if last_fold_ts is not None and start_ts < last_fold_ts:
+            _reject(
+                rejections,
+                "locked_oos_geometry",
+                "the locked-OOS section starts before the last walk-forward fold ended",
+                observed=section.test_start_ts,
+                required=f">= {evidence.folds[-1].test_end_ts}",
+            )
+
+    if section.complexity > policy.max_complexity:
+        _reject(
+            rejections,
+            "max_complexity",
+            "the locked-OOS section reports a spec above the complexity cap",
+            observed=section.complexity,
+            required=policy.max_complexity,
+        )
+
+    _check_metric_thresholds(
+        label="locked OOS",
+        trades=float(section.trades),
+        expectancy_r=_finite(section.expectancy_r),
+        profit_factor=_finite(section.profit_factor),
+        max_drawdown=_finite(section.max_drawdown),
+        regime_coverage=_finite(section.regime_coverage),
+        ci_low=_finite(section.expectancy_r_ci95_low),
+        bootstrap_samples=section.bootstrap_samples,
+        bootstrap_confidence=_finite(section.bootstrap_confidence),
+        stress_groups=[("locked OOS", section.expectancy_r, section.stress)],
+        policy=policy,
+        rejections=rejections,
+        observed=observed,
+        prefix="locked_",
+        ci_must_exceed=False,
+    )
 
 
 def _fold_boundaries(evidence: CandidateEvidence) -> tuple[tuple[int, int, int, int, int], ...]:
@@ -722,7 +910,7 @@ def _verify(
     evidence: CandidateEvidence,
     rejections: list[PromotionRejection],
     observed: dict[str, Any],
-    expected_identity: EvidenceIdentity | None,
+    expected_identity: ExpectedIdentity | None,
 ) -> bool:
     """Run the evidence module's verifier against an expected identity.
 
@@ -761,12 +949,201 @@ def _verify(
     return True
 
 
+def _check_metric_thresholds(
+    *,
+    label: str,
+    trades: float | None,
+    expectancy_r: float | None,
+    profit_factor: float | None,
+    max_drawdown: float | None,
+    regime_coverage: float | None,
+    ci_low: float | None,
+    bootstrap_samples: int | None,
+    bootstrap_confidence: float | None,
+    stress_groups: Sequence[tuple[str, float | None, Sequence[Any]]],
+    policy: PromotionPolicy,
+    rejections: list[PromotionRejection],
+    observed: dict[str, Any],
+    prefix: str = "",
+    ci_must_exceed: bool = True,
+) -> None:
+    """Shared metric/CI/stress gate for a fold aggregate and the locked OOS."""
+    if trades is None:
+        _reject(rejections, "missing_section", f"{label} trades is missing or not finite")
+    else:
+        observed[f"{prefix}trades"] = int(trades)
+        if trades < policy.min_trades:
+            _reject(
+                rejections,
+                "insufficient_trades",
+                f"{label} has {int(trades)} trades, below the policy minimum",
+                observed=int(trades),
+                required=policy.min_trades,
+            )
+    for name, value, code in (
+        ("expectancy_r", expectancy_r, "min_expectancy_r"),
+        ("profit_factor", profit_factor, "min_profit_factor"),
+        ("max_drawdown", max_drawdown, "max_drawdown"),
+        ("regime_coverage", regime_coverage, "min_regime_coverage"),
+        ("expectancy_r_ci95_low", ci_low, "min_ci_lower_r"),
+    ):
+        if value is None:
+            _reject(
+                rejections,
+                "missing_section",
+                f"{label} {name} is missing or not finite",
+                observed="absent",
+                required=name,
+            )
+    if expectancy_r is not None:
+        observed[f"{prefix}expectancy_r"] = expectancy_r
+        if expectancy_r < policy.min_expectancy_r:
+            _reject(
+                rejections,
+                "min_expectancy_r",
+                f"{label} expectancy {expectancy_r:g}R is below the policy minimum",
+                observed=expectancy_r,
+                required=policy.min_expectancy_r,
+            )
+    if profit_factor is not None:
+        observed[f"{prefix}profit_factor"] = profit_factor
+        if profit_factor < policy.min_profit_factor:
+            _reject(
+                rejections,
+                "min_profit_factor",
+                f"{label} profit factor {profit_factor:g} is below the policy minimum",
+                observed=profit_factor,
+                required=policy.min_profit_factor,
+            )
+    if max_drawdown is not None:
+        observed[f"{prefix}max_drawdown"] = max_drawdown
+        if max_drawdown > policy.max_drawdown:
+            _reject(
+                rejections,
+                "max_drawdown",
+                f"{label} drawdown {max_drawdown:g} exceeds the policy maximum",
+                observed=max_drawdown,
+                required=policy.max_drawdown,
+            )
+    if regime_coverage is not None:
+        observed[f"{prefix}regime_coverage"] = regime_coverage
+        if regime_coverage < policy.min_regime_coverage:
+            _reject(
+                rejections,
+                "min_regime_coverage",
+                f"{label} regime coverage {regime_coverage:.3f} is below the policy minimum",
+                observed=regime_coverage,
+                required=policy.min_regime_coverage,
+            )
+    if ci_low is not None:
+        observed[f"{prefix}expectancy_r_ci95_low"] = ci_low
+        below = (
+            ci_low <= policy.min_ci_lower_r if ci_must_exceed else ci_low < policy.min_ci_lower_r
+        )
+        if below:
+            _reject(
+                rejections,
+                "min_ci_lower_r",
+                f"{label} bootstrap lower bound does not clear the policy floor",
+                observed=ci_low,
+                required=(
+                    f"> {policy.min_ci_lower_r:g}"
+                    if ci_must_exceed
+                    else f">= {policy.min_ci_lower_r:g}"
+                ),
+            )
+    if bootstrap_samples is None:
+        _reject(
+            rejections,
+            "missing_section",
+            f"{label} bootstrap_samples is missing",
+            observed="absent",
+            required=f">= {policy.min_bootstrap_samples}",
+        )
+    else:
+        observed[f"{prefix}bootstrap_samples"] = bootstrap_samples
+        if bootstrap_samples < policy.min_bootstrap_samples:
+            _reject(
+                rejections,
+                "min_bootstrap_samples",
+                f"{label} has {bootstrap_samples} bootstrap samples, below the policy minimum",
+                observed=bootstrap_samples,
+                required=policy.min_bootstrap_samples,
+            )
+    if bootstrap_confidence is None:
+        _reject(
+            rejections,
+            "missing_section",
+            f"{label} bootstrap_confidence is missing or not finite",
+            observed="absent",
+            required=f">= {policy.min_bootstrap_confidence:g}",
+        )
+    else:
+        observed[f"{prefix}bootstrap_confidence"] = bootstrap_confidence
+        if bootstrap_confidence < policy.min_bootstrap_confidence or bootstrap_confidence >= 1.0:
+            _reject(
+                rejections,
+                "min_bootstrap_confidence",
+                f"{label} bootstrap confidence is below the policy minimum or degenerate",
+                observed=bootstrap_confidence,
+                required=f">= {policy.min_bootstrap_confidence:g} and < 1",
+            )
+
+    missing_stress: list[str] = []
+    weak_stress: list[str] = []
+    degraded_stress: list[str] = []
+    for group_label, base, rows in stress_groups:
+        for multiplier in policy.require_cost_stress:
+            row = _stress_row(rows, float(multiplier))
+            if row is None:
+                missing_stress.append(f"{group_label}:x{float(multiplier):g}")
+                continue
+            stress_expectancy = _finite(row.expectancy_r)
+            stress_pf = _finite(row.profit_factor)
+            if stress_expectancy is None or stress_pf is None:
+                weak_stress.append(f"{group_label}:x{float(multiplier):g}:missing")
+                continue
+            if stress_expectancy <= 0.0 or stress_pf <= 1.0:
+                weak_stress.append(
+                    f"{group_label}:x{float(multiplier):g}:{stress_expectancy:g}R/PF{stress_pf:g}"
+                )
+            floor = 0.0 if base is None or base <= 0.0 else base / policy.max_stress_degradation
+            if stress_expectancy < floor:
+                degraded_stress.append(
+                    f"{group_label}:x{float(multiplier):g}:{stress_expectancy:g}R<{floor:g}R"
+                )
+    if missing_stress:
+        _reject(
+            rejections,
+            "missing_cost_stress",
+            f"{label} is missing required cost-stress rows",
+            observed=",".join(missing_stress[:8]),
+            required=",".join(f"x{float(value):g}" for value in policy.require_cost_stress),
+        )
+    if weak_stress:
+        _reject(
+            rejections,
+            "cost_stress",
+            f"{label} has a stress rerun that is not profitable or has PF <= 1",
+            observed=",".join(weak_stress[:8]),
+            required="expectancy_r > 0 and profit_factor > 1",
+        )
+    if degraded_stress:
+        _reject(
+            rejections,
+            "stress_degradation",
+            f"{label} stress loses more expectancy than the policy allows",
+            observed=",".join(degraded_stress[:8]),
+            required=f"at least base/{policy.max_stress_degradation:g}",
+        )
+
+
 def _check_bundle(
     evidence: CandidateEvidence,
     policy: PromotionPolicy,
     rejections: list[PromotionRejection],
     observed: dict[str, Any],
-    expected_identity: EvidenceIdentity | None,
+    expected_identity: ExpectedIdentity | None,
 ) -> None:
     """Identity, structure, sample and threshold checks on the candidate alone."""
     _verify(evidence, rejections, observed, expected_identity)
@@ -1031,72 +1408,6 @@ def _check_bundle(
         )
 
     total_trades = _finite(aggregate.total_trades)
-    if total_trades is None:
-        _reject(rejections, "missing_section", "aggregate total_trades is not finite")
-    else:
-        observed["total_trades"] = int(total_trades)
-        if total_trades < policy.min_trades:
-            _reject(
-                rejections,
-                "insufficient_trades",
-                f"{int(total_trades)} pooled trades is below the policy minimum",
-                observed=int(total_trades),
-                required=policy.min_trades,
-            )
-
-    for name, code in (
-        ("expectancy_r", "min_expectancy_r"),
-        ("profit_factor", "min_profit_factor"),
-        ("max_drawdown", "max_drawdown"),
-        ("positive_fold_fraction", "min_positive_fold_fraction"),
-        ("regime_coverage", "min_regime_coverage"),
-        ("expectancy_r_ci95_low", "min_ci_lower_r"),
-    ):
-        if _finite(getattr(aggregate, name)) is None:
-            _reject(
-                rejections,
-                "missing_section",
-                f"aggregate {name} is missing or not finite",
-                observed="absent",
-                required=name,
-            )
-
-    expectancy = _finite(aggregate.expectancy_r)
-    if expectancy is not None:
-        observed["expectancy_r"] = expectancy
-        if expectancy < policy.min_expectancy_r:
-            _reject(
-                rejections,
-                "min_expectancy_r",
-                f"pooled expectancy {expectancy:g}R is below the policy minimum",
-                observed=expectancy,
-                required=policy.min_expectancy_r,
-            )
-
-    profit_factor = _finite(aggregate.profit_factor)
-    if profit_factor is not None:
-        observed["profit_factor"] = profit_factor
-        if profit_factor < policy.min_profit_factor:
-            _reject(
-                rejections,
-                "min_profit_factor",
-                f"pooled profit factor {profit_factor:g} is below the policy minimum",
-                observed=profit_factor,
-                required=policy.min_profit_factor,
-            )
-
-    drawdown = _finite(aggregate.max_drawdown)
-    if drawdown is not None:
-        observed["max_drawdown"] = drawdown
-        if drawdown > policy.max_drawdown:
-            _reject(
-                rejections,
-                "max_drawdown",
-                f"worst-fold drawdown {drawdown:g} exceeds the policy maximum",
-                observed=drawdown,
-                required=policy.max_drawdown,
-            )
-
     positive_fraction = _finite(aggregate.positive_fold_fraction)
     if positive_fraction is not None:
         observed["positive_fold_fraction"] = positive_fraction
@@ -1108,121 +1419,23 @@ def _check_bundle(
                 observed=positive_fraction,
                 required=policy.min_positive_fold_fraction,
             )
-
-    coverage = _finite(aggregate.regime_coverage)
-    if coverage is not None:
-        observed["regime_coverage"] = coverage
-        if coverage < policy.min_regime_coverage:
-            _reject(
-                rejections,
-                "min_regime_coverage",
-                f"regime coverage {coverage:.3f} is below the policy minimum",
-                observed=coverage,
-                required=policy.min_regime_coverage,
-            )
-
     samples = aggregate.bootstrap_samples
-    if isinstance(samples, bool) or not isinstance(samples, int):
-        _reject(
-            rejections,
-            "missing_section",
-            "aggregate bootstrap_samples is missing or not an int",
-            observed=repr(samples),
-            required=f">= {policy.min_bootstrap_samples}",
-        )
-    else:
-        observed["bootstrap_samples"] = samples
-        if samples < policy.min_bootstrap_samples:
-            _reject(
-                rejections,
-                "min_bootstrap_samples",
-                f"{samples} bootstrap samples is below the policy minimum",
-                observed=samples,
-                required=policy.min_bootstrap_samples,
-            )
-    confidence = _finite(aggregate.bootstrap_confidence)
-    if confidence is None:
-        _reject(
-            rejections,
-            "missing_section",
-            "aggregate bootstrap_confidence is missing or not finite",
-            observed="absent",
-            required=f">= {policy.min_bootstrap_confidence:g}",
-        )
-    else:
-        observed["bootstrap_confidence"] = confidence
-        if confidence < policy.min_bootstrap_confidence or confidence >= 1.0:
-            _reject(
-                rejections,
-                "min_bootstrap_confidence",
-                f"bootstrap confidence {confidence:g} is below the policy minimum or degenerate",
-                observed=confidence,
-                required=f">= {policy.min_bootstrap_confidence:g} and < 1",
-            )
-
-    ci_low = _finite(aggregate.expectancy_r_ci95_low)
-    if ci_low is not None:
-        observed["expectancy_r_ci95_low"] = ci_low
-        if ci_low <= policy.min_ci_lower_r:
-            _reject(
-                rejections,
-                "min_ci_lower_r",
-                (
-                    f"bootstrap lower bound {ci_low:g}R does not exceed the policy floor; "
-                    "the interval still includes the threshold"
-                ),
-                observed=ci_low,
-                required=f"> {policy.min_ci_lower_r:g}",
-            )
-
-    missing_stress: list[str] = []
-    weak_stress: list[str] = []
-    degraded_stress: list[str] = []
-    for fold in folds:
-        for multiplier in policy.require_cost_stress:
-            row = _stress_row(fold.stress, float(multiplier))
-            if row is None:
-                missing_stress.append(f"fold{fold.fold}:x{float(multiplier):g}")
-                continue
-            expectancy = _finite(row.expectancy_r)
-            profit_factor = _finite(row.profit_factor)
-            if expectancy is None or profit_factor is None:
-                weak_stress.append(f"fold{fold.fold}:x{float(multiplier):g}:missing")
-                continue
-            if expectancy <= 0.0 or profit_factor <= 1.0:
-                weak_stress.append(
-                    f"fold{fold.fold}:x{float(multiplier):g}:{expectancy:g}R/PF{profit_factor:g}"
-                )
-            base = _finite(fold.expectancy_r)
-            floor = 0.0 if base is None or base <= 0.0 else base / policy.max_stress_degradation
-            if expectancy < floor:
-                degraded_stress.append(
-                    f"fold{fold.fold}:x{float(multiplier):g}:{expectancy:g}R<{floor:g}R"
-                )
-    if missing_stress:
-        _reject(
-            rejections,
-            "missing_cost_stress",
-            "the bundle is missing required cost-stress rows",
-            observed=",".join(missing_stress[:8]),
-            required=",".join(f"x{float(value):g}" for value in policy.require_cost_stress),
-        )
-    if weak_stress:
-        _reject(
-            rejections,
-            "cost_stress",
-            "a required stress rerun is not profitable or its profit factor is not above 1",
-            observed=",".join(weak_stress[:8]),
-            required="expectancy_r > 0 and profit_factor > 1",
-        )
-    if degraded_stress:
-        _reject(
-            rejections,
-            "stress_degradation",
-            "a required stress rerun loses more expectancy than the policy allows",
-            observed=",".join(degraded_stress[:8]),
-            required=f"at least base/{policy.max_stress_degradation:g}",
-        )
+    samples_value = samples if isinstance(samples, int) and not isinstance(samples, bool) else None
+    _check_metric_thresholds(
+        label="pooled folds",
+        trades=total_trades,
+        expectancy_r=_finite(aggregate.expectancy_r),
+        profit_factor=_finite(aggregate.profit_factor),
+        max_drawdown=_finite(aggregate.max_drawdown),
+        regime_coverage=_finite(aggregate.regime_coverage),
+        ci_low=_finite(aggregate.expectancy_r_ci95_low),
+        bootstrap_samples=samples_value,
+        bootstrap_confidence=_finite(aggregate.bootstrap_confidence),
+        stress_groups=[(f"fold{fold.fold}", fold.expectancy_r, fold.stress) for fold in folds],
+        policy=policy,
+        rejections=rejections,
+        observed=observed,
+    )
 
     if evidence.complexity > policy.max_complexity:
         _reject(
@@ -1250,14 +1463,8 @@ def _check_bundle(
             required=policy.max_trials,
         )
 
-    if policy.require_locked_oos and not _locked_oos(evidence, policy):
-        _reject(
-            rejections,
-            "missing_locked_oos",
-            "the policy requires a locked out-of-sample section and the bundle has none",
-            observed="absent",
-            required="locked_oos",
-        )
+    if policy.require_locked_oos:
+        _locked_oos(evidence, policy, rejections, observed)
 
 
 def _fold_identity(evidence: CandidateEvidence) -> tuple[Any, ...] | None:
@@ -1561,7 +1768,7 @@ def evaluate_promotion(
     *,
     champion_evidence: CandidateEvidence | None = None,
     champion_spec_hash: str | None = None,
-    expected_identity: EvidenceIdentity | None = None,
+    expected_identity: ExpectedIdentity | None = None,
 ) -> PromotionDecision:
     """Apply ``policy`` to one evidence bundle; every doubt is a rejection.
 
@@ -1582,7 +1789,7 @@ def evaluate_promotion(
         )
     if champion_spec_hash is not None and not isinstance(champion_spec_hash, str):
         raise TypeError("champion_spec_hash must be a str or None")
-    if expected_identity is not None and not isinstance(expected_identity, EvidenceIdentity):
+    if expected_identity is not None and not isinstance(expected_identity, ExpectedIdentity):
         raise TypeError(
             "expected_identity must be an EvidenceIdentity or None, "
             f"got {type(expected_identity).__name__}"
@@ -1701,7 +1908,7 @@ def _promote_with_evidence(
     *,
     scope: str,
     reason: str,
-    expected_identity: EvidenceIdentity,
+    expected_identity: ExpectedIdentity,
     require_production: bool,
 ) -> ChampionRecord:
     """Internal promotion; ``require_production`` is set only by tests."""
@@ -1711,7 +1918,7 @@ def _promote_with_evidence(
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if not isinstance(policy, PromotionPolicy):
         raise TypeError(f"policy must be a PromotionPolicy, got {type(policy).__name__}")
-    if not isinstance(expected_identity, EvidenceIdentity):
+    if not isinstance(expected_identity, ExpectedIdentity):
         raise TypeError(
             f"expected_identity must be an EvidenceIdentity, got {type(expected_identity).__name__}"
         )
@@ -1813,9 +2020,14 @@ def _promote_with_evidence(
         evidence_payload=evidence.to_dict(),
         champion_checksum=decision.champion_checksum,
         champion_candidate_id=champion_id,
+        champion_for_comparison=champion_for_comparison,
         replaces_non_evidence=replaces_non_evidence is not None,
         authorization=_issue_authorization(authorization_payload),
         authorization_payload=authorization_payload,
+        policy=policy,
+        champion_evidence=champion_evidence,
+        expected_identity=expected_identity,
+        require_production=require_production,
         detail=detail,
     )
 
@@ -1828,7 +2040,7 @@ def promote_with_evidence(
     *,
     scope: str,
     reason: str,
-    expected_identity: EvidenceIdentity,
+    expected_identity: ExpectedIdentity,
 ) -> ChampionRecord:
     """Evaluate a **registered production policy** and promote only if it accepts.
 
@@ -1847,35 +2059,6 @@ def promote_with_evidence(
         reason=reason,
         expected_identity=expected_identity,
         require_production=True,
-    )
-
-
-def _promote_for_tests(
-    archive: DiscoveryArchive,
-    candidate_id: str,
-    evidence: CandidateEvidence,
-    policy: PromotionPolicy,
-    *,
-    scope: str,
-    reason: str,
-    expected_identity: EvidenceIdentity,
-) -> ChampionRecord:
-    """Private seed path for tests; never call it from production code.
-
-    It bypasses only the production registry. The evaluation, seal, archive
-    verification, accepted-trial link and audit rows are the same as the public
-    path. Tests that need the provider to read the champion must also add the
-    test policy digest to ``PRODUCTION_POLICIES`` explicitly.
-    """
-    return _promote_with_evidence(
-        archive,
-        candidate_id,
-        evidence,
-        policy,
-        scope=scope,
-        reason=reason,
-        expected_identity=expected_identity,
-        require_production=False,
     )
 
 

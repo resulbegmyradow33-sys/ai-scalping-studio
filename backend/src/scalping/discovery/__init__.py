@@ -104,6 +104,7 @@ __all__ = [
     "EvidenceIdentity",
     "EvidencePolicy",
     "EvidenceRecord",
+    "ExpectedIdentity",
     "Factory",
     "FoldEvidence",
     "LockedOOSEvidence",

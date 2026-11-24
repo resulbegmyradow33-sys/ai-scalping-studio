@@ -104,6 +104,7 @@ __all__ = [
     "build_evidence",
     "evidence_checksum",
     "evidence_from_dict",
+    "locked_oos_checksum",
     "settings_digest",
     "verify_evidence",
 ]
@@ -1000,6 +1001,24 @@ def evidence_checksum(evidence: CandidateEvidence) -> str:
     if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     return _checksum_payload(evidence.to_dict())
+
+
+def locked_oos_checksum(section: LockedOOSEvidence) -> str:
+    """Canonical sha256 of a locked-OOS section, excluding ``checksum``.
+
+    ``created_at`` is excluded too, matching the holdout ledger's
+    ``_result_checksum``: the same measured section can be re-serialised with a
+    new creation stamp without becoming a different result. Every other field,
+    including the metrics, intervals, regimes, stress and identity, is covered.
+    """
+    if type(section) is not LockedOOSEvidence:
+        raise TypeError(
+            f"section must be a LockedOOSEvidence, got {type(section).__name__}"
+        )
+    payload = asdict(section)
+    payload.pop("checksum", None)
+    payload.pop("created_at", None)
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _nested(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:

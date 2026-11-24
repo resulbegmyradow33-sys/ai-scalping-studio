@@ -1669,9 +1669,14 @@ class DiscoveryArchive:
         evidence_payload: Mapping[str, Any],
         champion_checksum: str | None = None,
         champion_candidate_id: str | None = None,
+        champion_for_comparison: str | None = None,
         replaces_non_evidence: bool = False,
         authorization: str,
         authorization_payload: Mapping[str, Any],
+        policy: Any,
+        champion_evidence: Any | None,
+        expected_identity: Any,
+        require_production: bool,
         detail: Mapping[str, Any] | None = None,
     ) -> ChampionRecord:
         """Store an evidence promotion through a sealed policy decision.
@@ -1778,6 +1783,27 @@ class DiscoveryArchive:
             )
         except EvidenceError as exc:
             raise ArchiveError(f"evidence payload failed verification: {exc}") from exc
+        # Re-evaluate the policy inside the archive. The capability proves that a
+        # promotion path issued this call; it does not prove the evidence is
+        # acceptable. A caller who imports the private signer still cannot skip
+        # the policy.
+        from scalping.discovery import promotion as promotion_module
+
+        if require_production and not promotion_module.is_production_policy(policy):
+            raise ArchiveError("non_production_policy: the archive requires a registered policy")
+        decision = promotion_module.evaluate_promotion(
+            rebuilt,
+            policy,
+            champion_evidence=champion_evidence,
+            champion_spec_hash=champion_for_comparison,
+            expected_identity=expected_identity,
+        )
+        if not decision.accepted:
+            raise ArchiveError(
+                "promotion_rejected: " + "; ".join(decision.codes)
+            )
+        if decision.evidence_checksum != evidence_checksum:
+            raise ArchiveError("promotion decision does not match the evidence checksum")
         tokens = _scope_tokens(scope)
         stamp = _now()
         reason_text = (

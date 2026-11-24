@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from promotion_evidence import evidence_for
+from promotion_support import promote_for_tests, registered_test_policies
 from scalping.discovery import (
     DEFAULT_SCOPE,
     SCHEMA_VERSION,
@@ -41,12 +42,7 @@ from scalping.discovery.champion import (
     NoEvidenceChampion,
     scope_for,
 )
-from scalping.discovery.promotion import (
-    PRODUCTION_POLICIES,
-    PROMOTION_V1,
-    EvidenceIdentity,
-    _promote_for_tests,
-)
+from scalping.discovery.promotion import PROMOTION_V1, EvidenceIdentity
 from scalping.discovery.protocols import canonical_json
 from scalping.strategy.dsl import (
     Compare,
@@ -78,11 +74,8 @@ TEST_POLICY = replace(PROMOTION_V1, policy_id="test-policy", require_locked_oos=
 
 @pytest.fixture(autouse=True)
 def _register_test_policy():
-    PRODUCTION_POLICIES[TEST_POLICY.digest] = TEST_POLICY
-    try:
+    with registered_test_policies(TEST_POLICY):
         yield
-    finally:
-        PRODUCTION_POLICIES.pop(TEST_POLICY.digest, None)
 
 
 def _evidence_mode_champion(
@@ -102,7 +95,7 @@ def _evidence_mode_champion(
         settings_digest=SETTINGS_DIGEST,
         expectancy_r=expectancy_r,
     )
-    return _promote_for_tests(
+    return promote_for_tests(
         archive,
         candidate_id,
         evidence,
