@@ -1947,7 +1947,9 @@ def _locked_section(
         regimes=result.regimes,
         stress=result.stress,
         created_at=result.created_at,
-        schema_version=result.schema_version,
+        # The section has its own layout version, independent of the richer
+        # LockedHoldoutResult record.
+        schema_version=1,
     )
     return replace(draft, checksum=locked_oos_checksum(draft))
 

@@ -825,6 +825,7 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     assert attached.locked_oos is not None
     assert attached.locked_oos.checksum == locked_oos_checksum(attached.locked_oos)
     assert attached.locked_oos.evidence_checksum == evidence.checksum
+    assert attached.locked_oos.schema_version == 1
     assert attached.locked_oos.test_start_row == result.test_start_row
     assert attached.locked_oos.test_end_row == result.test_end_row
     assert attached.checksum != evidence.checksum
