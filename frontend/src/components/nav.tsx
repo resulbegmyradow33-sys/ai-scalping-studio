@@ -9,6 +9,7 @@ const items = [
   { href: "/labs/ml", label: "ML Laboratuvarı" },
   { href: "/performance", label: "Performans" },
   { href: "/paper", label: "Paper Trading" },
+  { href: "/autonomy", label: "Otonomi" },
   { href: "/intelligence", label: "Piyasa Zekâsı" },
   { href: "/data", label: "Veri" },
 ] as const;

@@ -594,3 +594,111 @@ export interface PaperPage<T> {
   offset: number;
 }
 
+// --- autonomy status (read-only) ---------------------------------------------
+//
+// Source: `backend/src/scalping/api/routes_autonomy.py`. Every section carries
+// `configured`/`readable`; a count is absent (not zero) unless it was read.
+
+/** Paper ledger counts; absent while unconfigured or unreadable. */
+export interface AutonomyPaperStatus {
+  configured: boolean;
+  readable: boolean;
+  sessions?: number | null;
+  open_positions?: number | null;
+  closed_trades?: number | null;
+}
+
+/** The newest audit line in the orchestrator database. */
+export interface AutonomyLastEvent {
+  id: number;
+  ts: string;
+  event: string;
+  job_id?: number | null;
+}
+
+/** Queue counts and persisted controls. */
+export interface AutonomyOrchestratorStatus {
+  configured: boolean;
+  readable: boolean;
+  queued?: number | null;
+  running?: number | null;
+  failed?: number | null;
+  /** `null`/absent when the `state` table is missing, not "off". */
+  paused?: boolean | null;
+  safe_mode?: boolean | null;
+  research_disabled?: boolean | null;
+  last_event?: AutonomyLastEvent | null;
+}
+
+/** One scope's champion; `mode` is `evidence`, `exploratory` or `manual`. */
+export interface AutonomyChampion {
+  scope: string;
+  candidate_id: string;
+  mode?: string | null;
+  promoted_at?: string | null;
+  policy_id?: string | null;
+  policy_digest?: string | null;
+}
+
+/** Archived trial/gate counts; absent tables leave the count missing. */
+export interface AutonomyDiscoveries {
+  configured: boolean;
+  readable: boolean;
+  runs?: number | null;
+  decisions?: number | null;
+}
+
+/** Data symbols with at least one month partition on disk. */
+export interface AutonomyDataStatus {
+  configured: boolean;
+  readable: boolean;
+  symbols?: string[] | null;
+}
+
+/** `GET /api/autonomy/status`; each section owns its own readable flag. */
+export interface AutonomyStatus {
+  paper: AutonomyPaperStatus;
+  orchestrator: AutonomyOrchestratorStatus;
+  champions: AutonomyChampion[];
+  champions_readable: boolean;
+  discoveries: AutonomyDiscoveries;
+  data: AutonomyDataStatus;
+}
+
+/** One recent job row, including the deferral counter that explains a stall. */
+export interface AutonomyJobItem {
+  id: number;
+  kind: string;
+  status: string;
+  attempts: number;
+  defer_count: number;
+  priority: number;
+  created_at: string;
+  scheduled_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** Newest jobs first, bounded by `limit`; `items` is absent when unreadable. */
+export interface AutonomyJobPage {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyJobItem[] | null;
+  limit: number;
+}
+
+/** One audit event; `detail` is deliberately not part of the wire contract. */
+export interface AutonomyEventItem {
+  id: number;
+  job_id?: number | null;
+  ts: string;
+  event: string;
+}
+
+/** Newest events first, bounded by `limit`; `items` is absent when unreadable. */
+export interface AutonomyEventPage {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyEventItem[] | null;
+  limit: number;
+}

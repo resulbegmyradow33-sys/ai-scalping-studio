@@ -233,6 +233,39 @@ count. `/status` opens the archive once and derives both sections from that
 snapshot. `events.detail` is deliberately withheld: it can contain local paths
 or handler errors that are outside the status contract.
 
+### Autonomy page (`/autonomy`)
+
+`frontend/src/app/autonomy/page.tsx` is the operator view of those three reads
+(`/status`, `/jobs`, `/events`). It is read-only: the refresh button re-runs the
+GETs, and nothing on the page enqueues, cancels, pauses, promotes or starts a
+daemon. `autonomy/layout.tsx` gives the route its own document title
+(“Otonomi — AI Scalping Studio”).
+
+- **Sections.** Paper ledger counts (sessions, open positions, closed trades),
+  orchestrator queue and persisted controls (queued/running/failed, paused, safe
+  mode, research disabled, last event), champions per scope, discovery
+  run/decision counts and data symbols with a month partition.
+- **Honest states.** `configured: false` renders “yapılandırılmadı” and an
+  unreadable store renders “okunamıyor”; both replace the numbers and table
+  rows rather than showing zero. A count field absent from a readable response
+  renders `—`. A readable store that really answered zero shows zero, and an
+  empty champion list says NO TRADE is a valid outcome.
+- **Champion modes.** The badge separates `evidence` from `exploratory` and
+  `manual` (and an unrecognised or missing mode is labelled “kanıtsız”). The
+  section states that only an `evidence` champion may trade paper; every other
+  row is marked “paper dışı”.
+- **Bounded windows.** Jobs and events are newest-first windows of 25, 50 or 100
+  rows. The API has no offset, so the page exposes a window size and never
+  offers a “previous page” that does not exist.
+- **Accessibility.** Section headings, a paper-only notice, captions with
+  `scope` on every header cell, focusable scroll regions named by their
+  captions, labelled window selectors, `role="alert"` for failures and a single
+  polite live region announcing the last successful read.
+- **Tests.** `frontend/src/app/autonomy/page.test.tsx` covers loaded, missing,
+  unreadable, empty, error/retry, absent counts, champion modes and the
+  accessible table region; `frontend/src/components/nav.test.tsx` covers the
+  navigation link.
+
 ### Honest limits
 
 - **One daemon per database.** `BEGIN IMMEDIATE` keeps claims unique, but there
