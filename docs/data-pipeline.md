@@ -158,6 +158,62 @@ session.is_open(datetime(2026, 1, 3, 12, tzinfo=UTC))  # Saturday -> False
 accepts any of them. Tick data is aggregated to M1 by the tick scripts; it is
 not stored as a tick table in the main store.
 
+### Alignment semantics
+
+Buckets are **left-closed and left-labelled**: the bar stamped `10:00` holds
+`[10:00, 10:30)` for M30 and `[08:00, 12:00)` for H4. Labels come from the UTC
+epoch grid, not from the first source bar, so M30 starts at `:00`/`:30` and H4
+at `00/04/08/12/16/20` even when a frame begins at `10:07`.
+
+Within a bucket, `open`/`bid_close`/`ask_close` and `provider` are taken from
+the first/last source bar (`bid_close` and `ask_close` from the last bar so the
+quote matches `close`), `high`/`low` are the extrema, `volume` is the sum and
+`spread_mean` is the bucket mean. Aggregation never reaches outside its window,
+so truncating the source only changes a bucket that is still forming.
+
+Chained derivation (`M1 → M30 → H4`) is associative for OHLC and volume. The
+intermediate frame names the mean spread `spread_mean`; `data derive` renames it
+back to `spread` before the next aggregation, which is what makes the second
+`resample` call valid. A mean of means equals the overall mean only when every
+sub-bucket is complete, so compare `spread_mean` across derive paths on complete
+buckets only.
+
+Higher-timeframe features (`features/context.py::htf_context`) join a bucket
+only after it closes: the bucket timestamp is shifted forward by one bucket
+width and applied with `join_asof(backward)`. A row at `t` therefore sees the
+last bucket with `start + width <= t`; the bucket containing `t` is never used.
+The rule is timeframe-agnostic (`_bucket_width` reads the frame's spacing), but
+the feature matrix currently consumes M5 and M15 only: M30/H4 are data-layer
+timeframes with no feature prefix yet.
+
+Weekends are gaps, not buckets. `resample` emits no empty bucket and never
+carries a Friday close into Sunday. Under the XAUUSD window
+(`sun22:00-fri21:00 UTC`) the Sunday 22:00 bars fall into the H4 bucket labelled
+`20:00`, because that grid window contains them.
+
+Missing and duplicate source rows are not repaired or shifted. Duplicates are
+aggregated into their bucket (volume summed) and reported by `validate_bars` as
+`duplicate_timestamps`; the store also dedupes on write, so `data derive`
+cannot consume them. A missing minute shortens its bucket and is reported as a
+`time_gaps` warning above the threshold; labels stay on the grid.
+
+### Feature naming and aliases
+
+Column names are part of the cached registry version and of dataset checksums,
+so a clearer name is added as a read-only alias instead of renaming a column.
+`FEATURE_ALIASES` in `features/registry.py` maps aliases to canonical columns
+and `canonical_name()` resolves them; `FEATURE_COLUMNS` keeps its exact order.
+
+| Alias | Canonical | Reason |
+|---|---|---|
+| `log_ret_3` | `ret_3` | `ret_3` is a log return; `ret_1/5/15/60` are simple returns |
+
+Consecutive-candle features (up/down streaks, consecutive closes above a level)
+are **not implemented**. The matrix has candle anatomy (`body_atr`,
+`upper_wick_atr`, `lower_wick_atr`, `range_atr`) and the BOS-derived `trend`
+state; neither counts consecutive candles. Adding such a column needs a stated,
+falsifiable research question rather than a rename.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.
