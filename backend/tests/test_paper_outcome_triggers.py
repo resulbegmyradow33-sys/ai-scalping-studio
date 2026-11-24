@@ -1,0 +1,416 @@
+"""Matured paper outcomes as a research trigger: eligibility, dedupe, proposal.
+
+The properties pinned here decide whether a completed paper trade may start the
+next research cycle:
+
+* a new fingerprint enqueues exactly one ``paper.outcomes`` job;
+* repeating the scan, across a store restart, does not duplicate it;
+* the dedupe key alone survives a crash between enqueue and acknowledgement;
+* an open position is never part of the payload;
+* a session without a strategy hash or a dataset id is refused, with a logged
+  reason, and a repeat scan does not repeat the log line;
+* an empty batch or a missing ledger is a no-op;
+* the handler records the event and returns a proposal; it enqueues nothing and
+  imports no discovery or training code;
+* closing one more trade changes the fingerprint and emits a second trigger.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from scalping.orchestrator import JobStore, Orchestrator, ScanOutcome, scan_once
+from scalping.orchestrator.paper_triggers import (
+    EVENT_NOT_QUEUED,
+    EVENT_RECEIVED,
+    KIND_PAPER_OUTCOMES,
+    PAPER_OUTCOME_FIELDS,
+    REASON_EMPTY_BATCH,
+    REASON_NO_DATASET_ID,
+    REASON_NO_LEDGER,
+    REASON_NO_STRATEGY_HASH,
+    PaperOutcomeTriggerSource,
+    make_paper_outcome_handler,
+    register_paper_outcome_handler,
+)
+from scalping.paper.ledger import PaperLedger
+
+SYMBOL = "XAUUSD"
+TIMEFRAME = "M1"
+BASE = datetime(2026, 1, 5, 10, tzinfo=UTC)
+
+
+# --------------------------------------------------------------------------- fixtures
+
+
+def seed_session(
+    ledger: PaperLedger,
+    session_id: str,
+    *,
+    model_version: str | None = "hash-1",
+    dataset_id: str | None = "dataset-1",
+    closed: int = 1,
+    open_positions: int = 0,
+    pnl: float = 10.0,
+    r_multiple: float = 1.0,
+) -> None:
+    """One paper session with the requested number of closed and open trades."""
+    config: dict[str, object] = {}
+    if dataset_id is not None:
+        config = {"origin": "test", "data": {"dataset_id": dataset_id}}
+    ledger.open_session(
+        session_id,
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        strategy="dsl",
+        model_version=model_version,
+        started_at=BASE,
+        config=config,
+    )
+    for index in range(closed):
+        entry = BASE + timedelta(minutes=10 * index)
+        ledger.record_trade(
+            session_id,
+            side="long",
+            entry_ts=entry,
+            entry_price=2000.0,
+            exit_ts=entry + timedelta(minutes=5),
+            exit_price=2001.0,
+            lot=0.10,
+            pnl=pnl,
+            r_multiple=r_multiple,
+            exit_reason="take_profit",
+        )
+    for index in range(open_positions):
+        entry = BASE + timedelta(minutes=30 + 10 * index)
+        order_id = ledger.record_order(
+            session_id,
+            signal_id=None,
+            ts=entry,
+            side="short",
+            lot=0.10,
+            requested_price=2000.0,
+            status="filled",
+        )
+        ledger.record_fill(
+            order_id,
+            ts=entry,
+            price=2000.0,
+            lot=0.10,
+            sl=2005.0,
+            tp=1990.0,
+        )
+
+
+def not_queued_events(store: JobStore) -> list[dict[str, object]]:
+    return [
+        json.loads(event.detail or "{}")
+        for event in store.events()
+        if event.event == EVENT_NOT_QUEUED
+    ]
+
+
+def trigger_jobs(store: JobStore) -> list:
+    return store.list_jobs(kind=KIND_PAPER_OUTCOMES)
+
+
+# ----------------------------------------------------------------------------- tests
+
+
+def test_new_fingerprint_emits_one_trigger(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "complete", pnl=12.5, r_multiple=1.25)
+        seed_session(ledger, "empty", closed=0, open_positions=0)
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+
+    outcome = scan_once(orchestrator, [source])
+    assert isinstance(outcome, ScanOutcome)
+    assert outcome.sources == (source.name,)
+    assert len(outcome.queued) == 1
+    assert not outcome.duplicates
+
+    job = outcome.queued[0]
+    assert job.kind == KIND_PAPER_OUTCOMES
+    assert set(job.payload) == PAPER_OUTCOME_FIELDS
+    assert job.payload["session_id"] == "complete"
+    assert job.payload["trades"] == 1
+    assert job.payload["pnl"] == pytest.approx(12.5)
+    assert job.payload["r_total"] == pytest.approx(1.25)
+    assert job.payload["strategy_hash"] == "hash-1"
+    assert job.payload["dataset_id"] == "dataset-1"
+    assert job.dedupe_key == f"{KIND_PAPER_OUTCOMES}:{job.payload['fingerprint']}"
+
+    assert any(event.event == "trigger_scan" for event in store.events())
+    store.close()
+
+
+def test_repeat_scan_dedupes_through_the_cursor_and_store_key(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "complete")
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+
+    # Crash simulation: enqueue the trigger but never acknowledge the scan.
+    first = source.scan()
+    assert len(first) == 1
+    store.enqueue(
+        first[0].kind,
+        dedupe_key=first[0].dedupe_key,
+        payload=first[0].payload,
+    )
+
+    second = scan_once(orchestrator, [source])
+    assert not second.queued
+    assert len(second.duplicates) == 1
+
+    # The cursor is now persisted, so a third scan produces no trigger at all.
+    third = scan_once(orchestrator, [source])
+    assert not third.queued
+    assert not third.duplicates
+    assert len(trigger_jobs(store)) == 1
+    store.close()
+
+    # Same ledger and same job store after a process restart: still one job.
+    reopened = JobStore(tmp_path / "jobs.db")
+    reopened_orchestrator = Orchestrator(reopened)
+    reopened_source = PaperOutcomeTriggerSource(ledger_path, store=reopened)
+    after_restart = scan_once(reopened_orchestrator, [reopened_source])
+    assert not after_restart.queued
+    assert not after_restart.duplicates
+    assert len(trigger_jobs(reopened)) == 1
+    reopened.close()
+
+
+def test_open_position_is_counted_but_never_in_the_payload(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "mixed", closed=1, open_positions=1)
+        seed_session(ledger, "open_only", closed=0, open_positions=1)
+
+    store = JobStore(tmp_path / "jobs.db")
+    outcome = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store)],
+    )
+
+    assert len(outcome.queued) == 1
+    job = outcome.queued[0]
+    assert job.payload["session_id"] == "mixed"
+    assert job.payload["trades"] == 1
+    assert job.payload["pnl"] == pytest.approx(10.0)
+    assert "open_trades" not in job.payload
+
+    reasons = not_queued_events(store)
+    assert [item["session_id"] for item in reasons] == ["open_only"]
+    assert reasons[0]["reason"] == REASON_EMPTY_BATCH
+    store.close()
+
+
+def test_missing_strategy_hash_is_refused_with_a_logged_reason(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "unattributed", model_version=None)
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+
+    outcome = scan_once(orchestrator, [source])
+    assert not outcome.queued
+    assert not trigger_jobs(store)
+    reasons = not_queued_events(store)
+    assert len(reasons) == 1
+    assert reasons[0]["session_id"] == "unattributed"
+    assert reasons[0]["reason"] == REASON_NO_STRATEGY_HASH
+    assert "strategy hash" in str(reasons[0]["detail"])
+
+    # The same refusal is not logged again on the next tick.
+    scan_once(orchestrator, [source])
+    assert len(not_queued_events(store)) == 1
+    store.close()
+
+
+def test_missing_dataset_id_is_refused_with_a_logged_reason(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "unscoped", dataset_id=None)
+
+    store = JobStore(tmp_path / "jobs.db")
+    outcome = scan_once(
+        Orchestrator(store),
+        [PaperOutcomeTriggerSource(ledger_path, store=store)],
+    )
+
+    assert not outcome.queued
+    reasons = not_queued_events(store)
+    assert len(reasons) == 1
+    assert reasons[0]["reason"] == REASON_NO_DATASET_ID
+    assert "dataset id" in str(reasons[0]["detail"])
+    store.close()
+
+
+def test_empty_batch_and_missing_ledger_are_no_ops(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "no_trades", closed=0)
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+
+    empty = scan_once(orchestrator, [PaperOutcomeTriggerSource(ledger_path, store=store)])
+    assert not empty.queued
+    assert not trigger_jobs(store)
+    assert [item["reason"] for item in not_queued_events(store)] == [REASON_EMPTY_BATCH]
+
+    missing = scan_once(
+        orchestrator,
+        [PaperOutcomeTriggerSource(tmp_path / "missing.db", store=store)],
+    )
+    assert not missing.queued
+    assert any(item["reason"] == REASON_NO_LEDGER for item in not_queued_events(store))
+    store.close()
+
+
+def test_handler_returns_a_proposal_and_executes_nothing(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    assert register_paper_outcome_handler(orchestrator) == KIND_PAPER_OUTCOMES
+    payload = {
+        "session_id": "complete",
+        "fingerprint": "a" * 64,
+        "trades": 2,
+        "pnl": 15.0,
+        "r_total": 1.5,
+        "strategy_hash": "hash-1",
+        "dataset_id": "dataset-1",
+    }
+    job, created = store.enqueue(KIND_PAPER_OUTCOMES, dedupe_key="paper-1", payload=payload)
+    assert created
+
+    outcomes = orchestrator.run_until_idle()
+    assert [item.status for item in outcomes] == ["succeeded"]
+
+    finished = store.get(job.id)
+    assert finished is not None
+    assert finished.status == "succeeded"
+    assert finished.result is not None
+    data = finished.result["data"]
+    assert data["action"] == "queue_discovery"
+    assert data["queued"] is False
+    assert data["executed"] is False
+    assert data["session_id"] == "complete"
+    assert data["fingerprint"] == "a" * 64
+    assert data["trades"] == 2
+    assert data["strategy_hash"] == "hash-1"
+    assert data["dataset_id"] == "dataset-1"
+
+    # The event is recorded with the job, and the handler created no second job.
+    assert any(event.event == EVENT_RECEIVED for event in store.events(job_id=job.id))
+    assert store.stats().total == 1
+    store.close()
+
+
+def test_handler_policy_callback_can_decline_without_executing(tmp_path: Path) -> None:
+    seen: list[dict[str, object]] = []
+
+    def policy(payload) -> bool:
+        seen.append(dict(payload))
+        return False
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(
+        store,
+        handlers={KIND_PAPER_OUTCOMES: make_paper_outcome_handler(should_queue=policy)},
+    )
+    job, _ = store.enqueue(
+        KIND_PAPER_OUTCOMES,
+        dedupe_key="paper-2",
+        payload={
+            "session_id": "complete",
+            "fingerprint": "b" * 64,
+            "trades": 1,
+            "pnl": -5.0,
+            "r_total": -0.5,
+            "strategy_hash": "hash-1",
+            "dataset_id": "dataset-1",
+        },
+    )
+    orchestrator.run_until_idle()
+
+    finished = store.get(job.id)
+    assert finished is not None and finished.result is not None
+    data = finished.result["data"]
+    assert data["action"] == "no_action"
+    assert data["queued"] is False
+    assert data["executed"] is False
+    assert seen and seen[0]["fingerprint"] == "b" * 64
+    assert store.stats().total == 1
+    store.close()
+
+
+def test_fingerprint_changes_when_a_new_trade_closes(tmp_path: Path) -> None:
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        seed_session(ledger, "growing", closed=1)
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store)
+
+    first = scan_once(orchestrator, [source])
+    assert len(first.queued) == 1
+    first_fingerprint = first.queued[0].payload["fingerprint"]
+
+    with PaperLedger(ledger_path) as ledger:
+        ledger.record_trade(
+            "growing",
+            side="short",
+            entry_ts=BASE + timedelta(minutes=20),
+            entry_price=2000.0,
+            exit_ts=BASE + timedelta(minutes=25),
+            exit_price=2002.0,
+            lot=0.10,
+            pnl=-20.0,
+            r_multiple=-1.5,
+            exit_reason="stop_loss",
+        )
+
+    second = scan_once(orchestrator, [source])
+    assert len(second.queued) == 1
+    second_job = second.queued[0]
+    assert second_job.payload["fingerprint"] != first_fingerprint
+    assert second_job.payload["trades"] == 2
+    assert second_job.payload["pnl"] == pytest.approx(-10.0)
+    assert second_job.payload["r_total"] == pytest.approx(-0.5)
+    assert len(trigger_jobs(store)) == 2
+    store.close()
+
+
+def test_module_contains_no_discovery_training_or_order_path() -> None:
+    source_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "scalping"
+        / "orchestrator"
+        / "paper_triggers.py"
+    )
+    text = source_path.read_text(encoding="utf-8")
+    for forbidden in (
+        "scalping.discovery",
+        "run_discovery",
+        "AutonomousPaperRunner",
+        "torch",
+        "stable_baselines3",
+    ):
+        assert forbidden not in text

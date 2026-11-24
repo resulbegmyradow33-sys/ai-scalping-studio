@@ -357,6 +357,9 @@ It excludes `trade_id` (a re-created ledger can renumber rows) and
 fields, so identical outcomes hash identically regardless of read order. The
 orchestrator can store the last fingerprint and skip a research trigger when the
 same matured set is analysed again; any newly closed trade changes the hash.
+`PaperOutcomeTriggerSource` in `scalping.orchestrator.paper_triggers` does
+exactly that; its contract, refusal reasons and proposal-only handler are in
+`docs/orchestrator.md`.
 
 ### Honest limits
 
