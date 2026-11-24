@@ -12,7 +12,24 @@ __pycache__/
 /backend/runs/
 /e2e-data/
 *.parquet
+
+# secrets and credentials — never commit; .env.example is the tracked template
 .env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.netrc
+secrets.json
+credentials.yml
+credentials.yaml
+.npmrc
+*.p12
+*.pfx
+*.keystore
+*.jks
 
 # node
 node_modules/
