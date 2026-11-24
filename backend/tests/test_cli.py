@@ -961,3 +961,37 @@ def test_cli_import_does_not_load_boosting_libraries():
     )
     assert completed.returncode == 0, completed.stderr
     assert completed.stdout.strip() == "False False"
+
+
+def test_backtest_mask_actions_flag(tmp_path):
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-08",
+        "--root",
+        str(tmp_path),
+    )
+    assert synth.returncode == 0, synth.stderr
+
+    out = tmp_path / "masked.json"
+    result = run(
+        "backtest",
+        "--symbol",
+        "XAUUSD",
+        "--policy",
+        "rule",
+        "--mask-actions",
+        "--root",
+        str(tmp_path),
+        "--out",
+        str(out),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert out.is_file()
+    assert "run_id" in json.loads(result.stdout)

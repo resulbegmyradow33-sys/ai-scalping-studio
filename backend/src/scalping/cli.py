@@ -48,6 +48,7 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
+from scalping.discovery.run import DiscoveryRunConfig, DiscoveryRunError, run_discovery
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
@@ -55,6 +56,7 @@ from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
+from scalping.registry.gate import GateCriteria
 from scalping.serialize import metrics_payload
 
 __all__ = ["main"]
@@ -587,6 +589,71 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
     )
 
 
+# --- discovery -----------------------------------------------------------------
+def _stress_values(text: str | None) -> tuple[float, ...] | None:
+    """Parse ``--stress``: ``None`` keeps the config default, ``""`` disables it."""
+    if text is None:
+        return None
+    if not text.strip():
+        return ()
+    return _floats(text, flag="--stress")
+
+
+def _cmd_discovery_run(args: argparse.Namespace) -> None:
+    """Generate, evaluate and archive strategies, then record the decision."""
+    required = (
+        ()
+        if not args.require_stress.strip()
+        else _floats(args.require_stress, flag="--require-stress")
+    )
+    gate = GateCriteria(
+        min_trades=args.min_trades,
+        min_expectancy_r=args.min_expectancy_r,
+        min_profit_factor=args.min_profit_factor,
+        max_drawdown=args.max_drawdown,
+        require_positive_cost_stress=required,
+    )
+    baselines = tuple(part.strip() for part in args.baseline.split(",") if part.strip())
+    stress = _stress_values(args.stress)
+    try:
+        config = DiscoveryRunConfig(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            max_trials=args.max_trials,
+            population=args.population,
+            generations=args.generations,
+            seed=args.seed,
+            mutation_rate=args.mutation_rate,
+            crossover_rate=args.crossover_rate,
+            complexity_cap=args.complexity_cap,
+            archive=args.archive,
+            use_cache=not args.no_cache,
+            stress=(1.5, 2.0) if stress is None else stress,
+            gate=gate,
+            baselines=baselines,
+            horizon=args.horizon,
+            train_fraction=args.train_fraction,
+            validation_fraction=args.validation_fraction,
+            purge_bars=args.purge,
+            embargo_bars=args.embargo,
+            window=args.window,
+            patience=args.patience,
+            max_lookback=args.max_lookback,
+            max_depth=args.max_depth,
+        )
+        result = run_discovery(config, root=args.root)
+    except (DiscoveryRunError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    payload = result.to_dict()
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
+
+
 # --- backtest ------------------------------------------------------------------
 def _hold(obs: np.ndarray) -> int:
     """Control policy: never trade."""
@@ -649,7 +716,14 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         raise CliError("backtest requires --out (or use 'backtest montecarlo'/'sensitivity')")
     settings, features = _backtest_inputs(args)
     policy, label = _select_policy(args.policy)
-    result = run_backtest(policy, features, settings, policy_name=label, symbol=args.symbol)
+    result = run_backtest(
+        policy,
+        features,
+        settings,
+        policy_name=label,
+        symbol=args.symbol,
+        mask_actions=args.mask_actions,
+    )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1016,6 +1090,11 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--root", default=str(DEFAULT_ROOT))
     backtest.add_argument("--out", default=None, help="path of the JSON report")
     backtest.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    backtest.add_argument(
+        "--mask-actions",
+        action="store_true",
+        help="map actions the simulator mask forbids to HOLD",
+    )
     backtest.set_defaults(handler=_cmd_backtest)
 
     backtest_commands = backtest.add_subparsers(dest="backtest_command", required=False)
@@ -1081,6 +1160,65 @@ def _build_parser() -> argparse.ArgumentParser:
     sensitivity.add_argument("--out", default=None, help="optional full report path")
     sensitivity.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     sensitivity.set_defaults(handler=_cmd_backtest_sensitivity)
+
+    discovery = commands.add_parser("discovery", help="generate, evaluate and archive strategies")
+    discovery_commands = discovery.add_subparsers(dest="discovery_command", required=True)
+    d_run = discovery_commands.add_parser(
+        "run",
+        help="run one evolutionary search on the validation split and record a decision",
+    )
+    d_run.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    d_run.add_argument("--timeframe", default=TIMEFRAME)
+    d_run.add_argument(
+        "--max-trials",
+        type=int,
+        default=24,
+        help="attempt cap, duplicates and invalid trees included "
+        "(a real run needs thousands; 24 only proves the wiring)",
+    )
+    d_run.add_argument("--population", type=int, default=8)
+    d_run.add_argument("--generations", type=int, default=4)
+    d_run.add_argument("--seed", type=int, default=0)
+    d_run.add_argument("--mutation-rate", type=float, default=0.3)
+    d_run.add_argument("--crossover-rate", type=float, default=0.2)
+    d_run.add_argument("--complexity-cap", type=int, default=40)
+    d_run.add_argument("--patience", type=int, default=3)
+    d_run.add_argument("--max-lookback", type=int, default=20)
+    d_run.add_argument("--max-depth", type=int, default=3)
+    d_run.add_argument("--window", type=int, default=WINDOW)
+    d_run.add_argument("--horizon", type=int, default=1)
+    d_run.add_argument("--train-fraction", type=float, default=0.70)
+    d_run.add_argument("--validation-fraction", type=float, default=0.15)
+    d_run.add_argument("--purge", type=int, default=0)
+    d_run.add_argument("--embargo", type=int, default=0)
+    d_run.add_argument(
+        "--archive",
+        default="runs/discovery/discovery.sqlite",
+        help="SQLite evidence archive (created when missing)",
+    )
+    d_run.add_argument(
+        "--baseline",
+        default="hold,ret_5",
+        help="comma-separated rule-free baselines: hold,ret_5",
+    )
+    d_run.add_argument(
+        "--stress",
+        default=None,
+        help="comma-separated cost multipliers (default 1.5,2.0; '' disables)",
+    )
+    d_run.add_argument("--min-trades", type=int, default=0)
+    d_run.add_argument("--min-expectancy-r", type=float, default=0.0)
+    d_run.add_argument("--min-profit-factor", type=float, default=0.0)
+    d_run.add_argument("--max-drawdown", type=float, default=0.0)
+    d_run.add_argument(
+        "--require-stress",
+        default="",
+        help="comma-separated multipliers the gate requires to be strictly profitable",
+    )
+    d_run.add_argument("--root", default=str(DEFAULT_ROOT))
+    d_run.add_argument("--out", default=None, help="optional full JSON report path")
+    d_run.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    d_run.set_defaults(handler=_cmd_discovery_run)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")
