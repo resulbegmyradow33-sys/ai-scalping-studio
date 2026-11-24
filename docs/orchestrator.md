@@ -17,8 +17,10 @@ the ingestion, discovery and strategy DSL modules merge.
 | `backend/src/scalping/orchestrator/store.py` | SQLite queue + append-only events + persisted state |
 | `backend/src/scalping/orchestrator/core.py` | Handler registry, controls, claim/run/fail/retry loop |
 | `backend/src/scalping/orchestrator/triggers.py` | `TriggerSource` protocol, `FileTriggerSource`, `scan_once` |
+| `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
+| `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
 
 ## What is not in this slice
 
@@ -31,9 +33,11 @@ the ingestion, discovery and strategy DSL modules merge.
 - **No automatic promotion.** Champion/candidate governance stays in
   `scalping.registry.gate`; the orchestrator can enqueue a job that calls it,
   but nothing here promotes or rolls back.
-- **No resource measurement.** `ResourceGuard` is a veto hook, not a monitor.
-  The default `AllowAllGuard` never refuses, so "RAM budget" is only as real as
-  the guard a caller supplies.
+- **No resource measurement by default.** `ResourceGuard` is a veto hook. The
+  default `AllowAllGuard` never refuses; `MeasuredResourceGuard` in
+  `orchestrator/resources.py` is the first implementation that measures RAM,
+  load and disk, but the caller must pass it. Wiring it into a daemon and
+  choosing profiles per deployment is a later slice.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
 - **No API/UI.** State is queryable through `JobStore` and
@@ -154,6 +158,99 @@ deferred after `guard_retry_seconds` (60 by default), `attempts` is decremented
 back, and the guard's reason is stored in `jobs.error` with `resource_refused`
 and `deferred` events. Waiting for RAM cannot exhaust a job's retry budget,
 which a retry-based refusal would. The refusal is visible, not a silent drop.
+
+## Measured resource guard (P6 slice one)
+
+`orchestrator/resources.py` implements the veto with real readings:
+`MeasuredResourceGuard(limits, probe=SystemProbe(), clock=time.monotonic,
+cache_seconds=1.0)`. It is **not** the orchestrator default —
+`AllowAllGuard` still is — so a deployment opts in explicitly:
+
+```python
+from scalping.orchestrator.resources import M2_8GB_PROFILE, MeasuredResourceGuard
+
+guard = MeasuredResourceGuard(M2_8GB_PROFILE)
+orchestrator = Orchestrator(store, handlers=..., heavy_kinds=("train",), guard=guard)
+```
+
+| Limit | Refuses when | 0 means |
+|---|---|---|
+| `max_rss_mb` | system RAM in use (`total - available`) is at or above it | disabled |
+| `max_process_rss_mb` | this process's high-water RSS (`ru_maxrss`) is at or above it | disabled |
+| `max_load_1m` | the 1-minute load average is at or above it | disabled |
+| `min_free_disk_mb` | free space on the probed volume is at or below it | disabled |
+
+A reading exactly at a ceiling, or exactly at the disk floor, is already a
+refusal: a limit is a hard edge, not a warning level. The first breached limit
+in the table order is the one reported, so an audit log is reproducible.
+
+| Profile | `max_rss_mb` | `max_process_rss_mb` | `max_load_1m` | `min_free_disk_mb` | Use |
+|---|---|---|---|---|---|
+| `M2_8GB_PROFILE` | 6000 | 4500 | 6.0 | 2048 | safe default for the M2 8 GB target |
+| `EXPLORATORY_PROFILE` | 7500 | 7000 | 7.5 | 512 | owner-supervised exploration only |
+
+Both profiles are frozen constants; `ResourceLimits()` with no arguments
+disables every limit and is not a promotion policy. A refusal reason names the
+limit and the measurement, for example:
+
+```
+max_load_1m=6 exceeded: load1=7.42
+```
+
+That string reaches `jobs.error` and the `resource_refused` event, so "why did
+nothing run?" is answered with a number instead of "resources".
+
+### Probe, cache and fail-closed behaviour
+
+`SystemProbe` uses `resource.getrusage` for its own high-water RSS,
+`shutil.disk_usage` for the disk floor, `os.getloadavg` for load and
+`os.sysconf` for physical memory. No subprocess and no network call happens on
+any path: a probe that shelled out would consume the resources it polices.
+
+- **RSS units.** `ru_maxrss` is bytes on macOS/BSD and KiB on Linux; one helper
+  owns the branch and is tested for both.
+- **Total RAM fallback.** When `os.sysconf` cannot report `SC_PHYS_PAGES`, the
+  probe assumes 8192 MiB (the target machine class). On a larger host that
+  under-states capacity, so limits refuse earlier rather than later.
+- **Available RAM fallback.** `SC_AVPHYS_PAGES` exists on Linux; macOS raises
+  `ValueError`, so the probe falls back to `total - own RSS`. That ignores other
+  processes and is an optimistic upper bound. The process and disk limits exist
+  partly because this number is weak.
+- **Cache.** One snapshot serves every claim inside `cache_seconds` (1 s), so a
+  queue drain measures once. The age comes from the injected monotonic clock; a
+  clock that moves backwards forces a fresh probe. `cache_seconds=0` measures
+  every call and is what the tests use when they want exact counts.
+- **Fail closed.** A probe that raises, returns the wrong type or produces a
+  non-finite value yields `(False, "probe_failed: TypeError: ...")`. The guard
+  never raises into the orchestrator, and the failed probe is cached for the
+  same short window so a broken probe is not hammered by a drain.
+
+### Measuring a job
+
+`guard.measure(kind)` is a context manager that records wall time, CPU time and
+high-water RSS growth into a JSON-safe `ResourceSample`:
+
+```python
+with guard.measure("features") as measurement:
+    build_features(...)
+measurement.sample.to_dict()   # kind, elapsed_seconds, cpu_seconds, rss_delta_mb, ok, ...
+```
+
+A block that raises still produces a sample with `ok=False` and the exception
+text; the exception itself propagates unchanged. `samples` keeps the newest 64
+(with `sample_limit` to change or disable it) for a future API/dashboard view.
+`rss_delta_mb` is the growth of a high-water mark, not an integral: a peak that
+is allocated and freed inside the block is visible, a flat resident set is zero.
+
+### What these numbers are not
+
+They are local measurements of this machine at this instant. They fence the
+*start* of a job and cannot promise the job will stay inside its budget: a later
+allocation can still swap, and the next `can_start` is the only place that shows
+it. On macOS "available RAM" is an estimate for the reason above, and
+`ru_maxrss` never decreases, so it reports the largest the process has ever
+been rather than its current residency. Treat a refusal as evidence and a pass
+as permission to try, not as a memory guarantee.
 
 ## Owner controls
 
@@ -276,6 +373,7 @@ cd backend
 uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py -q
+uv run pytest tests/test_orchestrator_resources.py -q
 uv run pytest
 ```
 
@@ -287,3 +385,13 @@ while running, pause/resume/safe-mode/disable-research (including persistence
 across a reopen), crash recovery with and without attempts left, one heavy job,
 guard refusal without spending an attempt, event-log completeness, and
 file-trigger dedupe across a store restart.
+
+The measured-guard tests cover: disabled limits allow; each limit refuses at its
+boundary and allows just inside it; reasons carry the limit and the measured
+value; the documented limit order; probe exceptions and wrong return types fail
+closed with `probe_failed`; non-finite snapshots fail closed; cache reuse, zero
+cache and a backwards clock; the macOS byte / Linux KiB `ru_maxrss` branch; the
+real `SystemProbe` on the host; `measure` recording finite wall/CPU/RSS values
+and a failed block without masking it; a bounded sample ring; JSON-safe
+payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
+job with the measured reason in its event log.
