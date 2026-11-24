@@ -56,6 +56,7 @@ import numpy as np
 import polars as pl
 
 from scalping.config import Settings
+from scalping.data.provenance import load_provenance
 from scalping.data.registry import SessionSpec, session_for, timeframe_rule
 from scalping.data.store import ParquetStore
 from scalping.features.build import FeatureFrame
@@ -66,7 +67,14 @@ from scalping.features.cache import (
     frame_meta,
 )
 from scalping.paper.autonomous import _SpecPolicy
-from scalping.paper.ledger import PaperLedger, SessionRecord, SignalRecord, TradeRecord
+from scalping.paper.ledger import (
+    PaperLedger,
+    SessionRecord,
+    SignalRecord,
+    TradeRecord,
+    provenance_config,
+    session_provenance,
+)
 from scalping.paper.runner import PaperSession
 from scalping.strategy.dsl import StrategySpec, compile_policy, validate
 
@@ -366,6 +374,9 @@ class ContinuousPaperRunner:
                 "spec": self._spec.canonical_dict(),
             },
         }
+        provenance = self._dataset_provenance()
+        if provenance != (None, None):
+            config["provenance"] = provenance_config(provenance[0], provenance[1])
         if data is not None:
             config["data"] = data
         session = PaperSession(
@@ -402,6 +413,32 @@ class ContinuousPaperRunner:
             "last_ts": meta.last_ts,
         }
 
+    def _stored_provenance(self, config: Mapping[str, Any]) -> tuple[str | None, bool | None]:
+        """Read a recorded provenance pair; a corrupt block is a typed refusal."""
+        try:
+            return session_provenance(config)
+        except (TypeError, ValueError) as exc:
+            raise SessionMismatchError(f"session {self._session_id!r}: {exc}") from exc
+
+    def _dataset_provenance(self) -> tuple[str | None, bool | None]:
+        """The store's recorded data provenance, or ``(None, None)`` when absent.
+
+        The sidecar is written by the ingest path (``scalping.data.provenance``)
+        and names the provider and the synthetic flag. An unreadable sidecar is
+        a refusal, not unknown: silently trading on a dataset whose identity
+        cannot be read would erase the one fact this record exists to keep.
+        """
+        try:
+            recorded = load_provenance(self._store.root, self._symbol, self._timeframe)
+        except (OSError, TypeError, ValueError) as exc:
+            raise ContinuousError(
+                f"session {self._session_id!r}: unreadable provenance sidecar for"
+                f" {self._symbol}/{self._timeframe}: {exc}"
+            ) from exc
+        if recorded is None:
+            return None, None
+        return recorded.source, recorded.synthetic
+
     def _check_session(self, record: SessionRecord) -> None:
         """Refuse to continue a session that this runner cannot reproduce."""
         if record.symbol != self._symbol or record.timeframe != self._timeframe:
@@ -437,6 +474,29 @@ class ContinuousPaperRunner:
                 raise SessionMismatchError(
                     f"session {self._session_id!r} was created with different {name} settings"
                 )
+        stored_source, stored_synthetic = self._stored_provenance(config)
+        current_source, current_synthetic = self._dataset_provenance()
+        # Unknown on either side is not a conflict: a session recorded before
+        # provenance existed must still resume. A known disagreement is refused,
+        # because the evidence identity behind the trades has changed.
+        if (
+            stored_source is not None
+            and current_source is not None
+            and stored_source != current_source
+        ):
+            raise SessionMismatchError(
+                f"session {self._session_id!r} records data source {stored_source!r},"
+                f" but the store is now {current_source!r}"
+            )
+        if (
+            stored_synthetic is not None
+            and current_synthetic is not None
+            and stored_synthetic != current_synthetic
+        ):
+            raise SessionMismatchError(
+                f"session {self._session_id!r} records synthetic={stored_synthetic!r},"
+                f" but the store is now synthetic={current_synthetic!r}"
+            )
 
     def _validate_cadence(
         self,
@@ -546,7 +606,12 @@ class ContinuousPaperRunner:
 
 @dataclass(frozen=True, slots=True)
 class OutcomeRow:
-    """One matured (closed) trade and its attribution."""
+    """One matured (closed) trade and its attribution.
+
+    ``source`` and ``synthetic`` repeat the session's data provenance on every
+    row so a row exported on its own still says which evidence produced it.
+    ``None`` is unknown; it is never a stand-in for ``False``.
+    """
 
     trade_id: int
     entry_ts: datetime
@@ -560,6 +625,8 @@ class OutcomeRow:
     exit_reason: str
     strategy_hash: str | None
     dataset_id: str | None
+    source: str | None = None
+    synthetic: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe projection; timestamps become ISO-8601 strings."""
@@ -576,6 +643,8 @@ class OutcomeRow:
             "exit_reason": self.exit_reason,
             "strategy_hash": self.strategy_hash,
             "dataset_id": self.dataset_id,
+            "source": self.source,
+            "synthetic": self.synthetic,
         }
 
 
@@ -585,6 +654,8 @@ class OutcomeBatch:
 
     Only closed trades are rows. ``open_trades`` counts the session's open
     position rows, which are excluded because their P&L is not final.
+    ``source``/``synthetic`` are the session's data provenance; unknown is
+    ``None`` so a consumer can refuse "not known to be real" without guessing.
     """
 
     session_id: str
@@ -592,6 +663,8 @@ class OutcomeBatch:
     dataset_id: str | None
     rows: tuple[OutcomeRow, ...]
     open_trades: int = 0
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.rows, tuple):
@@ -602,6 +675,17 @@ class OutcomeBatch:
             raise TypeError("OutcomeBatch.open_trades must be an int")
         if self.open_trades < 0:
             raise ValueError("OutcomeBatch.open_trades must be >= 0")
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("OutcomeBatch.source must be non-empty text or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise ValueError("OutcomeBatch.synthetic must be a bool or None")
+        for row in self.rows:
+            if row.source != self.source or row.synthetic != self.synthetic:
+                raise ValueError(
+                    f"outcome {row.trade_id} carries different provenance than its batch"
+                )
 
     @property
     def closed_trades(self) -> int:
@@ -616,6 +700,8 @@ class OutcomeBatch:
             "dataset_id": self.dataset_id,
             "closed_trades": len(self.rows),
             "open_trades": self.open_trades,
+            "source": self.source,
+            "synthetic": self.synthetic,
             "outcomes": [row.to_dict() for row in self.rows],
         }
 
@@ -635,7 +721,9 @@ def matured_outcomes(ledger: PaperLedger, session_id: str) -> OutcomeBatch:
     The strategy hash is the session's ``model_version`` (the canonical spec
     hash), cross-checked against every non-null signal version. The dataset id
     is read from the session config when a producer stored one; it is ``None``
-    for sessions that predate that field.
+    for sessions that predate that field. ``source``/``synthetic`` come from the
+    session config through :func:`session_provenance` and are ``None`` when the
+    creator recorded no provider metadata: unknown is not real evidence.
     """
     if not isinstance(ledger, PaperLedger):
         raise TypeError(f"ledger must be a PaperLedger, got {type(ledger).__name__}")
@@ -644,6 +732,10 @@ def matured_outcomes(ledger: PaperLedger, session_id: str) -> OutcomeBatch:
     record = ledger.session(session_id)
     if record is None:
         raise OutcomeError(f"unknown session {session_id!r}")
+    try:
+        source, synthetic = session_provenance(record.config)
+    except (TypeError, ValueError) as exc:
+        raise OutcomeError(f"session {session_id!r}: {exc}") from exc
 
     signals = ledger.signals(session_id)
     versions = {signal.model_version for signal in signals if signal.model_version}
@@ -666,13 +758,17 @@ def matured_outcomes(ledger: PaperLedger, session_id: str) -> OutcomeBatch:
 
     trades = ledger.trades(session_id)
     open_trades = sum(1 for position in ledger.positions(session_id) if position.status == "open")
-    rows = tuple(_outcome_row(trade, strategy_hash, dataset_id) for trade in trades)
+    rows = tuple(
+        _outcome_row(trade, strategy_hash, dataset_id, source, synthetic) for trade in trades
+    )
     return OutcomeBatch(
         session_id=session_id,
         strategy_hash=strategy_hash,
         dataset_id=dataset_id,
         rows=rows,
         open_trades=open_trades,
+        source=source,
+        synthetic=synthetic,
     )
 
 
@@ -682,8 +778,9 @@ def outcome_fingerprint(batch: OutcomeBatch) -> str:
     The payload excludes ``trade_id`` and ``open_trades``: a re-created ledger
     can renumber rows, and an open position is not a matured outcome. Rows are
     sorted by their own fields, so the fingerprint is independent of read order.
-    Two identical batches always hash identically; a newly closed trade changes
-    the hash.
+    ``source`` and ``synthetic`` are part of the payload: the same trades claimed
+    against different evidence are different outcomes. Two identical batches
+    always hash identically; a newly closed trade changes the hash.
     """
     if not isinstance(batch, OutcomeBatch):
         raise TypeError(f"batch must be an OutcomeBatch, got {type(batch).__name__}")
@@ -691,6 +788,8 @@ def outcome_fingerprint(batch: OutcomeBatch) -> str:
         "session_id": batch.session_id,
         "strategy_hash": batch.strategy_hash,
         "dataset_id": batch.dataset_id,
+        "source": batch.source,
+        "synthetic": batch.synthetic,
         "outcomes": [
             {key: value for key, value in row.to_dict().items() if key != "trade_id"}
             for row in sorted(batch.rows, key=_outcome_key)
@@ -783,6 +882,8 @@ def _outcome_row(
     trade: TradeRecord,
     strategy_hash: str | None,
     dataset_id: str | None,
+    source: str | None,
+    synthetic: bool | None,
 ) -> OutcomeRow:
     return OutcomeRow(
         trade_id=trade.trade_id,
@@ -797,6 +898,8 @@ def _outcome_row(
         exit_reason=trade.exit_reason,
         strategy_hash=strategy_hash,
         dataset_id=dataset_id,
+        source=source,
+        synthetic=synthetic,
     )
 
 
@@ -811,4 +914,6 @@ def _outcome_key(row: OutcomeRow) -> tuple[object, ...]:
         row.exit_reason,
         row.strategy_hash,
         row.dataset_id,
+        row.source or "",
+        row.synthetic is True,
     )

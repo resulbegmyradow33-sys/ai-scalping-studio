@@ -11,10 +11,11 @@ What this module deliberately does not do
 * It does not decide who is champion. Promotion, replacement and rollback are
   :class:`~scalping.discovery.archive.DiscoveryArchive` operations with their own
   audit trail; this module only reads the result.
-* It does not fall back. No champion, an unreadable payload, an invalid spec or a
-  hash that disagrees with the stored id all raise. A hand-written strategy
-  hidden behind a "default" would make an autonomous run silently stop testing
-  what the search produced, which is the failure this seam exists to prevent.
+* It does not fall back. No champion, an unreadable payload, an invalid spec, a
+  hash that disagrees with the stored id, or a champion promoted in exploratory
+  or manual mode all raise. A hand-written strategy hidden behind a "default"
+  would make an autonomous run silently stop testing what the search produced,
+  which is the failure this seam exists to prevent.
 * It does not import :mod:`scalping.paper`. The dependency stays one-way: paper
   depends on the DSL, discovery depends on the DSL and the archive, and nothing
   in discovery depends on paper.
@@ -36,6 +37,7 @@ from scalping.discovery.archive import (
     ChampionRecord,
     DiscoveryArchive,
 )
+from scalping.discovery.promotion import PRODUCTION_POLICIES
 from scalping.strategy.dsl import StrategySpec
 from scalping.strategy.dsl.nodes import DslValidationError
 
@@ -45,6 +47,7 @@ __all__ = [
     "ChampionSpec",
     "InvalidChampionSpec",
     "NoChampionError",
+    "NoEvidenceChampion",
     "scope_for",
 ]
 
@@ -55,6 +58,15 @@ class ChampionError(Exception):
 
 class NoChampionError(ChampionError):
     """The scope has no champion; nothing has been promoted yet."""
+
+
+class NoEvidenceChampion(ChampionError):
+    """The champion exists but was not promoted through the evidence policy.
+
+    An exploratory or manual champion is a research record, not a governed
+    strategy. Handing it to the paper runner would trade a candidate that never
+    passed the evidence gate.
+    """
 
 
 class InvalidChampionSpec(ChampionError):
@@ -72,6 +84,11 @@ class ChampionSpec:
     promoted_at: str
     reason: str
     metrics: dict[str, float]
+    mode: str = "evidence"
+    evidence_checksum: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    policy_digest: str | None = None
 
     @property
     def spec_hash(self) -> str:
@@ -87,6 +104,11 @@ class ChampionSpec:
             "promoted_at": self.promoted_at,
             "reason": self.reason,
             "metrics": dict(self.metrics),
+            "mode": self.mode,
+            "evidence_checksum": self.evidence_checksum,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "policy_digest": self.policy_digest,
             "spec": self.spec.canonical_dict(),
         }
 
@@ -140,15 +162,37 @@ class ChampionProvider:
     def champion(self, scope: str | None = None) -> ChampionSpec:
         """The champion spec of ``scope`` with its promotion provenance.
 
-        Raises :class:`NoChampionError` when nothing was promoted and
-        :class:`InvalidChampionSpec` when the stored payload does not load, fails
-        DSL validation or does not hash to its archived id.
+        Raises :class:`NoChampionError` when nothing was promoted,
+        :class:`NoEvidenceChampion` when the champion came from the exploratory
+        or manual path, and :class:`InvalidChampionSpec` when the stored payload
+        does not load, fails DSL validation or does not hash to its archived id.
         """
         resolved = self._resolve(scope)
         record = self._archive.champion(resolved)
         if record is None:
             raise NoChampionError(
                 f"no champion in scope {resolved!r}; promote a validated candidate first"
+            )
+        if record.mode != "evidence":
+            raise NoEvidenceChampion(
+                f"champion {record.candidate.candidate_id!r} in scope {resolved!r} was "
+                f"promoted in {record.mode!r} mode; only an evidence-mode champion may "
+                "trade paper"
+            )
+        registered = (
+            None
+            if record.policy_digest is None
+            else PRODUCTION_POLICIES.get(record.policy_digest)
+        )
+        if (
+            registered is None
+            or record.policy_id != registered.policy_id
+            or record.policy_version != registered.version
+        ):
+            raise NoEvidenceChampion(
+                f"champion {record.candidate.candidate_id!r} in scope {resolved!r} was "
+                "promoted by a policy that is not in the production allow-list, or its "
+                "stored id/version disagrees with the registered policy"
             )
         spec = self._load(record)
         return ChampionSpec(
@@ -159,6 +203,11 @@ class ChampionProvider:
             promoted_at=record.promoted_at,
             reason=record.reason,
             metrics=dict(record.metrics),
+            mode=record.mode,
+            evidence_checksum=record.evidence_checksum,
+            policy_id=record.policy_id,
+            policy_version=record.policy_version,
+            policy_digest=record.policy_digest,
         )
 
     def spec(self, scope: str | None = None) -> StrategySpec:

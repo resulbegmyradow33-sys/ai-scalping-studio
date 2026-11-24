@@ -17,14 +17,16 @@ import argparse
 import copy
 import json
 import math
+import signal
 import socket
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NoReturn
+from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import numpy as np
 import polars as pl
@@ -48,7 +50,25 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
-from scalping.discovery.run import DiscoveryRunConfig, DiscoveryRunError, run_discovery
+from scalping.discovery.evidence import CandidateEvidence, EvidenceConfig, EvidenceError
+from scalping.discovery.persist import (
+    PersistError,
+    load_strategy_spec,
+    persist_evidence_run,
+)
+from scalping.discovery.reproduce import (
+    ReproduceError,
+    ReproduceMismatch,
+    reproduce_bundle,
+)
+from scalping.discovery.run import (
+    DiscoveryRunConfig,
+    DiscoveryRunError,
+    run_discovery,
+)
+from scalping.discovery.run import (
+    code_version as discovery_code_version,
+)
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
@@ -56,8 +76,12 @@ from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
+from scalping.orchestrator.triggers import FileTriggerSource, Trigger, TriggerSource
 from scalping.registry.gate import GateCriteria
 from scalping.serialize import metrics_payload
+
+if TYPE_CHECKING:  # pragma: no cover - import for annotations only
+    from scalping.orchestrator.daemon import OrchestratorDaemon
 
 __all__ = ["main"]
 
@@ -654,6 +678,136 @@ def _cmd_discovery_run(args: argparse.Namespace) -> None:
     _print_json(payload)
 
 
+def _reproduce_payload(outcome: CandidateEvidence | ReproduceMismatch) -> dict[str, Any]:
+    """The one-line contract: reproduced flag, both checksums and mismatches."""
+    if isinstance(outcome, ReproduceMismatch):
+        return {
+            "reproduced": False,
+            "checksum": outcome.reproduced,
+            "expected": outcome.expected,
+            "mismatches": list(outcome.sections),
+        }
+    return {
+        "reproduced": True,
+        "checksum": outcome.checksum,
+        "expected": outcome.checksum,
+        "mismatches": [],
+    }
+
+
+def _write_reproduce_report(path: str | None, payload: dict[str, Any]) -> None:
+    if path is None:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+
+
+def _cmd_discovery_reproduce(args: argparse.Namespace) -> None:
+    """Re-run one stored evidence bundle and report whether its checksum matches.
+
+    Exit codes: 0 when the checksum is reproduced, 1 when the stored identity
+    does not match this environment (settings, code version, data, or the
+    rebuilt evidence), and 2 when the input cannot be read or reproduced at all.
+    The original bundle file is never rewritten; ``--out`` is a separate report.
+    """
+    settings = None
+    if args.settings is not None:
+        try:
+            settings = Settings.load(args.settings)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError(f"cannot read --settings {args.settings}: {exc}") from exc
+
+    try:
+        outcome = reproduce_bundle(
+            Path(args.bundle),
+            store_root=args.store_root,
+            spec=args.spec,
+            settings=settings,
+        )
+    except ReproduceError as exc:
+        if exc.invalid:
+            raise CliError(str(exc)) from exc
+        payload: dict[str, Any] = {
+            "reproduced": False,
+            "checksum": None,
+            "expected": exc.expected,
+            "mismatches": [exc.code],
+            "reason": str(exc),
+        }
+        _write_reproduce_report(args.out, payload)
+        _print_json(payload)
+        raise _ExitCode(1) from exc
+    except EvidenceError as exc:
+        raise CliError(str(exc)) from exc
+
+    payload = _reproduce_payload(outcome)
+    if isinstance(outcome, ReproduceMismatch):
+        report = outcome.to_dict()
+    else:
+        report = {**payload, "evidence": outcome.to_dict()}
+    _write_reproduce_report(args.out, report)
+    _print_json(payload)
+    if isinstance(outcome, ReproduceMismatch):
+        raise _ExitCode(1)
+
+
+def _cmd_discovery_evidence(args: argparse.Namespace) -> None:
+    """Build one experiment from stored bars and persist its artifact and bundle.
+
+    This is the production writer ``discovery reproduce`` depends on: the
+    dataset artifact under ``<root>/datasets/<checksum>/`` and the evidence JSON
+    plus strategy sidecar at ``--out``. One compact JSON line on success; input
+    or refusal errors go to stderr with exit code 2 like every other command.
+    """
+    settings = Settings()
+    if args.settings is not None:
+        try:
+            settings = Settings.load(args.settings)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError(f"cannot read --settings {args.settings}: {exc}") from exc
+    stress = _stress_values(args.stress)
+    try:
+        spec = load_strategy_spec(args.spec)
+        config = EvidenceConfig(
+            code_version=discovery_code_version(),
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            folds=args.folds,
+            purge_bars=args.fold_purge,
+            embargo_bars=args.fold_embargo,
+            min_trades_per_fold=args.min_trades_per_fold,
+            cost_stress=(1.5, 2.0) if stress is None else stress,
+            regime_coverage_min=args.regime_coverage_min,
+            bootstrap_samples=args.bootstrap_samples,
+            bootstrap_confidence=args.bootstrap_confidence,
+            seed=args.seed,
+            search_budget=args.search_budget,
+            trial_count=args.trials,
+            complexity=int(spec.complexity()),
+            window=args.window,
+        )
+        result = persist_evidence_run(
+            Path(args.root),
+            Path(args.out),
+            spec=spec,
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            config=config,
+            settings=settings,
+            horizon=args.horizon,
+            train_fraction=args.train_fraction,
+            validation_fraction=args.validation_fraction,
+            dataset_purge_bars=args.purge,
+            dataset_embargo_bars=args.embargo,
+            use_cache=not args.no_cache,
+        )
+    except (PersistError, EvidenceError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    _print_json(result.to_dict())
+
+
 # --- backtest ------------------------------------------------------------------
 def _hold(obs: np.ndarray) -> int:
     """Control policy: never trade."""
@@ -841,6 +995,36 @@ def _cmd_backtest_sensitivity(args: argparse.Namespace) -> None:
     _print_json(payload)
 
 
+# --- acceptance ---------------------------------------------------------------
+def _cmd_acceptance_run(args: argparse.Namespace) -> None:
+    """Run the synthetic end-to-end acceptance harness and print one JSON line."""
+    from scalping.acceptance import AcceptanceConfig, AcceptanceError, run_acceptance
+
+    try:
+        config = AcceptanceConfig(
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            start=args.start,
+            days=args.days,
+            seed=args.seed,
+            window=args.window,
+            max_trials=args.max_trials,
+            paper_bars=args.paper_bars,
+            out=Path(args.out),
+            keep=args.keep,
+        )
+    except (TypeError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    try:
+        result = run_acceptance(config)
+    except AcceptanceError as exc:
+        # The failed report is the command's normal output; the exit code gates it.
+        _print_json(exc.result.cli_dict())
+        raise _ExitCode(1) from exc
+    _print_json(result.cli_dict())
+
+
 # --- serve ---------------------------------------------------------------------
 def _bind(host: str, port: int) -> socket.socket:
     """Bind and listen before uvicorn starts, so a failure stays ours to report."""
@@ -898,6 +1082,172 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         uvicorn.Server(config).run(sockets=[listener])
     finally:
         listener.close()
+
+
+# --- orchestrator daemon ----------------------------------------------------
+class _WatchSource:
+    """Adapt ``FileTriggerSource`` payloads for the pipeline handlers.
+
+    ``FileTriggerSource`` describes a file (``path``, size, hash); a pipeline
+    handler expects its own payload. For ``knowledge.ingest`` the only required
+    field is ``document_path``, so the adapter maps one to the other and keeps
+    the file's content hash as the dedupe key. Any other kind receives the raw
+    file payload, and its handler must accept that shape.
+    """
+
+    def __init__(self, source: FileTriggerSource, kind: str) -> None:
+        self._source = source
+        self.kind = kind
+        self.name = source.name
+
+    def scan(self) -> list[Trigger]:
+        triggers = self._source.scan()
+        adapted: list[Trigger] = []
+        for trigger in triggers:
+            payload = (
+                {"document_path": str(Path(str(trigger.payload.get("path", ""))).resolve())}
+                if self.kind == "knowledge.ingest"
+                else dict(trigger.payload)
+            )
+            adapted.append(
+                Trigger(
+                    kind=trigger.kind,
+                    dedupe_key=trigger.dedupe_key,
+                    payload=payload,
+                    priority=trigger.priority,
+                    max_retries=trigger.max_retries,
+                    depends_on=trigger.depends_on,
+                )
+            )
+        return adapted
+
+    def seen(self, triggers: Sequence[Trigger]) -> None:
+        self._source.seen(triggers)
+
+
+def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
+    """Run one tick (``--once``) or a supervised loop (``--forever``)."""
+    from scalping.orchestrator.core import Orchestrator
+    from scalping.orchestrator.daemon import DaemonConfig, OrchestratorDaemon
+    from scalping.orchestrator.data_triggers import DataFileTriggerSource
+    from scalping.orchestrator.handlers import (
+        HEAVY_HANDLER_KINDS,
+        KIND_DATASET_BUILD,
+        KIND_DISCOVERY_RUN,
+        KIND_PAPER_ADVANCE,
+        KIND_PAPER_ANALYSE,
+        HandlerContext,
+        register_default_handlers,
+    )
+    from scalping.orchestrator.store import JobStore
+
+    if args.no_scan and (args.watch_dir or args.watch_data_dir):
+        raise CliError("--no-scan cannot be combined with a watch directory")
+    if args.watch_dir and args.watch_data_dir:
+        raise CliError("--watch-dir and --watch-data-dir cannot be combined")
+    if args.watch_dir and args.watch_kind == KIND_DATASET_BUILD:
+        raise CliError(
+            "--watch-kind dataset.build cannot infer symbol/timeframe from a bare file;"
+            " use --watch-data-dir"
+        )
+    research_kinds = tuple(
+        sorted(
+            {
+                KIND_DATASET_BUILD,
+                KIND_DISCOVERY_RUN,
+                KIND_PAPER_ADVANCE,
+                KIND_PAPER_ANALYSE,
+            }
+        )
+    )
+    config = DaemonConfig(
+        poll_seconds=args.poll_seconds,
+        guard_profile=args.profile,
+        scan_triggers=not args.no_scan,
+        max_jobs_per_tick=args.max_jobs_per_tick,
+        stop_grace_seconds=args.stop_grace_seconds,
+        heavy_kinds=tuple(sorted(HEAVY_HANDLER_KINDS)),
+        research_kinds=research_kinds,
+    )
+    store = JobStore(Path(args.db))
+    try:
+        triggers: tuple[TriggerSource, ...] = ()
+        if args.watch_dir:
+            try:
+                source = FileTriggerSource(
+                    Path(args.watch_dir),
+                    kind=args.watch_kind,
+                    store=store,
+                )
+            except NotADirectoryError as exc:
+                raise CliError(str(exc)) from exc
+            triggers = (_WatchSource(source, args.watch_kind),)
+        elif args.watch_data_dir:
+            try:
+                data_source = DataFileTriggerSource(Path(args.watch_data_dir), store=store)
+            except NotADirectoryError as exc:
+                raise CliError(str(exc)) from exc
+            triggers = (data_source,)
+        registry = Orchestrator(store)
+        register_default_handlers(
+            registry,
+            HandlerContext(
+                data_root=Path(args.root),
+                runs_root=Path(args.runs_root),
+                archive_root=Path(args.archive_root),
+            ),
+        )
+        daemon = OrchestratorDaemon(store, registry, config, triggers=triggers)
+        if args.once:
+            result = daemon.tick()
+            if result.error is not None:
+                raise CliError(result.error)
+            _print_json({"status": daemon.status().to_dict(), "tick": result.to_dict()})
+            return
+        _run_daemon_forever(daemon)
+    finally:
+        store.close()
+
+
+def _run_daemon_forever(daemon: OrchestratorDaemon) -> None:
+    """Start the daemon and block until SIGINT/SIGTERM or a dead worker."""
+    stop = threading.Event()
+    failed = False
+
+    def _request_stop(signum: int, frame: object) -> None:
+        stop.set()
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for sig in previous:
+            signal.signal(sig, _request_stop)
+        daemon.start()
+        _print_json({"status": "started", "daemon": daemon.status().to_dict()})
+        try:
+            while not stop.is_set():
+                if not daemon.is_running:
+                    stop.set()
+                    failed = True
+                    break
+                stop.wait(1.0)
+        except KeyboardInterrupt:  # pragma: no cover - signal handler normally wins
+            stop.set()
+    finally:
+        try:
+            daemon.stop()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    if failed:
+        _print_json(
+            {
+                "status": "failed",
+                "detail": "worker exited without a stop request",
+                "daemon": daemon.status().to_dict(),
+            }
+        )
+        raise _ExitCode(1)
+    _print_json({"status": "stopped", "daemon": daemon.status().to_dict()})
 
 
 # --- parser --------------------------------------------------------------------
@@ -1220,6 +1570,114 @@ def _build_parser() -> argparse.ArgumentParser:
     d_run.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     d_run.set_defaults(handler=_cmd_discovery_run)
 
+    d_reproduce = discovery_commands.add_parser(
+        "reproduce",
+        help="re-run one stored evidence bundle and compare its checksum",
+    )
+    d_reproduce.add_argument("--bundle", required=True, help="evidence JSON written earlier")
+    d_reproduce.add_argument(
+        "--store-root",
+        required=True,
+        help="bar store plus <store-root>/datasets/<checksum>/ artifacts",
+    )
+    d_reproduce.add_argument(
+        "--spec",
+        default=None,
+        help=(
+            "strategy spec JSON; defaults to the sidecar <bundle stem>.spec.json next to the bundle"
+        ),
+    )
+    d_reproduce.add_argument(
+        "--settings",
+        default=None,
+        help="YAML settings; defaults to built-in Settings()",
+    )
+    d_reproduce.add_argument("--out", default=None, help="optional report path")
+    d_reproduce.set_defaults(handler=_cmd_discovery_reproduce)
+
+    d_evidence = discovery_commands.add_parser(
+        "evidence",
+        help="build evidence from stored bars and persist the dataset artifact and bundle",
+    )
+    d_evidence.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    d_evidence.add_argument("--timeframe", default=TIMEFRAME)
+    d_evidence.add_argument(
+        "--spec",
+        required=True,
+        help="strategy spec JSON path or inline JSON (written to the sidecar)",
+    )
+    d_evidence.add_argument(
+        "--out",
+        required=True,
+        help="evidence bundle path; the sidecar is written next to it",
+    )
+    d_evidence.add_argument("--root", default=str(DEFAULT_ROOT))
+    d_evidence.add_argument(
+        "--settings", default=None, help="YAML settings; defaults to Settings()"
+    )
+    d_evidence.add_argument("--folds", type=int, default=3, help="chronological folds (>= 3)")
+    d_evidence.add_argument("--window", type=int, default=WINDOW)
+    d_evidence.add_argument("--horizon", type=int, default=1)
+    d_evidence.add_argument("--train-fraction", type=float, default=0.70)
+    d_evidence.add_argument("--validation-fraction", type=float, default=0.15)
+    d_evidence.add_argument("--purge", type=int, default=0, help="dataset purge bars")
+    d_evidence.add_argument("--embargo", type=int, default=0, help="dataset embargo bars")
+    d_evidence.add_argument("--fold-purge", type=int, default=0, help="fold purge bars")
+    d_evidence.add_argument("--fold-embargo", type=int, default=0, help="fold embargo bars")
+    d_evidence.add_argument("--min-trades-per-fold", type=int, default=5)
+    d_evidence.add_argument(
+        "--stress",
+        default=None,
+        help="comma-separated cost multipliers (default 1.5,2.0; '' is refused)",
+    )
+    d_evidence.add_argument("--regime-coverage-min", type=float, default=1.0)
+    d_evidence.add_argument("--bootstrap-samples", type=int, default=1000)
+    d_evidence.add_argument("--bootstrap-confidence", type=float, default=0.95)
+    d_evidence.add_argument("--seed", type=int, default=0)
+    d_evidence.add_argument(
+        "--search-budget",
+        type=int,
+        default=100,
+        help="trials the candidate search spent; recorded in the bundle identity",
+    )
+    d_evidence.add_argument(
+        "--trials", type=int, default=1, help="trial_count (<= --search-budget)"
+    )
+    d_evidence.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    d_evidence.set_defaults(handler=_cmd_discovery_evidence)
+
+    acceptance = commands.add_parser(
+        "acceptance", help="run the synthetic end-to-end acceptance harness"
+    )
+    acceptance_commands = acceptance.add_subparsers(dest="acceptance_command", required=True)
+    acc_run = acceptance_commands.add_parser(
+        "run", help="execute every stage on a tiny deterministic synthetic store"
+    )
+    acc_run.add_argument(
+        "--out",
+        default="runs/acceptance",
+        help="directory that receives <acceptance-id>/report.json",
+    )
+    acc_run.add_argument(
+        "--keep",
+        action="store_true",
+        help="retain the temporary synthetic bar store after the run",
+    )
+    acc_run.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    acc_run.add_argument("--timeframe", default=TIMEFRAME)
+    acc_run.add_argument(
+        "--start",
+        type=_day,
+        default=date(2026, 1, 5),
+        help="first synthetic UTC day (default: a Monday)",
+    )
+    acc_run.add_argument("--days", type=int, default=1)
+    acc_run.add_argument("--seed", type=int, default=7)
+    acc_run.add_argument("--window", type=int, default=20)
+    acc_run.add_argument("--max-trials", type=int, default=6)
+    acc_run.add_argument("--paper-bars", type=int, default=120)
+    acc_run.set_defaults(handler=_cmd_acceptance_run)
+
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")
     serve.add_argument("--port", type=int, default=8000)
@@ -1230,6 +1688,60 @@ def _build_parser() -> argparse.ArgumentParser:
         help="tick-flow side store; enables the promoted flow-momentum card",
     )
     serve.set_defaults(handler=_cmd_serve)
+
+    orchestrator = commands.add_parser(
+        "orchestrator", help="run the persistent autonomous job queue"
+    )
+    orchestrator_commands = orchestrator.add_subparsers(dest="orchestrator_command", required=True)
+    run = orchestrator_commands.add_parser(
+        "run", help="scan triggers and drain due jobs once or until a signal"
+    )
+    mode = run.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true", help="run one tick, print it and exit")
+    mode.add_argument(
+        "--forever", action="store_true", help="loop until SIGINT/SIGTERM, then stop cleanly"
+    )
+    run.add_argument(
+        "--profile",
+        choices=("m2_8gb", "exploratory", "none"),
+        default="m2_8gb",
+        help="measured resource guard profile; 'none' is tests/dev only",
+    )
+    run.add_argument("--poll-seconds", type=float, default=5.0)
+    run.add_argument("--max-jobs-per-tick", type=int, default=10)
+    run.add_argument("--stop-grace-seconds", type=float, default=5.0)
+    run.add_argument(
+        "--no-scan", action="store_true", help="do not call trigger sources on this run"
+    )
+    run.add_argument(
+        "--watch-dir",
+        default=None,
+        help="watch this directory with FileTriggerSource (no watcher unless given)",
+    )
+    run.add_argument(
+        "--watch-kind",
+        default="knowledge.ingest",
+        help="job kind a watched file enqueues (default knowledge.ingest)",
+    )
+    run.add_argument(
+        "--watch-data-dir",
+        default=None,
+        help=(
+            "watch a market-data root for new Parquet/CSV and enqueue one"
+            " dataset.build per <symbol>/<timeframe>; incompatible with --watch-dir"
+        ),
+    )
+    run.add_argument(
+        "--db", default="runs/orchestrator.sqlite3", help="SQLite job queue (created when missing)"
+    )
+    run.add_argument("--root", default=str(DEFAULT_ROOT), help="Parquet bar store")
+    run.add_argument("--runs-root", default="runs", help="dataset and discovery run products")
+    run.add_argument(
+        "--archive-root",
+        default=str(DEFAULT_ROOT),
+        help="durable evidence root (paper ledger and knowledge index)",
+    )
+    run.set_defaults(handler=_cmd_orchestrator_run)
 
     return parser
 

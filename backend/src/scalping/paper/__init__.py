@@ -38,6 +38,8 @@ from scalping.paper.ledger import (
     SessionRecord,
     SignalRecord,
     TradeRecord,
+    provenance_config,
+    session_provenance,
 )
 from scalping.paper.mt5 import AdapterDisabled, Mt5DemoAdapter
 from scalping.paper.runner import (
@@ -76,4 +78,6 @@ __all__ = [
     "TradeRecord",
     "matured_outcomes",
     "outcome_fingerprint",
+    "provenance_config",
+    "session_provenance",
 ]

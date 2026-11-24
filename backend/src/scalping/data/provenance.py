@@ -152,8 +152,37 @@ def save_provenance(root: str | Path, provenance: DatasetProvenance) -> Path:
 
 
 def load_provenance(root: str | Path, symbol: str, timeframe: str) -> DatasetProvenance | None:
-    target = provenance_path(root, symbol, timeframe)
-    if not target.exists():
+    # Allowlist the directory entries instead of joining the raw request tokens:
+    # the path that reaches ``read_text`` comes from ``iterdir``, not from user
+    # input. This also closes a symlinked sidecar (the entry must be a regular
+    # file and not a link).
+    symbol_segment = _segment(symbol, "symbol")
+    timeframe_segment = _segment(timeframe, "timeframe")
+    base = Path(root).resolve()
+    meta = base / "_meta"
+    if not meta.is_dir():
+        return None
+    symbol_dir = next(
+        (
+            entry
+            for entry in meta.iterdir()
+            if entry.name == symbol_segment and entry.is_dir() and not entry.is_symlink()
+        ),
+        None,
+    )
+    if symbol_dir is None:
+        return None
+    target = next(
+        (
+            entry
+            for entry in symbol_dir.iterdir()
+            if entry.name == f"{timeframe_segment}.json"
+            and entry.is_file()
+            and not entry.is_symlink()
+        ),
+        None,
+    )
+    if target is None:
         return None
     raw = json.loads(target.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):

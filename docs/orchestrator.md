@@ -4,12 +4,14 @@ Phase 18 slice one: a persistent job queue, the loop that runs it, owner
 controls and trigger sources. The queue, its audit log and the controls are real
 code with tests. Slice two (P3 slice 1) registers five production handlers:
 document ingestion, dataset build, discovery, paper advance and outcome
-analysis. There is still no scheduler thread and no measured resource guard.
+analysis. Slice three (P3 slice 2) adds a supervised long-running daemon that
+scans triggers, drains the queue and installs the measured guard by default.
 
 This slice answers one question honestly: *can the system remember, order,
 refuse, retry and explain work across a restart?* The answer is tested. The
-handlers answer *what* work exists for the first research cycle; scheduling and
-resource measurement remain later changes.
+handlers answer *what* work exists for the first research cycle; the daemon
+answers *when* it runs and under which measured limits. It is still one local
+process, not an operating-system service.
 
 ## Files
 
@@ -18,22 +20,33 @@ resource measurement remain later changes.
 | `backend/src/scalping/orchestrator/store.py` | SQLite queue + append-only events + persisted state |
 | `backend/src/scalping/orchestrator/core.py` | Handler registry, controls, claim/run/fail/retry loop |
 | `backend/src/scalping/orchestrator/triggers.py` | `TriggerSource` protocol, `FileTriggerSource`, `scan_once` |
+| `backend/src/scalping/orchestrator/data_triggers.py` | `DataFileTriggerSource`: market-data files → `dataset.build` |
 | `backend/src/scalping/orchestrator/handlers.py` | `HandlerContext`, payload validators, the five pipeline handlers |
 | `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
+| `backend/src/scalping/orchestrator/daemon.py` | `DaemonConfig`, `OrchestratorDaemon`, tick order, background loop, status |
+| `backend/src/scalping/orchestrator/paper_triggers.py` | Matured paper outcomes as a trigger; proposal-only handler |
+| `backend/src/scalping/orchestrator/proposal_handlers.py` | Approved experiment proposals as `discovery.run` triggers; optional `knowledge.proposals` handler |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
 | `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
 | `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
+| `backend/tests/test_orchestrator_daemon.py` | Tick order, dedupe, controls, guard defer, isolation, start/stop, CLI |
+| `backend/tests/test_data_triggers.py` | Market-data layout inference, dedupe across restart and crash, refusals, caps, CLI |
+| `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
 ## What is not in this slice
 
-- **No scheduler thread.** `run_once()` processes one unit of work;
-  `run_until_idle()` drains for a CLI or a test. A daemon loop is a later change
-  and would not alter these semantics. Nothing calls the handlers on a timer.
-- **Measured guard exists but is not the default.** `MeasuredResourceGuard` in
-  `orchestrator/resources.py` measures RAM/load/disk with a stdlib probe and
-  fails closed, but the caller (a future daemon) must pass it; `AllowAllGuard`
-  remains the default. It fences job start, not growth during a run.
+- **One process, not an operating-system service.** `OrchestratorDaemon` runs a
+  daemon thread inside whatever process calls `start()`. There is no launchd,
+  systemd, supervisor, multi-worker scheduler or persisted timer. A process
+  restart relies on `recover_interrupted` and each job's own `scheduled_at`.
+- **Paper execution is still caller/thread driven.** The daemon calls
+  `paper.advance` when a job is due; it does not own a market-data feed, a bar
+  clock or a trading loop. Running it against live/appended bars is the caller's
+  responsibility.
+- **The measured guard fences start, not growth.** It measures RAM/load/disk
+  before a job starts. A job that grows after the check is not interrupted;
+  `max_process_rss_mb` only refuses the next job.
 - **No promotion handler.** Discovery only records `no_trade`, `no_change` or
   `rejected`. `paper.advance` reads a champion that a reviewed path promoted;
   neither handler can promote, replace or roll back one.
@@ -41,11 +54,246 @@ resource measurement remain later changes.
   slice, and no handler here fits a model.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
-- **No API/UI.** State is queryable through `JobStore` and
-  `Orchestrator.status()`; exposing it is future work.
-- **One writer at a time.** One connection per thread, mirroring the registry and
-  the Mac mini's "one heavy job" rule. Two processes are safe through
-  `BEGIN IMMEDIATE`, not fast.
+- **No write API/UI.** The only HTTP surface is the read-only autonomy viewer
+  described below; there is no endpoint to enqueue, cancel, pause, promote or
+  start a daemon. State is queryable in-process through `JobStore`,
+  `Orchestrator.status()` and `OrchestratorDaemon.status()`.
+- **One daemon per database.** SQLite `BEGIN IMMEDIATE` makes claims unique, but
+  it does not provide ownership: a second daemon's `start()` recovery sees the
+  first daemon's `running` rows as interrupted, requeues them and runs them
+  twice. Run one daemon per database; an ownership/lease protocol is future
+  work.
+
+## Daemon and scheduler (P3 slice 2)
+
+`OrchestratorDaemon(store, registry, config, *, guard=None, triggers=(),
+clock=time.monotonic, sleeper=time.sleep)` wires the existing queue, handler
+registry and measured guard into one supervised process. `registry` is either a
+`{kind: handler}` mapping or anything exposing `.handlers` — the CLI builds an
+`Orchestrator`, calls `register_default_handlers`, and passes it in, so there is
+no second registration table.
+
+### Configuration
+
+| Field | Default | Meaning |
+|---|---|---|
+| `poll_seconds` | `5.0` | Wait between ticks. Bounded to 1–60 so a typo cannot busy-spin or hide a stop. |
+| `guard_profile` | `m2_8gb` | `m2_8gb` and `exploratory` build `MeasuredResourceGuard` with the matching profile; `none` installs `AllowAllGuard` for tests/dev only. |
+| `scan_triggers` | `True` | Call `scan_once` before the drain. With no sources the scan is skipped entirely. |
+| `max_jobs_per_tick` | `10` | Cap passed to `run_until_idle`; `0` scans and enqueues but claims nothing. |
+| `stop_grace_seconds` | `5.0` | How long `stop()` joins the loop before returning; bounded to 0–300. |
+| `heavy_kinds` | `()` | Passed to the core's one-heavy-job rule. The CLI passes `HEAVY_HANDLER_KINDS`. |
+| `research_kinds` | `()` | Kinds the persisted `disable research` control excludes. The CLI passes dataset, discovery, paper advance and paper analyse. |
+
+An explicit `guard=` argument overrides the profile; status reports both the
+configured `guard_profile` and the actual guard `type`, plus
+`unmeasured: true` when `AllowAllGuard` is in use. `none` is documented as a
+test/development profile and must not be used for an unattended run.
+
+### Tick order
+
+1. **Crash recovery, once.** The first `tick()` runs
+   `store.recover_interrupted()` on the caller's connection. `start()` runs it on
+   the worker thread's own connection, before the first tick, and blocks until it
+   finishes. The flag is per daemon instance; a second `start()` never repeats
+   it.
+2. **Scan triggers.** `scan_once(orchestrator, triggers)` asks each source, goes
+   through idempotent `enqueue`, acknowledges each source and writes one
+   `trigger_scan` event. Dedupe is the trigger's `dedupe_key`, so two ticks that
+   see the same content produce one job. The daemon passes its stop flag as
+   `should_stop` to the drain, so a stop requested between jobs does not start
+   the remaining ones.
+3. **Drain.** `run_until_idle(max_jobs_per_tick, should_stop=...)` claims and
+   runs due work.
+
+Scanning and enqueueing remain allowed while the queue is paused, in safe mode
+or with research disabled. Only claims are refused, with the core's existing
+`claim_refused` / `research_disabled` event. That is deliberate: the owner
+stopped spending work, not the recording of new work, and a hidden scanner would
+lose the event that created the job.
+
+A scan or store failure is recorded in `last_error` and the drain still runs, so
+a broken trigger source cannot stop paper jobs. Handler exceptions are already
+per-job failures in the core: one failed heavy training-like job does not stop a
+paper job that is due later in the same tick or on the next one.
+
+### Guard refusals
+
+`MeasuredResourceGuard.can_start` runs after the claim and before the handler.
+A refusal writes `resource_refused` with the measured reason and calls
+`store.defer`, so the job returns to `queued` with `attempts` unchanged and a
+`scheduled_at` at least `guard_retry_seconds` (60 s in the daemon) in the future.
+The reason is in the event log, the job row's `error` and the next status
+snapshot's guard block.
+
+Deferrals are bounded: each job carries `defer_count` and `max_deferrals`
+(default 1440 = 24 h at 60 s). A successful defer increments the count; the
+refusal that would exceed the cap writes `defer_exhausted`, leaves the job
+`failed` with a reason naming the cap and leaves the claimed attempt spent. That
+makes a permanently starved job visible instead of queued forever. `JobStats`
+reports the summed `deferrals`.
+
+### Start, stop and status
+
+`start()` is idempotent: while the thread is alive a second call returns `[]`.
+It clears the stop flag *before* recovery (under the lifecycle lock), starts a
+named daemon thread and waits for that thread's recovery to finish. If `stop()`
+arrived during recovery, `start()` returns `[]` and leaves no running thread.
+Recovery exceptions are re-raised by `start()`.
+
+The loop opens its own `JobStore` connection because SQLite connections are
+thread-bound; recovery and every tick use that connection. WAL lets `status()`
+read while the worker writes. `tick()` still uses the connection that created
+`store` and must be called on that thread; `start()` and `status()` do not.
+`:memory:` stores cannot cross threads, so only their creating thread may call
+`status()`, and `start()` rejects them — use `tick()`.
+
+`stop()` sets the flag before reading the thread reference and does not take the
+lifecycle lock while reading it, so a stop can win while `start()` is blocked in
+recovery. It joins for at most `stop_grace_seconds`; it never raises, and calling
+it twice or before `start()` is safe. The wait between ticks is sliced at 0.25 s
+so a 60 s poll does not delay shutdown by a minute. A handler already running
+cannot be interrupted from another thread; the loop stops after that `tick()`
+returns. Stop does not cancel the running job.
+
+`status()` returns a JSON-safe `DaemonStatus` from a short-lived
+`query_only` connection for a file-backed store: `running`, `worker_ident`,
+`paused`, `safe_mode`, `disabled_research`, queue counts from `JobStats` (with
+`deferrals`), tick count, **terminal** job count, last tick time and duration,
+last error, recovered-job count, and the guard profile/type/unmeasured flag with
+its last snapshot (never a fresh probe).
+
+### CLI
+
+```
+# one deterministic pass; exactly one JSON line on stdout
+uv run scalping.cli orchestrator run --once --profile m2_8gb
+
+# supervised loop; SIGINT/SIGTERM stop it and print a final snapshot
+uv run scalping.cli orchestrator run --forever --poll-seconds 5
+
+# watch a directory: each new/changed file enqueues knowledge.ingest
+uv run scalping.cli orchestrator run --forever --watch-dir docs/research
+
+# watch a market-data root: each new file enqueues dataset.build for its
+# <symbol>/<timeframe>; files outside that layout are refused, never guessed
+uv run scalping.cli orchestrator run --forever --watch-data-dir data
+
+# tests/dev only: no measured guard, status says unmeasured
+uv run scalping.cli orchestrator run --once --profile none
+```
+
+`--db` defaults to `runs/orchestrator.sqlite3`; `--root`, `--runs-root` and
+`--archive-root` feed the existing `HandlerContext` (`--root data`,
+`--runs-root runs`, `--archive-root data`, with the paper ledger at
+`<archive-root>/paper.sqlite`, matching the API default).
+
+There is no trigger by default: without a watch flag the daemon scans nothing
+and the queue is filled by another process. `--watch-dir` binds one
+`FileTriggerSource`; `--watch-kind` defaults to `knowledge.ingest` and the CLI
+adapts the file payload to that handler's `document_path`. A raw file payload
+cannot satisfy `dataset.build` (it needs `symbol` and `timeframe`), so
+`--watch-kind dataset.build` is a CLI error and points at `--watch-data-dir`,
+which binds `DataFileTriggerSource` instead. `--no-scan` is meaningful only in
+the default mode; combining it with either watch flag is a CLI error, and the
+two watch flags are mutually exclusive in one process.
+
+`--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
+store error). A job-level handler failure is a recorded job outcome and still
+exits 0. `--forever` detects a worker thread that died without a stop request,
+prints `{"status": "failed", ...}` and exits 1. A requested stop prints
+`{"status": "stopped", ...}` and exits 0. Other CLI commands keep the single JSON
+line contract; `--forever` prints `started` and then `stopped`/`failed`.
+
+### Read-only status API
+
+`scalping.api.routes_autonomy` mounts under `/api/autonomy`. Every route is a
+`GET`; nothing here enqueues, cancels, pauses, promotes or starts a daemon.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/autonomy/status` | Aggregate paper, orchestrator, champion, discovery and data sections |
+| `GET` | `/api/autonomy/champions` | Champion per scope with `mode`, `policy_id` and `policy_digest` when the payload records them |
+| `GET` | `/api/autonomy/jobs` | Newest jobs first: status, kind, attempts and defer count |
+| `GET` | `/api/autonomy/events` | Newest audit events first; the free-form `detail` column is not exposed |
+
+The database paths are app configuration (`create_app(orchestrator_db=...,
+discovery_archive=...)`), never request fields. Both files default under
+`runs_root` to the CLI locations. Every store is opened with a `mode=ro` URI
+and `PRAGMA query_only = ON`: SQLite cannot create a missing database, cannot
+write through the connection and takes no write lock. A `GET` therefore never
+runs `init_schema`, never changes the database file and keeps working while the
+daemon holds `BEGIN IMMEDIATE`; WAL readers see the last committed snapshot. A
+read-only connection to a WAL database may still create or update its `-wal` and
+`-shm` sidecars when the directory is writable. The test pins that tree exactly:
+only the database and those two sidecars may exist after a GET.
+
+Each section reports both flags. `configured: false` means the file is absent.
+`configured: true, readable: false` means it exists but could not be opened, has
+no schema yet, or lacks a column this reader needs; items and counts are then
+omitted instead of answering as if the queue or archive were empty. Only
+`readable: true` produces counts, and a genuinely empty store returns zero.
+
+`/jobs` defaults to 50 and accepts `1..500`; `/events` defaults to 100 and
+accepts `1..500`; anything outside is a `422`. A v1 jobs table without
+`defer_count` is unreadable in both `/status` and `/jobs`, so the two views
+never disagree. The discovery archive is read with plain SQL, so a v1 archive
+without `champions` returns an empty list instead of migrating. `runs` in
+`/status` is the archived trial count and `decisions` is the gate-decision
+count. `/status` opens the archive once and derives both sections from that
+snapshot. `events.detail` is deliberately withheld: it can contain local paths
+or handler errors that are outside the status contract.
+
+### Autonomy page (`/autonomy`)
+
+`frontend/src/app/autonomy/page.tsx` is the operator view of those three reads
+(`/status`, `/jobs`, `/events`). It is read-only: the refresh button re-runs the
+GETs, and nothing on the page enqueues, cancels, pauses, promotes or starts a
+daemon. `autonomy/layout.tsx` gives the route its own document title
+(“Otonomi — AI Scalping Studio”).
+
+- **Sections.** Paper ledger counts (sessions, open positions, closed trades),
+  orchestrator queue and persisted controls (queued/running/failed, paused, safe
+  mode, research disabled, last event), champions per scope, discovery
+  run/decision counts and data symbols with a month partition.
+- **Honest states.** `configured: false` renders “yapılandırılmadı” and an
+  unreadable store renders “okunamıyor”; both replace the numbers and table
+  rows rather than showing zero. A count field absent from a readable response
+  renders `—`. A readable store that really answered zero shows zero, and an
+  empty champion list says NO TRADE is a valid outcome.
+- **Champion modes.** The badge separates `evidence` from `exploratory` and
+  `manual` (and an unrecognised or missing mode is labelled “kanıtsız”). The
+  section states that only an `evidence` champion may trade paper; every other
+  row is marked “paper dışı”.
+- **Bounded windows.** Jobs and events are newest-first windows of 25, 50 or 100
+  rows. The API has no offset, so the page exposes a window size and never
+  offers a “previous page” that does not exist.
+- **Accessibility.** Section headings, a paper-only notice, captions with
+  `scope` on every header cell, focusable scroll regions named by their
+  captions, labelled window selectors, `role="alert"` for failures and a single
+  polite live region announcing the last successful read.
+- **Tests.** `frontend/src/app/autonomy/page.test.tsx` covers loaded, missing,
+  unreadable, empty, error/retry, absent counts, champion modes and the
+  accessible table region; `frontend/src/components/nav.test.tsx` covers the
+  navigation link.
+
+### Honest limits
+
+- **One daemon per database.** `BEGIN IMMEDIATE` keeps claims unique, but there
+  is no ownership or lease. A second daemon's recovery treats the first's
+  `running` rows as interrupted, requeues them and can run them twice. Start two
+  only for an experiment you can reconcile; a lease is a future slice.
+- No OS service, no process supervision, no restart-on-crash. A supervisor or
+  the operator restarts it, and recovery handles the interrupted rows.
+- Paper jobs are driven by the queue, not by a market clock; the daemon cannot
+  create bars or guarantee a cadence for `paper.advance`.
+- Guard numbers describe this machine at this instant. They do not predict the
+  next allocation and, on macOS, cannot see memory held by other processes.
+- Trigger sources are scanned sequentially in the calling thread; a slow hash of
+  a large document delays that tick.
+- `status()` opens a connection per call. It is cheap for an operator poll, not
+  intended as a high-frequency metrics endpoint.
+
 
 ## Job lifecycle
 
@@ -156,9 +404,14 @@ handlers.
 After a claim and before the handler, `guard.can_start(kind)` gets a veto. A
 refusal does not fail the job and does not spend an attempt: the job is
 deferred after `guard_retry_seconds` (60 by default), `attempts` is decremented
-back, and the guard's reason is stored in `jobs.error` with `resource_refused`
-and `deferred` events. Waiting for RAM cannot exhaust a job's retry budget,
-which a retry-based refusal would. The refusal is visible, not a silent drop.
+back, `defer_count` is incremented, and the guard's reason is stored in
+`jobs.error` with `resource_refused` and `deferred` events. Waiting for RAM
+cannot exhaust a job's retry budget, which a retry-based refusal would. The
+refusal is visible, not a silent drop.
+
+A deferral is not unlimited: `max_deferrals` (default 1440) caps the wait. The
+refusal past the cap is terminal — `failed`, `defer_exhausted` event, the reason
+names the cap — so a permanently starved job cannot sit queued for weeks.
 
 ## Measured resource guard (P6 slice one)
 
@@ -299,7 +552,8 @@ so a reader can parse the reason and a human can still read it.
 | `succeeded` | store | Result document stored |
 | `failed` | store | Terminal failure with the error |
 | `retry` | store | Requeued with delay and reason |
-| `deferred` | store | Guard refusal; delay recorded, attempt refunded |
+| `deferred` | store | Guard refusal; delay and `defer_count` recorded, attempt refunded |
+| `defer_exhausted` | store | Deferral cap reached; job failed with the reason |
 | `cancelled` | store | Cancelled with previous status and reason |
 | `skipped` | store | Dependency reason stored |
 | `interrupted` / `requeued` | store | Restart recovery |
@@ -331,11 +585,14 @@ result document. Stored results look like:
 {"ok": true, "permanent": false, "detail": "", "data": {"rows": 1234}}
 ```
 
-`JobContext` gives the handler the store, the job, the current control snapshot
-and two deliberate side effects: `log(event, detail)` to explain a decision, and
-`cancel(reason)` for cooperative cancellation. It cannot enqueue or claim jobs;
-planning stays in the orchestrator, which keeps the loop the only writer of job
-state.
+`JobContext` gives the handler a read-only `JobStoreReader` (jobs, events and
+state can be read, an audit line can be appended), the job and the current
+control snapshot, plus two deliberate side effects: `log(event, detail)` to
+explain a decision, and `cancel(reason)` for cooperative cancellation of its own
+job. It cannot enqueue, claim or cancel another job; planning stays in the
+orchestrator, which keeps the loop the only writer of job state. The facade is
+accidental-misuse protection, not a sandbox: the private delegate is reachable
+through introspection by in-process code.
 
 Example:
 
@@ -376,7 +633,7 @@ register_default_handlers(orchestrator, context)
 | `knowledge.ingest` | document → index → drafts | `document_path` (required), `market_scope`, `timeframe_scope`, `max_hypotheses` | `doc_id`, `checksum`, `status`, `sections`, `drafts`, `skipped`, `scanned_sentences`, `duplicate`, `stored_path`, `index` |
 | `dataset.build` | stored bars → cached features → manifest | `symbol`, `timeframe` (required), `horizon`, `train_fraction`, `validation_fraction`, `purge_bars`, `embargo_bars`, `notes` | Manifest document plus `bars_rows`, `purged_rows`, `manifest_path` |
 | `discovery.run` | bounded search → recorded decision | `symbol`, `timeframe`, `max_trials`, `seed`, `gate` (all required), `stress`, `population`, `generations`, `patience`, `horizon` | `decision`, `reason`, `promoted: false`, `trials`, `accepted`, `best_candidate_id`, `dataset_id`, `decision_id`, `stop_reason`, `seed`, `code_version`, `archive` |
-| `paper.advance` | champion → autonomous DSL paper run | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `spec_hash`, `session_id`, bar/trade counts, ledger path |
+| `paper.advance` | champion → continuous DSL paper advance | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `mode: "continuous"`, `spec_hash`, `session_id`, `bars_advanced`, `bars_processed`, `last_bar_ts`, trade counts, ledger path |
 | `paper.analyse` | ledger → closed-trade summary | `symbol`, `timeframe`, `max_sessions` (all optional) | Counts, P&L, R, win rate, `open_positions_excluded`, per-session attribution |
 
 ### Payload contract
@@ -395,14 +652,24 @@ disabled. An empty gate is exploratory search policy, not promotion evidence,
 and writing it down makes that visible in the job payload. `stress` defaults to
 `[1.5, 2.0]` but is always passed to `DiscoveryRunConfig` explicitly.
 
+`paper.advance` keeps `bars` as its validated budget field and as the natural
+dedupe-key component. The continuous runner's contract is to advance every
+newly closed stored bar, so one call is not capped at `bars`: the result reports
+the work that actually ran in `bars_advanced` (alias `bars_this_call`) and the
+durable total in `bars_processed`. A caller that needs a smaller unit of work
+should enqueue after a smaller ingestion batch, not expect the handler to slice
+the stored range.
+
 ### Failure classification
 
 | Class | Example | Queue behaviour |
 |---|---|---|
 | Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
+| Permanent advance refusal (`paper.advance`) | `bar_order:` duplicate/unsorted stored bars, `session_conflict:` incompatible or unreplayable ledger session, `continuous_refused:` finished or inconsistent session | `failed` on the first attempt with the typed prefix in `jobs.error` |
+| Retryable advance refusal (`paper.advance`) | `bar_gap:` a bar is missing in the pending range | retryable with backoff; a later ingestion may close the gap |
 | Retryable (any other exception) | SQLite busy, I/O error, unexpected bug | bounded retry with exponential backoff |
 | No handler | kind not registered | `failed`, permanent, `no_handler` event |
-| NO TRADE | no champion, invalid champion payload | `succeeded`; the result document says `action: "no_trade"` and why |
+| NO TRADE | no champion, evidence-free champion, invalid champion payload | `succeeded`; the result document says `action: "no_trade"` and why |
 
 NO TRADE is never a failure. A retry would not change a missing champion, so it
 must not consume attempts.
@@ -419,11 +686,13 @@ must not consume attempts.
 - `discovery.run` deduplicates candidates by canonical hash in the archive; a
   rerun on the same dataset/seed evaluates no new trials and records
   `no_change`.
-- `paper.advance` is idempotent at the queue, not at the handler: the dedupe key
-  is what prevents a second advance. Advancing is a step, so calling the same
-  handler twice with different keys intentionally advances twice. Use
-  `paper.advance:{symbol}:{timeframe}:{bars}` (or a bar-range key) as the dedupe
-  key.
+- `paper.advance` is idempotent at the ledger cursor, not only at the queue. The
+  continuous runner derives one session id from symbol, timeframe and the
+  canonical spec hash, and the newest recorded signal is the cursor, so a second
+  job with a different dedupe key cannot append a bar that is already recorded.
+  With no new stored bars it succeeds with `bars_advanced: 0`. The queue dedupe
+  key still saves the work of running it, so use
+  `paper.advance:{symbol}:{timeframe}:{bars}` (or a bar-range key).
 - `paper.analyse` only reads; a rerun returns the same summary unless the ledger
   changed.
 
@@ -431,13 +700,19 @@ must not consume attempts.
 
 `discovery.run` cannot write a `promoted` decision: `run_discovery` refuses it
 and `DiscoveryRunResult` raises if asked. The handler also checks the returned
-decision before storing its result. Promotion and rollback stay in
-`DiscoveryArchive.promote/rollback`, reached by a separate reviewed path.
-`paper.advance` selects the champion of `symbol:timeframe` through
-`ChampionProvider`. If the archive is absent, has no champion, or the stored
-payload fails DSL validation or hashes inconsistently, the job records NO TRADE
-and the handler opens no ledger, writes no order and never falls back to the
-legacy `flow_momentum` rule.
+decision before storing its result. Promotion stays an explicit, reviewed call:
+`promote_with_evidence` for production, `promote_exploratory` for research, and
+`rollback` to restore a previous champion. `paper.advance` selects the champion of
+`symbol:timeframe` through `ChampionProvider` and hands it to
+`ContinuousPaperRunner`. A Phase-12 slice session is resumed only when its
+symbol, timeframe, strategy, spec hash, window and settings match and its
+recorded signals still land on the stored decision bars; that session's newest
+signal is its cursor, so no migration is needed. Any other pre-existing session
+is a permanent `session_conflict` failure. If the archive is absent, has no
+champion, the champion is exploratory/manual (`NoEvidenceChampion`), or the
+stored payload fails DSL validation or hashes inconsistently, the job records NO
+TRADE and the handler opens no ledger, writes no order and never falls back to
+the legacy `flow_momentum` rule.
 
 ### Outcome attribution
 
@@ -459,7 +734,10 @@ spanning more than 31 days is not read at all and reports
 - The resource guard still does not measure anything. `HEAVY_HANDLER_KINDS`
   names `dataset.build` and `discovery.run` for the caller's `heavy_kinds`, but
   peak RAM/CPU/disk on the M2 are unproven here.
-- `paper.advance` is dedupe-key idempotent, not replay-idempotent.
+- `paper.advance` advances every newly closed stored bar in one call; `bars` is
+  validated and recorded but is not a per-call cap, so a job can outgrow its
+  requested budget when a large slice accumulated. `bars_advanced` reports the
+  real number.
 - Outcome analysis is descriptive: counts, P&L and R. It does not test a
   hypothesis, enqueue the next discovery cycle or train anything.
 - `discovery.run` still evaluates on one validation slice. It is not
@@ -485,6 +763,422 @@ of the cursor on the next scan.
 one `trigger_scan` event. There is no filesystem watcher; a caller decides how
 often to scan.
 
+### Market-data files (Phase 18)
+
+`DataFileTriggerSource(root, store=..., max_emits=100, since=None)` turns a new
+or changed Parquet/CSV file under a data root into exactly one `dataset.build`.
+It emits the handler's own contract, not the raw file shape, so the queue and
+the handler agree without an adapter:
+
+| Field | Value |
+|---|---|
+| `kind` | `dataset.build` (the only accepted kind) |
+| `dedupe_key` | `dataset.build:data:{sha256[:16]}` |
+| payload | `symbol`, `timeframe`, `notes` (relative path, digest prefix, size) |
+| `max_retries` | `1` by default |
+
+`notes` is audit text; `symbol` and `timeframe` are the two fields the handler
+requires. `scalping.orchestrator.handlers.DatasetRequest.from_payload` accepts
+the payload unchanged, and a test asserts the two modules name the same kind.
+
+#### Layout inference
+
+The accepted shape is `<symbol>/<timeframe>/.../<file>.parquet|.csv`:
+
+```
+data/XAUUSD/M1/2026/01.parquet   -> symbol=XAUUSD timeframe=M1
+data/XAUUSD/H1/bars.csv         -> symbol=XAUUSD timeframe=H1
+```
+
+`symbol` must match the same `^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$` token the
+handler enforces and is upper-cased the way the data registry already resolves
+it. `timeframe` is upper-cased and must be one of `TIMEFRAMES` (`M1`, `M5`,
+`M15`, `M30`, `H1`, `H4`, `D1`). Deeper directories are allowed, so the store's
+`<year>/<month>.parquet` partitions need no special case. Dot-prefixed path
+segments are ignored: that skips `.feature-cache`, dotfiles and atomic-write
+temp files without a name list.
+
+Anything else is **refused, never guessed**:
+
+| `reason` | Example | Effect |
+|---|---|---|
+| `unknown_layout` | `<root>/loose.parquet`, `XAUUSD/bars.parquet` | `data.trigger_refused`, no job |
+| `invalid_symbol` | `../M1/bars.parquet`, `.cache/M1/bars.parquet` | `data.trigger_refused`, no job |
+| `unknown_timeframe` | `XAUUSD/YEARLY/bars.parquet` | `data.trigger_refused`, no job |
+
+The refusal is recorded once per `(relative path, size, mtime)`; a periodic scan
+does not repeat the same line. Renaming the file into a valid layout makes it a
+new relative path and it is evaluated normally. A file that is not
+`.parquet`/`.csv` is ignored silently, because the data root also holds caches
+and metadata written by other stages.
+
+#### Dedupe
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.data:dataset.build:<absolute root>`:
+
+```json
+{"version": 1,
+ "files": {"XAUUSD/M1/2026/01.parquet": {"size": 1024, "mtime_ns": 1, "sha256": "...",
+                                          "symbol": "XAUUSD", "timeframe": "M1",
+                                          "status": "emitted"}},
+ "checksums": {"<sha256>": "XAUUSD/M1/2026/01.parquet"}}
+```
+
+Two layers keep a scan from duplicating work:
+
+1. **Stat fast path.** A file whose `size` and `mtime_ns` match the cursor is
+   skipped without hashing. `checksums` holds every digest this root already
+   emitted, so byte-identical content under another name, or a revert to an
+   earlier version, updates the cursor but emits nothing.
+2. **Job key.** `dataset.build:data:{sha256[:16]}` is stable across scans for the
+   same bytes. If the process crashes between enqueue and `seen`, the cursor is
+   never persisted; the next scan hashes the file again, emits the same key and
+   the store returns the existing job as a duplicate. There is exactly one job
+   for that content, not two.
+
+The full digest is kept in the cursor for audit; the 64-bit prefix in the key is
+short and readable, and a collision would need two different files under one
+root. A changed file has a new digest and emits once; after `seen` the stat path
+suppresses it until it changes again. The checksum set is never pruned, so a
+removed and later re-added identical file is treated as seen.
+
+#### Limits
+
+- **No scheduler and no market clock.** `scan()` is a call. Nothing watches the
+  filesystem, sleeps or decides that a bar has closed. A file written while a
+  scan is running may wait for the next pass.
+- **`mtime` is metadata, not event time.** Copies, restores and some network
+  filesystems preserve a stale mtime, and a clock change can move it backwards.
+  The stat fast path and `since` both trust it; a file whose mtime predates
+  `since` is skipped until it changes.
+- **A file still being written can be seen mid-write.** The source hashes what
+  is on disk when it arrives; an in-place writer produces an intermediate
+  digest, then a second trigger when the file changes again. Write to a temp
+  name and rename (the store's own partition writes do this, and dot-prefixed
+  temp files are ignored) to get one trigger per finished file.
+- **Extension and layout are the only signals.** Content is never parsed here. A
+  stray CSV under a valid symbol/timeframe triggers a rebuild; whether the
+  stored bars are readable is the handler's decision, and an unreadable scope is
+  a permanent job failure.
+- **`max_emits` caps one scan** (default 100, maximum 1000) and writes
+  `data.trigger_deferred` with the count. Files over the cap are left out of the
+  cursor and are re-evaluated next scan; they are delayed, not dropped.
+- **`since` is a wall-clock mtime lower bound** and accepts a timezone-aware
+  `datetime` or an ISO-8601 string with an offset. A naive timestamp is
+  rejected.
+- **`discovery.run` is deliberately not emitted.** Its payload requires a gate,
+  a trial budget and a seed, none of which a filename can supply. Inventing them
+  would turn a data arrival into an unapproved search policy. A caller that
+  wants discovery after a dataset build enqueues it explicitly with that
+  policy.
+- **One process owns the cursor.** The job store is one local SQLite file, same
+  as every other trigger source; two daemons over one database are unsupported
+  here too.
+
+### Matured paper outcomes (P5 slice 2)
+
+`PaperOutcomeTriggerSource` closes part of the loop: a paper session's completed
+trades become one research trigger. It reads the ledger with a read-only
+connection, calls `matured_outcomes(ledger, session_id)` for each session and
+emits one trigger per batch whose `outcome_fingerprint` the cursor has not
+recorded.
+
+| Field | Value |
+|---|---|
+| `kind` | `paper.outcomes` (the only accepted kind) |
+| `dedupe_key` | `paper.outcomes:{fingerprint}` |
+| payload | `session_id`, `fingerprint`, `trades`, `pnl`, `r_total`, `strategy_hash`, `dataset_id`, `source`, `synthetic` |
+| `max_retries` | `1` by default; a transient handler failure cannot burn the batch |
+
+Only closed trades contribute. `matured_outcomes` counts open positions in
+`open_trades` and never turns them into rows, so an unrealised trade cannot
+start research. A `running` session is eligible: its closed trades are already
+matured, and waiting for session close would delay feedback for no correctness
+gain.
+
+#### Scan order, coverage and backlog
+
+Sessions are ordered by last trade activity — `MAX(trades.exit_ts)`, falling
+back to `started_at` for a session with no closed trade. Activity order keeps a
+long-running session that keeps closing trades from being starved by newer,
+quiet sessions.
+
+A scan reads at most `max_sessions` (default 1000, maximum 10 000) sessions,
+starting at a persisted rotation offset. When the ledger holds more, the next
+scan resumes at the offset where this one stopped and wraps, so every session is
+polled even if a single scan cannot reach all of them. Sessions not reached are
+recorded with `reason: truncated` (up to 25 individual `paper.outcome_not_queued`
+lines) and one `paper.outcome_truncated` summary event carrying `deferred`,
+`scanned`, `total` and `resume_offset`. A session whose trigger already exists is
+not logged as truncated: outside this scan's window is not an actionable refusal.
+They are delayed, never silently dropped.
+
+Two bounds keep a first scan over a long ledger cheap:
+
+| Option | Default | Limit | Effect |
+|---|---|---|---|
+| `since` | `None` | — | Only sessions with `started_at >= since` are in the window. Accepts a timezone-aware `datetime` or an ISO-8601 string with an offset; a naive timestamp is rejected. |
+| `max_proposals` | `100` | `1000` | At most this many triggers per scan, so a historical ledger cannot propose an unbounded research backlog at once. The rotation cursor resumes at the first unprocessed session. |
+| `allow_synthetic` | `False` | — | A batch whose recorded `synthetic` flag is `true` is refused with `reason: synthetic_outcome` unless this is set. The default keeps a demo run out of market evidence. |
+
+`since` is a session-start bound, not a trade-time bound: a session that started
+before the bound is out of scope entirely, and it emits no per-session refusal
+line (the window is a deliberate configuration, not a data problem). A session
+whose trigger was already emitted before `since` was set stays acknowledged; the
+window trims the read, it does not retroactively cancel proposals.
+
+#### Eligibility and refusal reasons
+
+A session emits only when the batch has at least one closed trade, a strategy
+hash and a dataset id. Otherwise the source writes one `paper.outcome_not_queued`
+event with a machine-readable `reason` and a human `detail`. The reason is
+recorded once per session and rewritten only when it changes, so a periodic scan
+does not flood the audit log.
+
+| `reason` | Meaning | Emits? |
+|---|---|---|
+| `empty_batch` | No trade has closed yet; the P&L is not final | No |
+| `synthetic_outcome` | The batch records `synthetic: true` and the source has `allow_synthetic=False` (the default) | No |
+| `no_strategy_hash` | `model_version` and signals carry no attribution | No |
+| `no_dataset_id` | Session config records no dataset id to scope research | No |
+| `outcome_error` | Ambiguous attribution or unreadable session config | No |
+| `no_ledger` | The configured ledger path does not exist | No |
+| `ledger_unavailable` | Unreadable file or no sessions table | No |
+| `truncated` | Deferred by `max_sessions` or `max_proposals`; the next scan resumes at it | No |
+
+#### Provenance in the payload
+
+`source` and `synthetic` come from `session_provenance` in
+`scalping.paper.ledger`, which reads the session config. The canonical spelling
+is the `provenance` block the continuous runner writes (`extra.provenance.source`
+/ `extra.provenance.synthetic` in the stored JSON); older configs with
+`source`, `provenance.source`, `data.source` or `extra.source` (and the
+`synthetic` counterpart) still read. Missing values are `null`, which means
+**unknown** — never an invented `false`. A session whose config predates these
+fields must not be presented as real, non-synthetic evidence, so downstream code
+can refuse `synthetic is not false` without guessing. A value that is present
+but mistyped (a string `synthetic`, an empty `source`) is refused as
+`outcome_error` instead of being downgraded to unknown. The runner's `origin`
+field is deliberately not used as a data source: it names the process, not the
+data.
+
+A known `synthetic=True` batch is refused by the source when `allow_synthetic`
+is `False`, the default. Setting it is an explicit opt-in for drills that need
+a synthetic loop; the payload then carries `synthetic: true` so every downstream
+record still says so.
+
+#### Dedupe
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.paper.outcomes:<absolute ledger path>`:
+
+```json
+{"version": 3, "fingerprints": {"<sha256>": "<session_id>"},
+ "not_queued": {"<session_id>": "<reason>"},
+ "pending_ack": {"<sha256>": "<session_id>"}, "offset": 0}
+```
+
+`scan()` computes it and `seen()` persists it, matching the file-trigger
+protocol. `seen(triggers)` records only the fingerprints the caller actually
+acknowledged. Acknowledging a subset moves the rest into `pending_ack`, and the
+next scan re-emits them before it resumes the rotation — they do not wait for the
+offset to wrap. A late acknowledgement of an older trigger promotes its
+fingerprint from `pending_ack` to the durable set. `scan_once` acknowledges every
+trigger it enqueued, so the converged case stores them all. A crash between
+enqueue and `seen` re-emits the same trigger on the next scan; the job
+`dedupe_key` makes that a duplicate instead of a second job. Deduplication
+therefore has two independent layers: the durable fingerprint set and the store
+key. Any newly closed trade changes the fingerprint and emits one new trigger.
+
+The source emits with `max_retries=1`, so one transient handler failure is
+retried instead of consuming the only trigger for a matured batch. Each attempt
+logs its own `paper.outcome_received` line, so a retried job has two: the audit
+log records attempts, not logical triggers. Once both attempts fail the job is
+terminal and the fingerprint stays acknowledged; an operator requeue is then the
+explicit recovery, and the cursor is not silently rewound to re-propose the same
+work.
+
+#### Proposal only, no auto-training
+
+`make_paper_outcome_handler(should_queue=None, allow_synthetic=False)` and
+`register_paper_outcome_handler(registry, should_queue=None, allow_synthetic=False)`
+bind `paper.outcomes`. The handler:
+
+1. requires the seven core payload fields and accepts the optional `source` and
+   `synthetic` pair (unknown, missing-required, mistyped or non-finite input is
+   a permanent failure; an old job without provenance is `null`, not real);
+2. logs `paper.outcome_received` for the job, including provenance;
+3. refuses a `synthetic: true` payload with `no_action` and one
+   `paper.outcome_refused` line unless `allow_synthetic=True`: the policy hook
+   never sees a demo batch by default, and the result carries
+   `refused: "synthetic_outcome"`;
+4. returns `{"action": "queue_discovery" | "no_action", "reason": ...,
+   "queued": false, "executed": false}` plus the attribution it received.
+
+It imports no discovery, training, simulator or champion module, reads no bars,
+features or holdout split, and cannot enqueue: a handler receives
+`JobContext.store` as a `JobStoreReader`, a read-only facade over the queue. It
+can read jobs, events and state and append an audit line, but `enqueue`,
+`claim_next`, `retry`, `defer`, `cancel` and `set_state` are not on it.
+`JobContext.cancel()` is scoped to the handler's own job through a private
+callable, so the reader cannot cancel another job. The facade is
+accidental-misuse protection, not a security boundary: the delegate lives in a
+private slot and in-process code can still reach it through introspection. It
+stops a handler from growing or rewriting the queue by mistake, which is the
+contract the docs promise.
+`should_queue(payload) -> bool` is the explicit policy hook. Returning `True`
+proposes the next research cycle; it still does not start it. Without a callback
+the proposal is `queue_discovery` with `executed: false`, which is a recorded
+recommendation, not work.
+
+#### Honest limits
+
+- **Single process, no scheduler and no market clock.** `scan()` is a call.
+  Nothing polls the ledger, sleeps or decides that a bar has arrived; a daemon
+  or CLI is future work.
+- **Read cost grows with the ledger.** Each scan reads every session's signals,
+  trades and positions through `matured_outcomes`. The `max_sessions` cap bounds
+  one scan; a larger ledger is covered over several scans by the rotation
+  offset, so a full cycle costs proportionally more wall time.
+- **Rotation is offset-based.** Inserting a session or changing its activity
+  between scans can shift the offset, so a session may be visited twice (the
+  fingerprint makes that a no-op) or skipped until the next wrap. It cannot
+  disappear permanently.
+- **Unacknowledged triggers are the caller's debt.** `pending_ack` is retried at
+  the start of every scan until acknowledged; a caller that scans but never
+  calls `seen()` keeps re-reading them, which is a protocol violation, not a
+  safe steady state.
+- **No backfill.** A session without a dataset id stays refused; the trigger
+  does not modify the ledger to manufacture attribution.
+- **The sets are unbounded.** Fingerprints and quiet refusal reasons accumulate;
+  no pruning or compaction exists yet. A `since` window trims the sessions read,
+  not the cursor document.
+- **A trigger is not evidence.** It says a paper batch completed, not that the
+  strategy has an edge. The queue step and any later evaluation remain separate
+  reviewed decisions, and the final OOS/holdout split is never touched here.
+
+
+## Approved proposals as discovery triggers (knowledge bridge)
+
+`ProposalQueueTriggerSource` in `proposal_handlers.py` is the explicit seam
+between the knowledge approval gate and the queue. It reads
+`proposals_for_queue(ProposalStore, limit)` — approved records only — and emits
+one ordinary `discovery.run` trigger per eligible proposal. It is **not**
+registered by `register_default_handlers`; a caller adds it to `scan_once` or the
+daemon when the owner wants approved proposals to become queue work.
+
+### Trigger contract
+
+| Field | Value |
+|---|---|
+| `kind` | `discovery.run` (the same kind the production handler validates) |
+| `dedupe_key` | `discovery.run:proposal:<proposal id>:<payload sha256>` |
+| payload | The fields of `DiscoveryRequest`: `symbol`, `timeframe`, `max_trials`, `seed`, `stress`, `gate`, `population`, `generations`, `patience`, `horizon` |
+| `max_retries` | `1` by default; a transient queue failure must not consume an approval |
+
+The search policy comes from an explicit `DiscoveryTemplate`. The gate and
+cost-stress policy are required inputs, not inherited defaults: an approved
+proposal names the question, not the evidence policy. The payload intentionally
+contains no proposal fields because the current `discovery.run` handler rejects
+unknown keys. Provenance lives in the dedupe key, the cursor document and the
+`proposal.discovery_queued` audit event (`proposal_id`, `hypothesis_id`, scope,
+dataset hint, required columns/groups, payload hash, approval actor/reason).
+
+### Eligibility and refusal reasons
+
+A proposal emits only when all of these hold:
+
+- its status is `approved` (the queue cannot return a proposed, rejected or
+  converted record);
+- `symbol` and `timeframe` are non-empty and in the project registry;
+- `required_columns` and `required_groups` are non-empty;
+- an optional `dataset_id` is non-empty and does not name a test/holdout split.
+  The schema only permits `dataset_id` on a `converted` record, so this check is
+  defensive against a store written outside the API; an approved proposal
+  normally has no dataset id.
+
+Anything else writes one `proposal.not_queued` event with a machine-readable
+reason. The reason is rewritten only when it changes, so a periodic scan does
+not flood the audit log.
+
+| `reason` | Meaning |
+|---|---|
+| `not_approved` | The queue returned a non-approved record (defensive) |
+| `missing_scope` | Empty symbol or timeframe |
+| `unknown_scope` | Scope outside the project registry |
+| `missing_data` | No required bar columns or feature groups |
+| `holdout_data` | Dataset hint contains `test`/`holdout`/`final`/`locked`/`oos` and similar tokens |
+| `invalid_proposal` | The record is not an `ExperimentProposal` or has no usable payload |
+| `truncated` | The per-scan emission cap stopped before this record; a later scan resumes |
+
+### Dedupe and the cursor
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.knowledge.proposals:<absolute proposal store path>`:
+
+```json
+{"version": 1,
+ "emitted": {"<proposal id>:<payload sha256>": "<proposal id>"},
+ "not_queued": {"<proposal id>": "<reason>"},
+ "pending_ack": {"<proposal id>:<payload sha256>": "<proposal id>"}}
+```
+
+`scan()` computes it and `seen()` persists it, matching every other trigger
+source. An unacknowledged identity stays in `pending_ack` and is re-emitted on
+the next scan; the store's `dedupe_key` prevents a second job if the crash
+happened after `enqueue`. Changing the `DiscoveryTemplate` changes the payload
+hash, so the same proposal becomes a deliberately different experiment rather
+than being silently deduplicated as the old one. A proposal that is rejected or
+converted **after** its job was queued does not retract the job; the owner still
+owns the queue decision.
+
+### Optional proposal-only handler
+
+`make_proposal_handler()` / `register_proposal_handler(registry)` bind
+`knowledge.proposals`. The handler accepts the snapshot built by
+`proposal_message(proposal, payload_hash=...)`, validates its types, status and
+scope, writes `proposal.received`, and returns:
+
+- `action: "queue_discovery"`, `queued: false`, `executed: false` for an approved
+  snapshot with no holdout dataset hint;
+- `action: "no_action"` for any other status, or for a snapshot whose dataset id
+  names a locked split.
+
+It never opens the proposal store, reads a bar, executes discovery, approves a
+proposal or enqueues another job. `JobContext.store` is the read-only facade, so
+the handler could not enqueue even by mistake.
+
+### Governance boundaries
+
+- **No auto-approval.** The source only reads the approved queue. `propose`,
+  `approve`, `reject` and `link_candidate` are never called from this module.
+- **No auto-promotion.** A queued `discovery.run` still records only
+  `no_trade`/`no_change`/`rejected` through the existing handler.
+- **Conversion is explicit.** The only path from `approved` to `converted` is
+  `ProposalStore.link_candidate(candidate_hash, dataset_id, actor=...)` after a
+  reviewed discovery run produced a candidate. The bridge never converts a
+  proposal and never invents a dataset id.
+- **No holdout access.** `proposal_handlers.py` imports no discovery or holdout
+  module and refuses a holdout-looking hint before a job exists.
+
+### Honest limits
+
+- **One scan reads at most 1 000 approved proposals and emits at most
+  `max_proposals` (default 100).** A larger approved backlog is covered over
+  successive scans until it exceeds the read bound; beyond that a record is not
+  scanned. This is a bound, not a queue property.
+- **The bridge is caller-wired.** Nothing installs the source by default, so an
+  approved proposal becomes a job only when a caller passes the source to
+  `scan_once` or the daemon.
+- **A queued job is not an execution.** The bridge creates queue rows. The
+  orchestrator still decides when to run them, under the resource guard and
+  research controls.
+- **No retraction.** Rejecting or converting a proposal after its trigger was
+  acknowledged does not cancel the queued job or rewind the cursor.
+- **The cursor grows with emitted and refused proposals.** There is no pruning
+  or compaction yet.
+
 ## Verification
 
 ```
@@ -492,7 +1186,9 @@ cd backend
 uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
-  tests/test_orchestrator_handlers.py tests/test_orchestrator_resources.py -q
+  tests/test_orchestrator_cancel.py tests/test_orchestrator_handlers.py \
+  tests/test_orchestrator_resources.py tests/test_orchestrator_daemon.py \
+  tests/test_orchestrator_integration.py -q
 uv run pytest
 ```
 
@@ -502,14 +1198,63 @@ gating, dependency order, dependency failure to `skipped` (including a cascade),
 retry backoff bounds and exhaustion, permanent failures, cancel while queued and
 while running, pause/resume/safe-mode/disable-research (including persistence
 across a reopen), crash recovery with and without attempts left, one heavy job,
-guard refusal without spending an attempt, event-log completeness, and
-file-trigger dedupe across a store restart. The handler tests cover a real
+guard refusal without spending an attempt, the deferral cap turning a starved
+job terminal, the v1→v2 deferral migration, event-log completeness,
+`run_until_idle(should_stop=...)`, and file-trigger dedupe across a store
+restart. The handler tests cover a real
 ingest/index/extract round trip, checksum idempotency, dataset manifest
 reproducibility, an unknown symbol refusal, a real bounded discovery run that
-records no promotion, a no-champion NO TRADE that writes nothing, a governed
-champion paper advance with queue dedupe, an invalid champion payload, closed-
-only outcome analysis with an open position excluded, and permanent failure for
-invalid payloads with the retry budget untouched.
+records no promotion, a no-champion NO TRADE that writes nothing, continuous
+champion advances that are append-only across calls and a process restart, a
+no-new-bar scan that writes nothing, typed `bar_gap`/`bar_order` refusals, a
+resumed and an incompatible legacy slice session, an invalid champion payload,
+closed-only outcome analysis with an open position excluded, and permanent
+failure for invalid payloads with the retry budget untouched.
+
+### Cancellation, retry and deferral contract
+
+`tests/test_orchestrator_cancel.py` pins the semantics that decide whether work
+may be banked or retried, separately from the store's single-transition tests:
+
+- **Cancel queued.** The row is terminal before any worker sees it. A second
+  cancel is a no-op with no second event, and a sibling job still runs.
+- **Cancel while running.** The handler is not stopped. After it returns, the loop
+  compares the row, writes one `cancelled_while_running` event and discards both
+  a successful and a failed result. Nothing is requeued.
+- **Cancel terminal or unknown.** A succeeded or failed row refuses cancellation
+  with `JobStateError`; an unknown id raises `UnknownJobError` and writes no
+  audit line.
+- **Retry.** Backoff is `base_seconds * factor ** (attempt - 1)`, capped at
+  `max_seconds`; the job is idle before its delay, spends one attempt per run and
+  fails after `max_retries + 1` attempts. `PermanentJobError` and
+  `HandlerResult.failure(..., permanent=True)` fail on the first attempt without a
+  `retry` event. The store's own `retry` guard refuses a spent budget
+  independently of the orchestrator.
+- **Defer ceiling.** A guard refusal restores the claimed attempt. After
+  `max_deferrals` refusals the next one turns the job `failed` with
+  `deferral cap reached ...` and a `defer_exhausted` event; the terminal claim is
+  not restored and the handler never ran.
+- **Drains.** `should_stop` is a boundary between jobs, never inside one. A pause
+  raised from a handler stops the current drain, and `resume()` lets the next one
+  finish the remainder. A cancelled dependency skips its dependents, cascading to
+  grandchildren, and a dedupe key still returns the failed job instead of
+  reviving it.
+
+Mutation check (each patch applied alone, run against this file, then reverted;
+the committed tree is green):
+
+| Mutation | Test that fails |
+|---|---|
+| delete the `current.status != "running"` guard in `core._execute` | `test_cancel_while_running_discards_the_result`, `..._a_failure_too` |
+| reduce `_fail`'s condition to `permanent` only (drop `attempts > max_retries`) | `test_retry_backoff_is_capped_then_terminal` (plus `test_cancel_terminal_job_is_refused` and the idempotent-enqueue test, which share the failure path) |
+| delete the `attempts > max_retries` guard in `store.retry` | `test_store_retry_refuses_a_spent_budget` |
+| delete the `defer_count >= max_deferrals` branch in `store.defer` | `test_defer_ceiling_turns_a_starved_job_terminal` |
+
+What remains unproven: cancellation is cooperative. There is no preemption, no
+signal, thread kill or cancellation token. A running handler keeps its CPU and
+I/O until it returns; only its result is discarded, and a handler that never
+returns holds the claimed row. Cancellation and pause are observed at loop
+boundaries, and no test drives two processes over one database.
 
 The measured-guard tests cover: disabled limits allow; each limit refuses at its
 boundary and allows just inside it; reasons carry the limit and the measured
@@ -520,3 +1265,129 @@ real `SystemProbe` on the host; `measure` recording finite wall/CPU/RSS values
 and a failed block without masking it; a bounded sample ring; JSON-safe
 payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
 job with the measured reason in its event log.
+
+The market-data trigger tests (`tests/test_data_triggers.py`) cover: a new
+Parquet/CSV under `<symbol>/<timeframe>` emits one `dataset.build` whose payload
+`DatasetRequest.from_payload` accepts; a second scan is a no-op; the cursor
+survives a store restart; changed bytes emit exactly once; identical bytes under
+another path emit nothing; the three layout refusals are logged once and create
+no job; a missing root is a no-op; a simulated crash between scan and
+acknowledgement leaves one job after the store restart; `max_emits` defers the
+overflow without losing it; `since` skips old mtimes until the file changes;
+symbol/timeframe case is normalised; dot-prefixed paths are ignored; the
+constructor rejects a non-directory root and an unservable kind; and the CLI
+`--watch-data-dir` enqueues once while `--watch-kind dataset.build` and two watch
+roots are rejected.
+
+The paper-outcome trigger tests (`tests/test_paper_outcome_triggers.py`) cover: a
+new fingerprint enqueues one job; the store key dedupes a crash before
+acknowledgement; the cursor dedupes a repeat scan and a store restart; an open
+position is counted but never in the payload; missing strategy hash and dataset
+id are refused with a logged reason that is not repeated; an empty batch and a
+missing ledger are no-ops; the handler returns a proposal and creates no second
+job; the policy callback can decline; and one more closed trade changes the
+fingerprint. They also cover the review fixes: activity order keeps a busy old
+session ahead of a newer quiet one; the rotation cursor visits every session
+beyond `max_sessions` and each deferred session is recorded with `truncated`,
+without a stale note for a session whose trigger already exists; a partial
+acknowledgement is re-emitted at the start of the very next scan; a transient
+handler failure is retried before the batch is burned; `source`/`synthetic`
+provenance is forwarded and absent provenance stays `null`; a `synthetic=True`
+batch is refused with a logged `synthetic_outcome` reason by default and emitted
+only under `allow_synthetic=True`, and the handler applies the same default with
+one `paper.outcome_refused` line; the handler store is
+a read-only facade with no `enqueue` or cross-job `cancel`; an injected `kind`
+and an out-of-range scan bound are rejected; and `since` plus `max_proposals`
+keep a large historical ledger from emitting an unbounded backlog.
+
+The proposal-bridge tests (`tests/test_proposal_bridge.py`) cover: approved-only
+emission with proposed/rejected/converted records skipped and no status change;
+the emitted payload round-tripping through the real `DiscoveryRequest`; constant
+parity with the discovery handler; a bare scan creating no job, archive or
+discovery execution; an import scan proving no discovery/holdout module is
+reached; cursor and store dedupe across a crash and a job-store restart; a
+changed template producing a new payload hash and job; refusal reasons for
+missing/unknown scope, missing required data and a holdout-looking dataset hint
+that are not repeated; provenance fields in the audit event and cursor; and the
+optional `knowledge.proposals` handler returning `queue_discovery` / `no_action`
+with `queued: false` / `executed: false`, no second job and permanent failure for
+an invalid snapshot.
+
+The daemon tests cover: config bounds and profile/type selection; tick scans
+before it drains; trigger dedupe across ticks; pause and safe mode still scan and
+enqueue but claim nothing; disabled research leaves research queued while
+ingestion runs; a guard refusal defers without spending an attempt and records
+its reason; the deferral cap fails the job after the configured refusals; a
+raised heavy handler does not stop a later paper job on the next tick; recovery
+happens once, `start()` is idempotent and keeps one worker thread; a stop during
+blocked recovery is not lost and leaves no thread; `stop()` joins the loop from
+the caller thread and slices a 60 s poll into ≤0.25 s waits; the drain stops
+between jobs; `:memory:` is rejected by `start()` and stays single-threaded for
+`status()`; `status()` is readable from another thread for a file store and is
+JSON-safe; the CLI `--once` exits 2 on a tick error but 0 on a job failure;
+`--forever` reports a dead worker with exit 1; and `--watch-dir` enqueues a
+document once and dedupes the second pass.
+
+### Integration coverage (Phase 18)
+
+`tests/test_orchestrator_integration.py` runs the real store, loop, handlers,
+trigger sources and daemon together on `tmp_path` roots and one day of seeded
+synthetic M1. It asserts what the per-seam tests cannot: that the seams agree
+with each other.
+
+Proven by that file:
+
+- **Dependency chain.** One `Orchestrator` runs `knowledge.ingest` and then
+  `dataset.build`; the child is not claimable before the parent succeeds, both
+  results are stored (document checksum and index rows, dataset manifest on
+  disk) and the event log names every transition in order.
+- **Failure isolation with a budget.** A `discovery.run` handler that raises
+  spends its one retry, leaves a light `paper.advance` job free to succeed in
+  the same drain, then fails terminally; its dependent `paper.analyse` is
+  `skipped` with the failed dependency named, and no third attempt exists an
+  hour later.
+- **Trigger → proposal.** `PaperOutcomeTriggerSource` + `scan_once` enqueue one
+  `paper.outcomes` job from a matured ledger batch; the cursor dedupes after a
+  store restart, the store dedupe key dedupes after the cursor is lost, and the
+  handler records a proposal with `queued: false` / `executed: false`, creating
+  no discovery or paper job and no archive.
+- **Daemon tick.** One tick recovers a `running` row (once per instance), scans,
+  and drains both the recovered paper job and the scanned outcome job; pause and
+  safe mode refuse claims with their reason in `claim_refused`; a measured guard
+  backed by a fake starved probe defers a job (`defer_count = 1`,
+  `attempts = 0`, `resource_refused` and `deferred` events, 60 s delay).
+- **Restart.** A reopen keeps queued rows, `recover_interrupted` requeues the
+  running row with its spent attempt intact, a deduplicated enqueue returns the
+  succeeded job, and each handler runs exactly once.
+- **Boundary.** No module in the flow imports a holdout or real-money module
+  (static import scan plus a `sys.modules` diff around a live run). During a
+  real, bounded discovery run the only slice built is
+  `[validation.start, validation.end)`, every scored frame lies inside it, the
+  recorded dataset id starts with `validation:` and trips no production
+  holdout token.
+
+Not proven by it:
+
+- **`paper.advance` is wired but unproven on real data.** The queue path reaches
+  `ContinuousPaperRunner` and pins append-only advance, restart, gap/order
+  refusal and legacy-session resume. It does not prove a live feed cadence, a
+  real ledger, or concurrent access to one ledger from two processes; the
+  handler's `bars` budget is not a per-call slice (see the payload contract).
+- **`tick(now=...)` does not reach crash recovery.** `Orchestrator.start()` has
+  no `now` parameter, so `recover_interrupted` stamps a requeued row with the
+  wall clock. The integration test therefore drives the daemon with the wall
+  clock; a purely simulated clock would leave the recovered job scheduled in the
+  future. Production calls `start()` with `now=None`, so this is a test-seam
+  limitation, not a runtime defect.
+- **A paper-outcome proposal is still not executed.** The paper-outcome handler
+  records `queue_discovery`; nothing turns that result into a queued discovery
+  job. The separate knowledge bridge
+  (`tests/test_proposal_bridge.py`) queues `discovery.run` only for an
+  owner-approved `ProposalStore` record when a caller explicitly wires
+  `ProposalQueueTriggerSource`.
+- **Synthetic inputs only.** One day of seeded M1 proves wiring, not market
+  behaviour, data quality or edge. No real bar, ledger or document is read.
+- **One process.** Nothing here exercises a second daemon, a lease, or two
+  processes over one database; the ownership limit above still stands.
+
+

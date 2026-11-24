@@ -1083,6 +1083,25 @@ class KnowledgeIndex:
         )
         return [_section_from_row(row) for row in rows]
 
+    def section(self, doc_id: str, ordinal: int) -> SectionRecord | None:
+        """One section by document and ordinal, or ``None`` when absent.
+
+        This is the read path citation checks use: a source ref names
+        ``(doc_id, ordinal)`` and needs the section text to compare its quote
+        against.
+        """
+        doc_id = _require_text(doc_id, "doc_id")
+        ordinal = _require_non_negative(ordinal, "ordinal")
+        row = (
+            self._connection()
+            .execute(
+                "SELECT * FROM sections WHERE doc_id = ? AND ordinal = ?",
+                (doc_id, ordinal),
+            )
+            .fetchone()
+        )
+        return None if row is None else _section_from_row(row)
+
     def chunks(self, section_id: int) -> list[ChunkRecord]:
         """Chunks of one section in order."""
         section_id = _require_non_negative(section_id, "section_id")

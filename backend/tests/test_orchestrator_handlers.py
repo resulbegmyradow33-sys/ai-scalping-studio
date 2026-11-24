@@ -18,17 +18,21 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import pytest
 
+from promotion_evidence import evidence_for
+from promotion_support import promote_for_tests, registered_test_policies
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
+from scalping.discovery.promotion import PROMOTION_V1, EvidenceIdentity
 from scalping.discovery.protocols import TrialResult
 from scalping.knowledge.index import (
     _MIGRATIONS,
@@ -46,6 +50,7 @@ from scalping.orchestrator.handlers import (
     HandlerContext,
     register_default_handlers,
 )
+from scalping.paper.autonomous import AutonomousPaperRunner
 from scalping.paper.ledger import PaperLedger
 from scalping.strategy.dsl import (
     Compare,
@@ -60,6 +65,19 @@ SYMBOL = "XAUUSD"
 TIMEFRAME = "M1"
 START = datetime(2026, 1, 5, tzinfo=UTC)
 END = START + timedelta(days=1)
+DATASET_CHECKSUM = "c1" * 32
+SETTINGS_DIGEST = "c2" * 32
+TEST_POLICY = replace(
+    PROMOTION_V1,
+    policy_id="handler-test-policy",
+    require_locked_oos=False,
+)
+
+
+@pytest.fixture(autouse=True)
+def _register_handler_test_policy():
+    with registered_test_policies(TEST_POLICY):
+        yield
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -110,10 +128,10 @@ class Harness:
         return job, outcome, row
 
 
-@pytest.fixture
-def harness(tmp_path: Path) -> Harness:
+def make_harness(tmp_path: Path, bars: pl.DataFrame | None = None) -> Harness:
+    """One harness over a temp store seeded with ``bars`` (one day by default)."""
     data_root = tmp_path / "data"
-    ParquetStore(data_root).write(SYMBOL, TIMEFRAME, synthetic_bars())
+    ParquetStore(data_root).write(SYMBOL, TIMEFRAME, synthetic_bars() if bars is None else bars)
     context = HandlerContext(
         data_root=data_root,
         runs_root=tmp_path / "runs",
@@ -124,6 +142,11 @@ def harness(tmp_path: Path) -> Harness:
     orchestrator = Orchestrator(store)
     register_default_handlers(orchestrator, context)
     return Harness(store=store, orchestrator=orchestrator, context=context)
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> Harness:
+    return make_harness(tmp_path)
 
 
 def data_of(row: Any) -> dict[str, Any]:
@@ -159,8 +182,34 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             dataset_id=dataset_id,
             code_version="test",
             seed=0,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
         )
-        archive.promote(record.candidate_id, scope=scope, reason="unit test promotion")
+        # Seed through the evidence API: the paper provider only accepts an
+        # evidence-mode champion. This is a test policy, not PROMOTION_V1.
+        evidence = evidence_for(
+            spec_hash=record.candidate_id,
+            dataset_id=dataset_id,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            code_version="test",
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            expectancy_r=0.5,
+        )
+        promote_for_tests(
+            archive,
+            record.candidate_id,
+            evidence,
+            TEST_POLICY,
+            scope=scope,
+            reason="unit test promotion",
+            expected_identity=EvidenceIdentity(
+                code_version="test",
+                dataset_checksum=DATASET_CHECKSUM,
+                settings_digest=SETTINGS_DIGEST,
+            ),
+        )
         champion = archive.champion(scope)
     assert champion is not None and champion.candidate.candidate_id == spec.canonical_hash()
     return spec
@@ -410,6 +459,7 @@ def test_paper_advance_without_a_champion_is_no_trade_and_writes_nothing(
     assert outcome.status == "succeeded"
     data = data_of(row)
     assert data["action"] == "no_trade"
+    assert data["mode"] == "continuous"
     assert data["reason_class"] == "no_champion"
     assert data["touched"] is False
     assert data["champion"] is None
@@ -418,7 +468,34 @@ def test_paper_advance_without_a_champion_is_no_trade_and_writes_nothing(
     assert not harness.context.discovery_archive_path.exists()
 
 
-def test_paper_advance_runs_the_governed_champion_and_dedupes(
+def test_paper_advance_with_a_non_evidence_champion_is_no_trade(
+    harness: Harness,
+) -> None:
+    seed_champion(harness.context)
+    with DiscoveryArchive(harness.context.discovery_archive_path) as archive:
+        archive.connection.execute(
+            """
+            UPDATE champions SET mode = 'exploratory', policy_id = NULL,
+                policy_version = NULL, policy_digest = NULL, evidence_checksum = NULL
+            """
+        )
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 20},
+        dedupe="paper-non-evidence-champion",
+    )
+
+    assert outcome.status == "succeeded"
+    data = data_of(row)
+    assert data["action"] == "no_trade"
+    assert data["mode"] == "continuous"
+    assert data["reason_class"] == "no_evidence_champion"
+    assert data["touched"] is False
+    assert not harness.context.paper_ledger_path.exists()
+
+
+def test_paper_advance_advances_the_governed_champion_continuously(
     harness: Harness,
 ) -> None:
     spec = seed_champion(harness.context)
@@ -430,19 +507,27 @@ def test_paper_advance_runs_the_governed_champion_and_dedupes(
     assert outcome.status == "succeeded"
     data = data_of(row)
     assert data["action"] == "advanced"
+    assert data["mode"] == "continuous"
     assert data["spec_hash"] == spec.canonical_hash()
-    assert data["bars_this_call"] == 40
-    assert data["bars_processed"] == 40
+    assert data["status"] == "running"
+    assert data["bars_this_call"] == data["bars_advanced"] == data["new_signals"] > 0
+    assert data["bars_processed"] == data["bars_this_call"]
+    assert data["last_bar_ts"] is not None
+    assert data["session_id"].startswith(f"auto-{SYMBOL}-{TIMEFRAME}-")
     assert Path(data["ledger"]).is_file()
 
     with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
         session = ledger.session(data["session_id"])
         assert session is not None
         assert session.model_version == spec.canonical_hash()
-        assert len(ledger.signals(data["session_id"])) == 40
+        assert session.config["extra"]["origin"] == "continuous"
+        assert session.config["extra"]["scope"] == scope_for(SYMBOL, TIMEFRAME)
+        signals = ledger.signals(data["session_id"])
+        assert len(signals) == data["bars_processed"]
+        assert len({signal.ts for signal in signals}) == len(signals)
 
     # Re-enqueueing the same logical advance is deduplicated by the orchestrator:
-    # no second job, no second 40-bar step.
+    # no second job, no second advance.
     duplicate, created = harness.enqueue(
         KIND_PAPER_ADVANCE, payload, dedupe=f"paper-{SYMBOL}-{TIMEFRAME}-40"
     )
@@ -451,7 +536,276 @@ def test_paper_advance_runs_the_governed_champion_and_dedupes(
     assert harness.store.get(job.id) is not None
 
     with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
-        assert len(ledger.signals(data["session_id"])) == 40
+        assert len(ledger.signals(data["session_id"])) == data["bars_processed"]
+
+
+def test_paper_advance_second_scan_with_no_new_bars_is_a_no_op(harness: Harness) -> None:
+    spec = seed_champion(harness.context)
+    payload = {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10}
+
+    _, first_outcome, first_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-noop-1")
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+
+    # A different dedupe key forces the handler to run again. The ledger cursor
+    # is the only state: no new bars means no new signal and no new trade.
+    _, second_outcome, second_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-noop-2")
+    assert second_outcome.status == "succeeded"
+    second = data_of(second_row)
+    assert second["action"] == "advanced"
+    assert second["session_id"] == first["session_id"]
+    assert second["spec_hash"] == spec.canonical_hash()
+    assert second["bars_this_call"] == 0
+    assert second["new_signals"] == 0
+    assert second["bars_processed"] == first["bars_processed"]
+    assert second["last_bar_ts"] == first["last_bar_ts"]
+    # Only the provisional tail is newer than the cursor: nothing is decidable.
+    assert second["done_reason"] in {"no_new_bars", "awaiting_closed_bar"}
+
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        assert len(ledger.signals(first["session_id"])) == first["bars_processed"]
+
+
+def test_paper_advance_appends_only_the_newly_stored_bars(tmp_path: Path) -> None:
+    bars = synthetic_bars()
+    harness = make_harness(tmp_path, bars.head(1000))
+    seed_champion(harness.context)
+    payload = {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10}
+
+    _, first_outcome, first_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-append-1")
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        before = [
+            (signal.ts, signal.action, signal.reason)
+            for signal in ledger.signals(first["session_id"])
+        ]
+    assert len(before) == first["bars_processed"]
+
+    # The feed appends 40 bars; one stays provisional, so exactly 40 decisions run.
+    assert (
+        ParquetStore(harness.context.data_root).write(SYMBOL, TIMEFRAME, bars.slice(1000, 40)) == 40
+    )
+    _, second_outcome, second_row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-append-2"
+    )
+    assert second_outcome.status == "succeeded"
+    second = data_of(second_row)
+    assert second["session_id"] == first["session_id"]
+    assert second["bars_this_call"] == 40
+    assert second["new_signals"] == 40
+    assert second["bars_processed"] == first["bars_processed"] + 40
+
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        after = [
+            (signal.ts, signal.action, signal.reason)
+            for signal in ledger.signals(second["session_id"])
+        ]
+    assert after[: len(before)] == before
+    assert all(item[0] > before[-1][0] for item in after[len(before) :])
+    assert len({item[0] for item in after}) == len(after)
+
+
+def test_paper_advance_survives_a_process_restart(tmp_path: Path) -> None:
+    bars = synthetic_bars()
+    harness = make_harness(tmp_path, bars.head(1000))
+    seed_champion(harness.context)
+    payload = {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10}
+
+    _, first_outcome, first_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-restart-1")
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        before = [signal.ts for signal in ledger.signals(first["session_id"])]
+
+    # Simulate a process restart: the job store and the ledger are reopened and
+    # 20 bars arrived while nothing was running.
+    harness.store.close()
+    assert (
+        ParquetStore(harness.context.data_root).write(SYMBOL, TIMEFRAME, bars.slice(1000, 20)) == 20
+    )
+    store = JobStore(tmp_path / "orchestrator.sqlite")
+    orchestrator = Orchestrator(store)
+    register_default_handlers(orchestrator, harness.context)
+    job, _ = store.enqueue(
+        KIND_PAPER_ADVANCE,
+        dedupe_key="paper-restart-2",
+        payload=payload,
+    )
+    outcome = orchestrator.run_once()
+    row = store.get(job.id)
+    assert row is not None
+    assert outcome.status == "succeeded"
+    second = data_of(row)
+
+    assert second["session_id"] == first["session_id"]
+    assert second["bars_this_call"] == 20
+    assert second["bars_processed"] == first["bars_processed"] + 20
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        after = [signal.ts for signal in ledger.signals(second["session_id"])]
+    assert after[: len(before)] == before
+    assert len(after) == len(set(after))
+    store.close()
+
+
+def test_paper_advance_refuses_a_bar_gap_with_a_typed_reason(tmp_path: Path) -> None:
+    bars = synthetic_bars()
+    harness = make_harness(tmp_path, bars.head(1000))
+    seed_champion(harness.context)
+    payload = {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10}
+
+    _, first_outcome, first_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-gap-1")
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+
+    appended = bars.slice(1000, 40)
+    holed = pl.concat([appended.head(10), appended.slice(11)])
+    assert ParquetStore(harness.context.data_root).write(SYMBOL, TIMEFRAME, holed) == 39
+
+    _, gap_outcome, gap_row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-gap-2", max_retries=0
+    )
+    assert gap_outcome.status == "failed"
+    assert "bar_gap" in (gap_row.error or "")
+
+    # A gap can be repaired by a later ingestion, so the same refusal is a
+    # bounded retry rather than a permanent failure.
+    _, retry_outcome, retry_row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-gap-3", max_retries=1
+    )
+    assert retry_outcome.status == "retry"
+    assert "bar_gap" in (retry_row.error or "")
+
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        assert len(ledger.signals(first["session_id"])) == first["bars_processed"]
+
+
+def test_paper_advance_refuses_duplicate_bars_permanently(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed_champion(harness.context)
+    original = ParquetStore.read
+
+    def duplicate_tail(self: ParquetStore, symbol: str, timeframe: str, *args: Any, **kwargs: Any):
+        frame = original(self, symbol, timeframe, *args, **kwargs)
+        return pl.concat([frame, frame.tail(1)]) if not frame.is_empty() else frame
+
+    monkeypatch.setattr(ParquetStore, "read", duplicate_tail)
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10},
+        dedupe="paper-duplicate-bars",
+        max_retries=2,
+    )
+    assert outcome.status == "failed"
+    assert row.attempts == 1, "a corrupt store must not spend the retry budget"
+    assert "bar_order" in (row.error or "")
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        assert ledger.session_page(limit=10, offset=0)[1] == 0
+
+
+def test_paper_advance_resumes_a_legacy_slice_session(harness: Harness) -> None:
+    """A Phase-12 slice session has no cursor column; its last signal is the cursor."""
+    spec = seed_champion(harness.context)
+    with PaperLedger(harness.context.paper_ledger_path) as ledger:
+        legacy = AutonomousPaperRunner(
+            ledger,
+            spec,
+            SYMBOL,
+            TIMEFRAME,
+            harness.context.settings,
+            cache=False,
+            data_root=harness.context.data_root,
+        )
+        legacy.run(bars=40)
+        legacy_session_id = legacy.session_id
+        before = [
+            (signal.ts, signal.action, signal.reason)
+            for signal in ledger.signals(legacy_session_id)
+        ]
+        assert len(before) == 40
+        record = ledger.session(legacy_session_id)
+        assert record is not None
+        assert record.config["extra"]["origin"] == "autonomous"
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10},
+        dedupe="paper-legacy-resume",
+    )
+    assert outcome.status == "succeeded"
+    data = data_of(row)
+    assert data["mode"] == "continuous"
+    assert data["session_id"] == legacy_session_id
+    assert data["bars_processed"] > 40
+
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        after = [
+            (signal.ts, signal.action, signal.reason)
+            for signal in ledger.signals(legacy_session_id)
+        ]
+        record = ledger.session(legacy_session_id)
+        assert record is not None
+        # Resumed, not recreated: the legacy session row and its history stay put.
+        assert record.config["extra"]["origin"] == "autonomous"
+    assert after[: len(before)] == before
+    assert len({item[0] for item in after}) == len(after)
+
+
+def test_paper_advance_refuses_an_incompatible_legacy_session(harness: Harness) -> None:
+    spec = seed_champion(harness.context)
+    session_id = f"auto-{SYMBOL}-{TIMEFRAME}-{spec.canonical_hash()[:16]}"
+    with PaperLedger(harness.context.paper_ledger_path) as ledger:
+        ledger.open_session(
+            session_id,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            strategy="dsl",
+            model_version="b" * 64,
+        )
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10},
+        dedupe="paper-legacy-conflict",
+        max_retries=2,
+    )
+    assert outcome.status == "failed"
+    assert row.attempts == 1, "a session conflict must not spend the retry budget"
+    assert "session_conflict" in (row.error or "")
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        assert ledger.signals(session_id) == []
+
+
+def test_paper_advance_refuses_an_unreplayable_session(tmp_path: Path) -> None:
+    """A ledger mark the simulator cannot reproduce is a conflict, not a retry."""
+    bars = synthetic_bars()
+    harness = make_harness(tmp_path, bars.head(1000))
+    seed_champion(harness.context)
+    payload = {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10}
+
+    _, first_outcome, first_row = harness.run(KIND_PAPER_ADVANCE, payload, dedupe="paper-replay-1")
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+
+    # Tamper with the newest account mark: a replay of the same signals can no
+    # longer land on the recorded balance.
+    with PaperLedger(harness.context.paper_ledger_path) as ledger:
+        last = ledger.equity(first["session_id"])[-1]
+        ledger.record_equity(
+            first["session_id"], last.ts + timedelta(minutes=1), 999_999.0, 999_999.0
+        )
+    assert (
+        ParquetStore(harness.context.data_root).write(SYMBOL, TIMEFRAME, bars.slice(1000, 20)) == 20
+    )
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-replay-2", max_retries=2
+    )
+    assert outcome.status == "failed"
+    assert row.attempts == 1
+    assert "session_conflict" in (row.error or "")
 
 
 def test_paper_advance_with_an_invalid_champion_payload_is_no_trade(
