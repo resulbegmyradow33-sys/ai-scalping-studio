@@ -200,6 +200,12 @@ Boundary: these are prediction metrics. A high accuracy is not a trading edge;
 the simulator with spread, commission and slippage plus a cost stress is still
 required before any profitability word is used.
 
+The Phase 5 integration lives in `backend/tests/test_ml_nn_comparison.py`: a
+logistic model, the `ret_5` rule and a tiny MLP are trained on the same split
+boundaries and scored with `compare_predictors` on the exact test timestamps the
+network saw. Probabilistic predictors report log loss and Brier; the rule is
+label-only. The comparison is descriptive — still not a trading claim.
+
 ## 8. CLI
 
 ```bash

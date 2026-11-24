@@ -183,6 +183,45 @@ A source reference must point at a section of a document whose status is
 `indexed`. A citation to a failed or unsupported document, an unknown document
 or a missing section is rejected before the transaction.
 
+## Hypothesis drafts from prose
+
+`scalping.knowledge.extract_hypotheses(index, doc_id)` proposes hypotheses from
+one indexed document with deterministic sentence patterns — no LLM, no network,
+no `eval`/`exec`:
+
+| Pattern | Example |
+|---|---|
+| conditional | `When volatility expands, momentum signals become less reliable.` |
+| causal | `A signed order-flow imbalance predicts short-term continuation.` |
+| graded | `The more the spread widens, the lower the edge.` |
+
+Every draft:
+
+- starts in `proposed`; the extractor has no way to move it to `testing`;
+- stores the exact sentence as the `quote` of a `SourceRef` (document + section
+  ordinal), so the citation resolves against the index;
+- keeps the condition and expected effect separate, plus a fixed falsification
+  template;
+- uses `market_scope`/`timeframe_scope` `unspecified` unless the caller says
+  otherwise — the extractor does not infer them.
+
+Sentences without a market term are ignored, so generic prose ("If you are new,
+read the manual") does not become research. Re-running the extractor skips
+`(statement, section)` pairs already stored; it never duplicates the queue.
+
+Boundary: a draft is prose, not evidence. It cannot trade, cannot enter the DSL
+compiler, and cannot become `testing` without a human. Only a quantitative
+experiment can support or reject it.
+
+```python
+from scalping.knowledge import KnowledgeIndex, extract_hypotheses
+
+with KnowledgeIndex("runs/knowledge.sqlite3") as index:
+    result = extract_hypotheses(index, doc_id, max_hypotheses=20)
+    result.created   # Hypothesis records, status="proposed"
+    result.skipped   # duplicates already stored
+```
+
 ## Boundaries
 
 - **Document text is never a trusted strategy or an order.** Nothing in this
@@ -232,5 +271,6 @@ uv run mypy src
   dropped); exact layout is not preserved.
 - The index stores the extracted text, not the source bytes; the preserved
   original remains the authority.
-- No claim classification, no automatic hypothesis generation, no strategy
-  routing and no feedback ingestion of backtest/paper logs in this slice.
+- Hypothesis drafts are pattern-based; there is no semantic claim
+  classification, no strategy routing and no feedback ingestion of
+  backtest/paper logs in this slice.
