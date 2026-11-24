@@ -503,9 +503,11 @@ result document. Stored results look like:
 `JobContext` gives the handler a read-only `JobStoreReader` (jobs, events and
 state can be read, an audit line can be appended), the job and the current
 control snapshot, plus two deliberate side effects: `log(event, detail)` to
-explain a decision, and `cancel(reason)` for cooperative cancellation. It
-cannot enqueue or claim jobs; planning stays in the orchestrator, which keeps
-the loop the only writer of job state.
+explain a decision, and `cancel(reason)` for cooperative cancellation of its own
+job. It cannot enqueue, claim or cancel another job; planning stays in the
+orchestrator, which keeps the loop the only writer of job state. The facade is
+accidental-misuse protection, not a sandbox: the private delegate is reachable
+through introspection by in-process code.
 
 Example:
 
@@ -683,24 +685,28 @@ back to `started_at` for a session with no closed trade. Activity order keeps a
 long-running session that keeps closing trades from being starved by newer,
 quiet sessions.
 
-A scan reads at most `max_sessions` (default 1000) sessions, starting at a
-persisted rotation offset. When the ledger holds more, the next scan resumes at
-the offset where this one stopped and wraps, so every session is polled even if
-a single scan cannot reach all of them. Sessions not reached are recorded with
-`reason: truncated` (up to 25 individual `paper.outcome_not_queued` lines) and
-one `paper.outcome_truncated` summary event carrying `deferred`, `scanned`,
-`total` and `resume_offset`. They are delayed, never silently dropped.
+A scan reads at most `max_sessions` (default 1000, maximum 10 000) sessions,
+starting at a persisted rotation offset. When the ledger holds more, the next
+scan resumes at the offset where this one stopped and wraps, so every session is
+polled even if a single scan cannot reach all of them. Sessions not reached are
+recorded with `reason: truncated` (up to 25 individual `paper.outcome_not_queued`
+lines) and one `paper.outcome_truncated` summary event carrying `deferred`,
+`scanned`, `total` and `resume_offset`. A session whose trigger already exists is
+not logged as truncated: outside this scan's window is not an actionable refusal.
+They are delayed, never silently dropped.
 
 Two bounds keep a first scan over a long ledger cheap:
 
-| Option | Default | Effect |
-|---|---|---|
-| `since` | `None` | Only sessions with `started_at >= since` are in the window. Accepts an aware `datetime` or an ISO-8601 string. |
-| `max_proposals` | `100` | At most this many triggers per scan, so a historical ledger cannot propose an unbounded research backlog at once. The rotation cursor resumes at the first unprocessed session. |
+| Option | Default | Limit | Effect |
+|---|---|---|---|
+| `since` | `None` | — | Only sessions with `started_at >= since` are in the window. Accepts a timezone-aware `datetime` or an ISO-8601 string with an offset; a naive timestamp is rejected. |
+| `max_proposals` | `100` | `1000` | At most this many triggers per scan, so a historical ledger cannot propose an unbounded research backlog at once. The rotation cursor resumes at the first unprocessed session. |
 
 `since` is a session-start bound, not a trade-time bound: a session that started
 before the bound is out of scope entirely, and it emits no per-session refusal
-line (the window is a deliberate configuration, not a data problem).
+line (the window is a deliberate configuration, not a data problem). A session
+whose trigger was already emitted before `since` was set stays acknowledged; the
+window trims the read, it does not retroactively cancel proposals.
 
 #### Eligibility and refusal reasons
 
@@ -737,25 +743,30 @@ The cursor is one JSON document in the job store's `state` table under
 `trigger.paper.outcomes:<absolute ledger path>`:
 
 ```json
-{"version": 2, "fingerprints": {"<sha256>": "<session_id>"},
- "not_queued": {"<session_id>": "<reason>"}, "offset": 0}
+{"version": 3, "fingerprints": {"<sha256>": "<session_id>"},
+ "not_queued": {"<session_id>": "<reason>"},
+ "pending_ack": {"<sha256>": "<session_id>"}, "offset": 0}
 ```
 
 `scan()` computes it and `seen()` persists it, matching the file-trigger
 protocol. `seen(triggers)` records only the fingerprints the caller actually
-acknowledged: acknowledging a subset leaves the rest pending, so the next scan
-re-emits them. `scan_once` acknowledges every trigger it enqueued, so the
-converged case stores them all. A crash between enqueue and `seen` re-emits the
-same trigger on the next scan; the job `dedupe_key` makes that a duplicate
-instead of a second job. Deduplication therefore has two independent layers:
-the durable fingerprint set and the store key. Any newly closed trade changes
-the fingerprint and emits one new trigger.
+acknowledged. Acknowledging a subset moves the rest into `pending_ack`, and the
+next scan re-emits them before it resumes the rotation — they do not wait for the
+offset to wrap. A late acknowledgement of an older trigger promotes its
+fingerprint from `pending_ack` to the durable set. `scan_once` acknowledges every
+trigger it enqueued, so the converged case stores them all. A crash between
+enqueue and `seen` re-emits the same trigger on the next scan; the job
+`dedupe_key` makes that a duplicate instead of a second job. Deduplication
+therefore has two independent layers: the durable fingerprint set and the store
+key. Any newly closed trade changes the fingerprint and emits one new trigger.
 
 The source emits with `max_retries=1`, so one transient handler failure is
-retried instead of consuming the only trigger for a matured batch. Once both
-attempts fail the job is terminal and the fingerprint stays acknowledged; an
-operator requeue is then the explicit recovery, and the cursor is not silently
-rewound to re-propose the same work.
+retried instead of consuming the only trigger for a matured batch. Each attempt
+logs its own `paper.outcome_received` line, so a retried job has two: the audit
+log records attempts, not logical triggers. Once both attempts fail the job is
+terminal and the fingerprint stays acknowledged; an operator requeue is then the
+explicit recovery, and the cursor is not silently rewound to re-propose the same
+work.
 
 #### Proposal only, no auto-training
 
@@ -773,8 +784,13 @@ It imports no discovery, training, simulator or champion module, reads no bars,
 features or holdout split, and cannot enqueue: a handler receives
 `JobContext.store` as a `JobStoreReader`, a read-only facade over the queue. It
 can read jobs, events and state and append an audit line, but `enqueue`,
-`claim_next`, `retry`, `defer` and `set_state` are not on it. The raw store stays
-private to `Orchestrator`.
+`claim_next`, `retry`, `defer`, `cancel` and `set_state` are not on it.
+`JobContext.cancel()` is scoped to the handler's own job through a private
+callable, so the reader cannot cancel another job. The facade is
+accidental-misuse protection, not a security boundary: the delegate lives in a
+private slot and in-process code can still reach it through introspection. It
+stops a handler from growing or rewriting the queue by mistake, which is the
+contract the docs promise.
 `should_queue(payload) -> bool` is the explicit policy hook. Returning `True`
 proposes the next research cycle; it still does not start it. Without a callback
 the proposal is `queue_discovery` with `executed: false`, which is a recorded
@@ -793,6 +809,10 @@ recommendation, not work.
   between scans can shift the offset, so a session may be visited twice (the
   fingerprint makes that a no-op) or skipped until the next wrap. It cannot
   disappear permanently.
+- **Unacknowledged triggers are the caller's debt.** `pending_ack` is retried at
+  the start of every scan until acknowledged; a caller that scans but never
+  calls `seen()` keeps re-reading them, which is a protocol violation, not a
+  safe steady state.
 - **No backfill.** A session without a dataset id stays refused; the trigger
   does not modify the ledger to manufacture attribution.
 - **The sets are unbounded.** Fingerprints and quiet refusal reasons accumulate;
@@ -851,13 +871,14 @@ missing ledger are no-ops; the handler returns a proposal and creates no second
 job; the policy callback can decline; and one more closed trade changes the
 fingerprint. They also cover the review fixes: activity order keeps a busy old
 session ahead of a newer quiet one; the rotation cursor visits every session
-beyond `max_sessions` and each deferred session is recorded with `truncated`; a
-partial acknowledgement re-emits only the unacknowledged trigger; a transient
+beyond `max_sessions` and each deferred session is recorded with `truncated`,
+without a stale note for a session whose trigger already exists; a partial
+acknowledgement is re-emitted at the start of the very next scan; a transient
 handler failure is retried before the batch is burned; `source`/`synthetic`
 provenance is forwarded and absent provenance stays `null`; the handler store is
-a read-only facade with no `enqueue`; an injected `kind` is rejected; and
-`since` plus `max_proposals` keep a large historical ledger from emitting an
-unbounded backlog.
+a read-only facade with no `enqueue` or cross-job `cancel`; an injected `kind`
+and an out-of-range scan bound are rejected; and `since` plus `max_proposals`
+keep a large historical ledger from emitting an unbounded backlog.
 
 The daemon tests cover: config bounds and profile/type selection; tick scans
 before it drains; trigger dedupe across ticks; pause and safe mode still scan and

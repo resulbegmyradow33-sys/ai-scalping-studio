@@ -26,6 +26,7 @@ import pytest
 from scalping.orchestrator import (
     HandlerResult,
     JobStore,
+    JobStoreReader,
     Orchestrator,
     RetryPolicy,
     ScanOutcome,
@@ -36,6 +37,8 @@ from scalping.orchestrator.paper_triggers import (
     EVENT_RECEIVED,
     EVENT_TRUNCATED,
     KIND_PAPER_OUTCOMES,
+    MAX_SCAN_PROPOSALS_LIMIT,
+    MAX_SCAN_SESSIONS_LIMIT,
     PAPER_OUTCOME_FIELDS,
     REASON_EMPTY_BATCH,
     REASON_NO_DATASET_ID,
@@ -126,6 +129,14 @@ def not_queued_events(store: JobStore) -> list[dict[str, object]]:
         for event in store.events()
         if event.event == EVENT_NOT_QUEUED
     ]
+
+
+def cursor_document(store: JobStore, source: PaperOutcomeTriggerSource) -> dict[str, object]:
+    raw = store.get_state(source.cursor_key)
+    assert raw is not None
+    document = json.loads(raw)
+    assert isinstance(document, dict)
+    return document
 
 
 def trigger_jobs(store: JobStore) -> list:
@@ -511,6 +522,70 @@ def test_deferred_sessions_are_recorded_not_dropped(tmp_path: Path) -> None:
     store.close()
 
 
+def test_a_proposed_session_is_never_recorded_as_truncated(tmp_path: Path) -> None:
+    """Deferred means "not read yet", not "refused"; a queued session is neither.
+
+    A later scan may leave an already-proposed session outside its window. That
+    must not write a stale `truncated` refusal, and visiting it again must clear
+    any note left by an older cursor.
+    """
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        for index, name in enumerate(("s1", "s2", "s3")):
+            seed_session(ledger, name, exit_offset=timedelta(minutes=5 + index))
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store)
+    source = PaperOutcomeTriggerSource(ledger_path, store=store, max_sessions=1)
+
+    queued: set[str] = set()
+    for _ in range(3):
+        outcome = scan_once(orchestrator, [source])
+        assert len(outcome.queued) == 1
+        queued.add(str(outcome.queued[0].payload["session_id"]))
+    assert queued == {"s1", "s2", "s3"}
+
+    # All three triggers exist, so no session is a refusal any more.
+    marker = store.events()[-1].id
+    scan_once(orchestrator, [source])
+    assert cursor_document(store, source)["not_queued"] == {}
+    # The historical lines stay; no new false refusal is written.
+    new_events = store.events(since_id=marker)
+    assert not [event for event in new_events if event.event == EVENT_NOT_QUEUED]
+    store.close()
+
+
+def test_unacknowledged_trigger_is_reemitted_at_the_start_of_the_next_scan(
+    tmp_path: Path,
+) -> None:
+    """A partial ack must not wait for the rotation to wrap around."""
+    ledger_path = tmp_path / "paper.db"
+    with PaperLedger(ledger_path) as ledger:
+        for index, name in enumerate(("s1", "s2", "s3")):
+            seed_session(ledger, name, exit_offset=timedelta(minutes=5 + index))
+
+    store = JobStore(tmp_path / "jobs.db")
+    source = PaperOutcomeTriggerSource(ledger_path, store=store, max_sessions=1)
+
+    first = source.scan()
+    assert len(first) == 1
+    unacknowledged = first[0].payload["fingerprint"]
+    source.seen([])
+
+    document = cursor_document(store, source)
+    assert document["pending_ack"] == {unacknowledged: first[0].payload["session_id"]}
+    fingerprints = document["fingerprints"]
+    assert isinstance(fingerprints, dict)
+    assert unacknowledged not in fingerprints
+
+    # max_sessions=1 would otherwise point the rotation at a different session.
+    second = source.scan()
+    assert second[0].payload["fingerprint"] == unacknowledged
+    source.seen(second)
+    assert cursor_document(store, source)["pending_ack"] == {}
+    store.close()
+
+
 def test_partial_acknowledgement_reemits_only_the_unacked_trigger(tmp_path: Path) -> None:
     ledger_path = tmp_path / "paper.db"
     with PaperLedger(ledger_path) as ledger:
@@ -644,8 +719,11 @@ def test_handlers_get_a_read_only_store_facade(tmp_path: Path) -> None:
     observed: dict[str, object] = {}
 
     def inspect(job, context):  # type: ignore[no-untyped-def]
+        observed["reader"] = isinstance(context.store, JobStoreReader)
         observed["has_enqueue"] = hasattr(context.store, "enqueue")
         observed["has_set_state"] = hasattr(context.store, "set_state")
+        observed["has_cancel"] = hasattr(context.store, "cancel")
+        observed["has_private_cancel"] = hasattr(context.store, "_cancel")
         observed["row"] = context.store.get(job.id) is not None
         try:
             context.store.enqueue("x", dedupe_key="y")  # type: ignore[attr-defined]
@@ -659,8 +737,11 @@ def test_handlers_get_a_read_only_store_facade(tmp_path: Path) -> None:
     assert orchestrator.run_once().status == "succeeded"
 
     assert observed == {
+        "reader": True,
         "has_enqueue": False,
         "has_set_state": False,
+        "has_cancel": False,
+        "has_private_cancel": False,
         "row": True,
         "blocked": True,
     }
@@ -668,10 +749,47 @@ def test_handlers_get_a_read_only_store_facade(tmp_path: Path) -> None:
     store.close()
 
 
+def test_handler_cancel_is_scoped_to_its_own_job(tmp_path: Path) -> None:
+    """`context.cancel()` works for the running job and has no reader surface."""
+
+    def inspect(job, context):  # type: ignore[no-untyped-def]
+        # The reader cannot reach another job's row for a cancel.
+        assert not hasattr(context.store, "cancel")
+        assert not hasattr(context.store, "_cancel")
+        context.cancel("owner stopped this job")
+        return HandlerResult.success({"cancelled": True})
+
+    store = JobStore(tmp_path / "jobs.db")
+    orchestrator = Orchestrator(store, handlers={"inspect": inspect})
+    other, _ = store.enqueue("other", dedupe_key="other-1", payload={})
+    job, _ = store.enqueue("inspect", dedupe_key="inspect-2", payload={}, priority=1)
+
+    outcome = orchestrator.run_once()
+    assert outcome.status == "cancelled"
+    current = store.get(job.id)
+    assert current is not None and current.status == "cancelled"
+    untouched = store.get(other.id)
+    assert untouched is not None and untouched.status == "queued"
+    store.close()
+
+
 def test_kind_injection_is_rejected(tmp_path: Path) -> None:
     store = JobStore(tmp_path / "jobs.db")
     with pytest.raises(ValueError, match="no registered handler"):
         PaperOutcomeTriggerSource(tmp_path / "paper.db", store=store, kind="paper.other")
+    store.close()
+
+
+def test_scan_bounds_above_the_limit_are_rejected(tmp_path: Path) -> None:
+    store = JobStore(tmp_path / "jobs.db")
+    with pytest.raises(ValueError, match="max_sessions"):
+        PaperOutcomeTriggerSource(
+            tmp_path / "paper.db", store=store, max_sessions=MAX_SCAN_SESSIONS_LIMIT + 1
+        )
+    with pytest.raises(ValueError, match="max_proposals"):
+        PaperOutcomeTriggerSource(
+            tmp_path / "paper.db", store=store, max_proposals=MAX_SCAN_PROPOSALS_LIMIT + 1
+        )
     store.close()
 
 

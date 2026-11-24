@@ -217,6 +217,12 @@ class JobStoreReader:
     claim, retry, defer, cancel and every state write are absent and raise
     ``AttributeError`` if a handler tries them.
 
+    This is accidental-misuse protection, not a security boundary. Python cannot
+    hide the delegate completely: the store is held in a private slot and a
+    determined handler can still reach it through introspection. It stops normal
+    code from enqueuing or cancelling by mistake, which is what the context has
+    always promised; it is not a sandbox for hostile in-process code.
+
     ``append_event`` is deliberately exposed: a handler must be able to explain
     a decision in the audit log, and that write cannot create work.
     """
@@ -292,25 +298,25 @@ class JobStoreReader:
     ) -> Event:
         return self._store.append_event(event, job_id=job_id, detail=detail, now=now)
 
-    def _cancel(self, job_id: int, reason: str | None) -> Job:
-        """Internal hook for :meth:`JobContext.cancel`; not part of the surface."""
-        return self._store.cancel(job_id, reason)
-
 
 @dataclass(frozen=True, slots=True)
 class JobContext:
     """Everything a handler may look at, and the only side effects it needs.
 
     ``store`` is a :class:`JobStoreReader`: a handler can inspect jobs, events
-    and state, and append an audit line, but it cannot enqueue or claim. The
-    orchestrator records the result. ``cancel`` is cooperative — it flips the
-    row, and the orchestrator refuses to bank a result for a cancelled job.
+    and state, and append an audit line, but it cannot enqueue, claim or cancel
+    another job. The orchestrator records the result. ``cancel`` is cooperative
+    and scoped to this job: it flips the row, and the orchestrator refuses to
+    bank a result for a cancelled job.
     """
 
     store: JobStoreReader
     job: Job
     safe_mode: bool
     research_enabled: bool
+    #: The orchestrator's own cancel hook, limited to this handler's job id.
+    #: Kept off the reader so a handler cannot cancel a different job.
+    _cancel_job: Callable[[int, str | None], Job] = field(repr=False, compare=False)
 
     def log(self, event: str, detail: str | None = None) -> None:
         """Append an audit line for this job; use it to explain a real decision."""
@@ -318,7 +324,7 @@ class JobContext:
 
     def cancel(self, reason: str | None = None) -> Job:
         """Cancel the current job from inside its handler."""
-        return self.store._cancel(self.job.id, reason)
+        return self._cancel_job(self.job.id, reason)
 
     def cancelled(self) -> bool:
         """True when the row was cancelled after the handler started."""
@@ -686,6 +692,7 @@ class Orchestrator:
             job=job,
             safe_mode=self.safe_mode_enabled,
             research_enabled=not research_disabled,
+            _cancel_job=self.store.cancel,
         )
         permanent = False
         try:

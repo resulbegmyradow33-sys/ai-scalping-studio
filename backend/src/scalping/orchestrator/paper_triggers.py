@@ -72,6 +72,8 @@ __all__ = [
     "EVENT_RECEIVED",
     "EVENT_TRUNCATED",
     "KIND_PAPER_OUTCOMES",
+    "MAX_SCAN_PROPOSALS_LIMIT",
+    "MAX_SCAN_SESSIONS_LIMIT",
     "PAPER_OUTCOME_FIELDS",
     "PAPER_OUTCOME_REQUIRED_FIELDS",
     "REASON_EMPTY_BATCH",
@@ -134,9 +136,13 @@ PAPER_OUTCOME_FIELDS: Final[frozenset[str]] = PAPER_OUTCOME_REQUIRED_FIELDS | {
 #: Upper bound on sessions read per scan. A larger ledger is truncated, not
 #: read for minutes on the target machine. The rotation cursor visits the rest.
 MAX_SCAN_SESSIONS: Final[int] = 1_000
+#: Refuse a configuration above this: a scan is a synchronous call and a caller
+#: asking for more than this is misconfiguring the trigger, not optimizing it.
+MAX_SCAN_SESSIONS_LIMIT: Final[int] = 10_000
 #: Upper bound on triggers emitted per scan, so a first scan over a large
 #: historical ledger cannot propose an unbounded research backlog at once.
 MAX_SCAN_PROPOSALS: Final[int] = 100
+MAX_SCAN_PROPOSALS_LIMIT: Final[int] = 1_000
 #: How many deferred session ids get their own ``truncated`` audit line; the
 #: summary event always records the exact totals.
 TRUNCATION_NOTE_LIMIT: Final[int] = 25
@@ -144,7 +150,7 @@ TRUNCATION_NOTE_LIMIT: Final[int] = 25
 #: the only trigger for a matured batch.
 DEFAULT_MAX_RETRIES: Final[int] = 1
 _PAGE_SIZE: Final[int] = 200
-_CURSOR_VERSION: Final[int] = 2
+_CURSOR_VERSION: Final[int] = 3
 
 
 #: A policy hook, not an action. ``True`` means "propose discovery", not "run".
@@ -167,8 +173,12 @@ class _Cursor:
     #: Where the next scan resumes in the activity-ordered session list; keeps a
     #: ledger larger than ``max_sessions`` fully covered across scans.
     offset: int = 0
+    #: Fingerprints emitted but not acknowledged yet (fingerprint -> session id).
+    #: Persisted and retried at the start of the next scan, so a partial
+    #: acknowledgement does not wait for the rotation to wrap.
+    pending_ack: dict[str, str] = field(default_factory=dict)
     #: Fingerprints emitted by the scan that has not been acknowledged yet. Not
-    #: persisted: ``seen`` keeps only the ones a caller actually acknowledged.
+    #: persisted beyond ``pending_ack``: ``seen`` decides which survive.
     new_fingerprints: set[str] = field(default_factory=set)
 
 
@@ -220,10 +230,14 @@ class PaperOutcomeTriggerSource:
             raise TypeError("max_sessions must be an int")
         if max_sessions < 1:
             raise ValueError("max_sessions must be >= 1")
+        if max_sessions > MAX_SCAN_SESSIONS_LIMIT:
+            raise ValueError(f"max_sessions must be <= {MAX_SCAN_SESSIONS_LIMIT}")
         if isinstance(max_proposals, bool) or not isinstance(max_proposals, int):
             raise TypeError("max_proposals must be an int")
         if max_proposals < 1:
             raise ValueError("max_proposals must be >= 1")
+        if max_proposals > MAX_SCAN_PROPOSALS_LIMIT:
+            raise ValueError(f"max_proposals must be <= {MAX_SCAN_PROPOSALS_LIMIT}")
         if isinstance(max_retries, bool) or not isinstance(max_retries, int):
             raise TypeError("max_retries must be an int")
         if max_retries < 0:
@@ -266,6 +280,14 @@ class PaperOutcomeTriggerSource:
             total = self._session_count(ledger)
             if total < 1:
                 return triggers
+            # Unacknowledged triggers go first: a partial acknowledgement must
+            # not wait for the rotation to wrap. Bounded by max_proposals, and
+            # it does not consume the rotation budget.
+            for fingerprint in list(cursor.pending_ack):
+                if len(triggers) >= self.max_proposals:
+                    break
+                session_id = cursor.pending_ack.pop(fingerprint)
+                self._process(ledger, session_id, cursor, triggers)
             start = cursor.offset % total
             visited = 0
             for session_id in self._sessions(ledger, total, start, self.max_sessions):
@@ -283,26 +305,38 @@ class PaperOutcomeTriggerSource:
         """Persist the fingerprints the caller acknowledged, not the whole scan.
 
         ``scan_once`` passes every trigger it enqueued. A caller that
-        acknowledges only a subset keeps the rest unacknowledged, so the next
-        scan emits them again; the job ``dedupe_key`` still prevents a second
-        job for one that was in fact enqueued. Refusal reasons carry no work and
-        are persisted wholesale.
+        acknowledges only a subset leaves the rest in the cursor's
+        ``pending_ack`` set, and the next scan re-emits them before it resumes
+        the rotation. They do not wait for the offset to wrap. The job
+        ``dedupe_key`` still prevents a second job for a trigger that was in
+        fact enqueued. Refusal reasons carry no work and are persisted whole.
         """
         pending = self._pending
         if pending is None:
             return
-        acknowledged = {
-            fingerprint
-            for trigger in triggers
-            if isinstance((fingerprint := _fingerprint_of(trigger)), str)
-        }
+        acknowledged = set()
+        for trigger in triggers:
+            fingerprint = _fingerprint_of(trigger)
+            if isinstance(fingerprint, str):
+                acknowledged.add(fingerprint)
+        # A late acknowledgement (a trigger kept from an earlier scan) still
+        # promotes its fingerprint from pending to durable.
+        for fingerprint in acknowledged:
+            session_id = pending.pending_ack.pop(fingerprint, None)
+            if session_id is not None:
+                pending.fingerprints[fingerprint] = session_id
         for fingerprint in list(pending.new_fingerprints):
-            if fingerprint not in acknowledged:
-                pending.fingerprints.pop(fingerprint, None)
+            if fingerprint in acknowledged:
+                pending.pending_ack.pop(fingerprint, None)
+                continue
+            session_id = pending.fingerprints.pop(fingerprint, None)
+            if session_id is not None:
+                pending.pending_ack[fingerprint] = session_id
         document = {
             "version": _CURSOR_VERSION,
             "fingerprints": dict(sorted(pending.fingerprints.items())),
             "not_queued": dict(sorted(pending.not_queued.items())),
+            "pending_ack": dict(sorted(pending.pending_ack.items())),
             "offset": pending.offset,
         }
         self.store.set_state(
@@ -353,7 +387,12 @@ class PaperOutcomeTriggerSource:
             return
 
         fingerprint = self._fingerprint(batch, session_id, cursor)
-        if fingerprint is None or fingerprint in cursor.fingerprints:
+        if fingerprint is None:
+            return
+        if fingerprint in cursor.fingerprints:
+            # Already proposed: any `truncated` note from an earlier scan is
+            # stale, not a refusal, and must not survive as one.
+            cursor.not_queued.pop(session_id, None)
             return
 
         payload = {
@@ -467,9 +506,14 @@ class PaperOutcomeTriggerSource:
             f"{deferred} session(s) deferred this scan; the rotation cursor resumes"
             f" at offset {cursor.offset}"
         )
+        proposed = set(cursor.fingerprints.values())
         for session_id in self._page_ids(
             ledger, min(deferred, TRUNCATION_NOTE_LIMIT), cursor.offset
         ):
+            if session_id in proposed:
+                # Its trigger already exists; being outside this scan's window
+                # is not an actionable refusal and must not be logged as one.
+                continue
             self._note(cursor, session_id, REASON_TRUNCATED, detail)
         self.store.append_event(
             EVENT_TRUNCATED,
@@ -511,11 +555,13 @@ class PaperOutcomeTriggerSource:
             return _Cursor()
         fingerprints = parsed.get("fingerprints")
         not_queued = parsed.get("not_queued")
+        pending_ack = parsed.get("pending_ack")
         offset = parsed.get("offset")
         return _Cursor(
             fingerprints=_text_map(fingerprints),
             not_queued=_text_map(not_queued),
             offset=0 if isinstance(offset, bool) or not isinstance(offset, int) else max(offset, 0),
+            pending_ack=_text_map(pending_ack),
         )
 
 
