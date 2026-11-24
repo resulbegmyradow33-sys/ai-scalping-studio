@@ -19,6 +19,7 @@ from anyio import ClosedResourceError
 from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 
 from scalping import __version__
+from scalping.api.errors import public_error_text
 from scalping.api.runner import (
     TIMEFRAME,
     RunnerError,
@@ -49,6 +50,7 @@ from scalping.api.schemas import (
     TimeframeSpec,
     TrainRequest,
     TrainResponse,
+    TrainRunId,
     is_symbol_id,
 )
 from scalping.api.train_runner import (
@@ -265,8 +267,8 @@ def _import_file(name: str, data_root: Path) -> Path:
     raise HTTPException(
         status_code=422,
         detail=(
-            f"no csv file named {name!r} in {imports_dir}; "
-            f"place the export there and pass its bare file name"
+            f"no csv file named {name!r} in the imports directory; "
+            f"place the export in <data_root>/imports and pass its bare file name"
         ),
     )
 
@@ -306,7 +308,13 @@ def download(body: DownloadRequest, request: Request) -> DownloadResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OSError as exc:
-        raise HTTPException(status_code=400, detail=f"cannot read data source: {exc}") from exc
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "cannot read data source: "
+                f"{public_error_text(exc, root=Path(request.app.state.data_root))}"
+            ),
+        ) from exc
     finally:
         if provider is not None:
             close = getattr(provider, "close", None)
@@ -372,7 +380,7 @@ def list_runs(request: Request) -> list[RunSummary]:
     # the run has no history or no bandit; the panel treats absence as empty.
     response_model_exclude_unset=True,
 )
-def run_detail(run_id: str, request: Request) -> RunDetail:
+def run_detail(run_id: TrainRunId, request: Request) -> RunDetail:
     try:
         detail = _trains(request).detail(run_id)
     except UnknownRunError as exc:
@@ -381,7 +389,7 @@ def run_detail(run_id: str, request: Request) -> RunDetail:
 
 
 @router.post("/api/runs/{run_id}/control", response_model=OkResponse)
-def run_control(run_id: str, body: RunControlRequest, request: Request) -> OkResponse:
+def run_control(run_id: TrainRunId, body: RunControlRequest, request: Request) -> OkResponse:
     """Map pause/resume/stop onto the run's events.
 
     404 means this process never started the run; 409 means it is known but the
