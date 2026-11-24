@@ -20,6 +20,7 @@ __all__ = [
     "ML_RUN_ID_PATTERN",
     "PAPER_SESSION_PATTERN",
     "SYMBOL_PATTERN",
+    "TRAIN_RUN_ID_PATTERN",
     "AutonomyChampion",
     "AutonomyChampionList",
     "AutonomyDataStatus",
@@ -86,6 +87,7 @@ __all__ = [
     "TimeframeSpec",
     "TrainRequest",
     "TrainResponse",
+    "TrainRunId",
     "TrainingPoint",
     "is_ml_run_id",
     "is_symbol_id",
@@ -167,6 +169,24 @@ MLRunId = Annotated[
 
 #: Bar sizes an ML run may be trained on; mirrors ``data/registry.py``.
 MLTimeframe = Literal["M1", "M5", "M15", "M30", "H1", "H4", "D1"]
+
+
+#: A training run id becomes a directory name under ``runs_root``. The runner
+#: already refuses separators and dot-only values; the HTTP boundary applies the
+#: same rule plus a length bound, so an absurd id is a 422 from request parsing
+#: instead of an ``OSError`` (``ENAMETOOLONG``) raised while probing the disk.
+#: The generated ids are 12 hex characters; the wider class keeps hand-written
+#: run directories (``odd``, ``dead``) addressable.
+TRAIN_RUN_ID_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._-]*$"
+
+TrainRunId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=128,
+        pattern=TRAIN_RUN_ID_PATTERN,
+    ),
+]
 
 
 def is_ml_run_id(value: str) -> bool:
@@ -368,7 +388,7 @@ class RunControlRequest(BaseModel):
 
 
 class BacktestRequest(BaseModel):
-    run_id: str = Field(min_length=1)
+    run_id: TrainRunId
     symbol: SymbolId
 
 
@@ -378,7 +398,7 @@ class BacktestResponse(BaseModel):
 
 
 class EvaluateRequest(BaseModel):
-    run_id: str = Field(min_length=1)
+    run_id: TrainRunId
     symbol: SymbolId
     folds: int = Field(default=3, ge=1, le=12)
 

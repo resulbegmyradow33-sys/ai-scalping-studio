@@ -1,4 +1,7 @@
 import type {
+  AutonomyEventPage,
+  AutonomyJobPage,
+  AutonomyStatus,
   CalibrateRequest,
   CalibrateResponse,
   DataStatus,
@@ -284,6 +287,22 @@ export const api = {
       paperPagePath(`${paperSessionBase(sessionId)}/equity`, limit, offset),
     );
   },
+
+  // --- autonomy status -------------------------------------------------------
+  // Read-only views over the paper ledger, orchestrator queue and discovery
+  // archive. No method here enqueues, cancels, pauses or promotes anything.
+
+  autonomyStatus(): Promise<AutonomyStatus> {
+    return request<AutonomyStatus>("/api/autonomy/status");
+  },
+
+  autonomyJobs(limit = 50): Promise<AutonomyJobPage> {
+    return request<AutonomyJobPage>(autonomyWindowPath("/api/autonomy/jobs", limit));
+  },
+
+  autonomyEvents(limit = 100): Promise<AutonomyEventPage> {
+    return request<AutonomyEventPage>(autonomyWindowPath("/api/autonomy/events", limit));
+  },
 };
 
 /** Session ids are opaque tokens; encoding keeps them a single path segment. */
@@ -294,6 +313,11 @@ function paperSessionBase(sessionId: string): string {
 function paperPagePath(base: string, limit: number, offset: number): string {
   const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
   return `${base}?${params.toString()}`;
+}
+
+/** Jobs/events take only `limit`; the API never exposes an older offset. */
+function autonomyWindowPath(base: string, limit: number): string {
+  return `${base}?${new URLSearchParams({ limit: String(limit) }).toString()}`;
 }
 
 /**

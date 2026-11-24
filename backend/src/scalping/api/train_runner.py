@@ -36,6 +36,7 @@ from typing import Any, Final
 import numpy as np
 import polars as pl
 
+from scalping.api.errors import public_error_text
 from scalping.api.runner import MIN_BARS as SIM_MIN_BARS
 from scalping.api.runner import TIMEFRAME
 from scalping.backtest.engine import run_backtest
@@ -610,7 +611,13 @@ class TrainRunner:
 
     def _run_dir(self, run_id: str) -> Path:
         """Resolve one run id, refusing anything that is not a single component."""
-        if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id:
+        if (
+            not run_id
+            or len(run_id) > 128
+            or run_id in {".", ".."}
+            or "/" in run_id
+            or "\\" in run_id
+        ):
             raise UnknownRunError(run_id)
         return self.runs_root / run_id
 
@@ -627,7 +634,9 @@ class TrainRunner:
         try:
             return LinUCB.load(path)
         except (OSError, TypeError, ValueError, KeyError) as exc:
-            raise TrainError(f"cannot load {BANDIT_NAME}: {exc}") from exc
+            raise TrainError(
+                f"cannot load {BANDIT_NAME}: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
     def _settings_from_config(self, config: dict[str, Any]) -> Settings:
         """Rebuild the run's settings, falling back to the app's when absent."""
@@ -688,7 +697,9 @@ class TrainRunner:
         try:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
-            raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
+            raise TrainError(
+                f"run {run_id} cannot be loaded: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         width = int(features.X.shape[1])
         declared = policy.config.get("n_features")
@@ -781,7 +792,9 @@ class TrainRunner:
         try:
             policy = load_policy(run_dir)
         except (OSError, TypeError, ValueError) as exc:
-            raise TrainError(f"run {run_id} cannot be loaded: {exc}") from exc
+            raise TrainError(
+                f"run {run_id} cannot be loaded: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
         selector = self._load_selector(run_dir, config)
         raw_params = config.get("params")
         params: dict[str, Any] = raw_params if isinstance(raw_params, dict) else {}
@@ -855,7 +868,9 @@ class TrainRunner:
                 window=window,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
-            raise TrainError(f"run {run_id} cannot be evaluated: {exc}") from exc
+            raise TrainError(
+                f"run {run_id} cannot be evaluated: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         if report is None:
             if holdout is None:  # pragma: no cover - impossible: set with method

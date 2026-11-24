@@ -52,7 +52,7 @@ const STATUS_CLASS: Record<string, string> = {
   cancelling: "border-amber-500/50 bg-amber-500/10 text-amber-300",
   cancelled: "border-slate-700 text-slate-300",
   completed: "border-profit/50 bg-profit/10 text-profit",
-  failed: "border-loss/50 bg-loss/10 text-loss",
+  failed: "border-loss/50 bg-loss/10 text-rose-300",
 };
 
 const SPLIT_LABEL: Record<MLSplit, string> = {
@@ -65,7 +65,7 @@ const FIELD_CLASS =
   "rounded-sm border border-slate-700 bg-slate-950/60 px-2 py-1.5 text-sm text-slate-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent aria-[invalid=true]:border-rose-500/70";
 
 const LABEL_CLASS = "text-xs text-slate-400";
-const HINT_CLASS = "text-xs text-slate-500";
+const HINT_CLASS = "text-xs text-slate-400";
 const ERROR_CLASS = "text-xs text-rose-300";
 
 const BUTTON_BASE =
@@ -658,7 +658,7 @@ export default function MLLabPage() {
           <h2 id="ml-train-heading" className="text-sm font-semibold text-slate-100">
             Yeni koşu
           </h2>
-          <span className="text-xs text-slate-500">
+          <span className="text-xs text-slate-400">
             {registriesLoading ? "Listeler yükleniyor…" : "Sunucu listeleri yüklendi"}
           </span>
         </div>
@@ -937,6 +937,7 @@ export default function MLLabPage() {
               type="checkbox"
               checked={values.includeFlat}
               disabled={starting}
+              aria-describedby="ml-include-flat-hint"
               onChange={(event) => handleChange("includeFlat", event.target.checked)}
               className="mt-0.5 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             />
@@ -944,7 +945,7 @@ export default function MLLabPage() {
               <label htmlFor="ml-include-flat" className="text-xs text-slate-300">
                 Düz (sıfır getiri) satırları dahil et
               </label>
-              <p className={HINT_CLASS}>
+              <p id="ml-include-flat-hint" className={HINT_CLASS}>
                 Varsayılan olarak düz satırlar etiketlenmez; sayıları bölünme
                 tablosunda ayrı görünür.
               </p>
@@ -992,7 +993,7 @@ export default function MLLabPage() {
             </span>
           )}
           {!starting && (
-            <span className="text-xs text-slate-500">
+            <span className="text-xs text-slate-400">
               Bir koşu süresince ikinci bir iş 409 döner; istek kuyruğa alınmaz.
             </span>
           )}
@@ -1033,7 +1034,7 @@ export default function MLLabPage() {
                 {runId}
               </span>
               {run !== null && <MLStatusChip status={run.status} testId="ml-run-status" />}
-              {live && <span className="text-xs text-slate-500">2 sn’de bir sorgulanıyor</span>}
+              {live && <span className="text-xs text-slate-400">2 sn’de bir sorgulanıyor</span>}
             </div>
 
             <div className="flex flex-col items-end gap-1">
@@ -1046,7 +1047,7 @@ export default function MLLabPage() {
               >
                 İptal et
               </button>
-              <p id="ml-cancel-explanation" className="text-xs text-slate-500">
+              <p id="ml-cancel-explanation" className="text-xs text-slate-400">
                 {cancelExplanation}
               </p>
             </div>
@@ -1093,7 +1094,7 @@ export default function MLLabPage() {
               <p className="text-xs text-rose-200">
                 {run.error ?? "Sunucu bir hata metni döndürmedi."}
               </p>
-              <p className="text-xs text-slate-500">
+              <p className="text-xs text-slate-400">
                 Tek iş yuvası bu koşuyla serbest kaldı; yeni bir deneme
                 başlatılabilir.
               </p>
@@ -1137,7 +1138,7 @@ export default function MLLabPage() {
           <h2 id="ml-evaluate-heading" className="text-sm font-semibold text-slate-100">
             Alım satım değerlendirmesi
           </h2>
-          <span className="text-xs text-slate-500">Simülatör maliyetleri dahil</span>
+          <span className="text-xs text-slate-400">Simülatör maliyetleri dahil</span>
         </div>
         <p className="text-xs text-slate-400">
           Bitmiş bir koşunun artefaktı tek bir kronolojik bölünmede işlem yapar.
@@ -1153,6 +1154,7 @@ export default function MLLabPage() {
               id="ml-split"
               value={split}
               disabled={evaluating}
+              aria-describedby="ml-split-hint"
               onChange={(event) => setSplit(event.target.value as MLSplit)}
               className={FIELD_CLASS}
             >
@@ -1162,7 +1164,7 @@ export default function MLLabPage() {
                 </option>
               ))}
             </select>
-            <p className={HINT_CLASS}>
+            <p id="ml-split-hint" className={HINT_CLASS}>
               Test bölünmesi aday başına yalnızca bir kez okunmalı.
             </p>
           </div>
@@ -1194,7 +1196,12 @@ export default function MLLabPage() {
               tablosu olmaz. Ondalık için nokta kullanın.
             </p>
             {stressError !== null && (
-              <p id="ml-stress-error" data-testid="ml-stress-error" className={ERROR_CLASS}>
+              <p
+                id="ml-stress-error"
+                data-testid="ml-stress-error"
+                role="alert"
+                className={ERROR_CLASS}
+              >
                 {stressError}
               </p>
             )}
@@ -1206,6 +1213,7 @@ export default function MLLabPage() {
               type="checkbox"
               checked={regime}
               disabled={evaluating}
+              aria-describedby="ml-regime-hint"
               onChange={(event) => setRegime(event.target.checked)}
               className="mb-2 accent-accent focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
             />
@@ -1213,7 +1221,7 @@ export default function MLLabPage() {
               <label htmlFor="ml-regime" className="text-xs text-slate-300">
                 Rejim kırılımını hesapla
               </label>
-              <p className={HINT_CLASS}>Giriş barındaki kural etiketiyle eşlenir.</p>
+              <p id="ml-regime-hint" className={HINT_CLASS}>Giriş barındaki kural etiketiyle eşlenir.</p>
             </div>
           </div>
         </div>
@@ -1227,7 +1235,7 @@ export default function MLLabPage() {
           >
             Değerlendir
           </button>
-          <span id="ml-evaluate-explanation" className="text-xs text-slate-500">
+          <span id="ml-evaluate-explanation" className="text-xs text-slate-400">
             {evaluateExplanation ?? "Bölünme bir kez simülatörde çalıştırılır."}
           </span>
         </div>
@@ -1257,7 +1265,7 @@ export default function MLLabPage() {
             Listeyi yenile
           </button>
         </div>
-        <p id="ml-runs-refresh-note" className="text-xs text-slate-500">
+        <p id="ml-runs-refresh-note" className="text-xs text-slate-400">
           Liste `runs/ml/meta.json` dosyalarından gelir; boş liste gerçekten boş
           demektir.
         </p>
@@ -1350,23 +1358,23 @@ function RunResults({ detail }: { detail: MLRunDetail }) {
         className="grid grid-cols-1 gap-x-6 gap-y-1 text-xs sm:grid-cols-2"
       >
         <div className="flex gap-2">
-          <dt className="text-slate-500">Veri kümesi</dt>
+          <dt className="text-slate-400">Veri kümesi</dt>
           <dd className="truncate font-mono text-slate-300">{detail.dataset_id ?? "—"}</dd>
         </div>
         <div className="flex gap-2">
-          <dt className="text-slate-500">Sembol / zaman dilimi</dt>
+          <dt className="text-slate-400">Sembol / zaman dilimi</dt>
           <dd className="text-slate-300">
             {detail.symbol ?? "—"} / {detail.timeframe ?? "—"}
           </dd>
         </div>
         <div className="flex gap-2">
-          <dt className="text-slate-500">Özellik sütunu</dt>
+          <dt className="text-slate-400">Özellik sütunu</dt>
           <dd className="tabular-nums text-slate-300">
             {formatNumber(detail.columns.length, 0)}
           </dd>
         </div>
         <div className="flex gap-2">
-          <dt className="text-slate-500">Bitiş</dt>
+          <dt className="text-slate-400">Bitiş</dt>
           <dd className="text-slate-300">{formatTs(detail.finished_at)}</dd>
         </div>
       </dl>
@@ -1375,7 +1383,7 @@ function RunResults({ detail }: { detail: MLRunDetail }) {
         <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
           {specFacts.map((fact) => (
             <div key={fact.label} className="flex gap-1">
-              <dt className="text-slate-500">{fact.label}:</dt>
+              <dt className="text-slate-400">{fact.label}:</dt>
               <dd className="text-slate-300">{fact.value}</dd>
             </div>
           ))}
@@ -1411,7 +1419,7 @@ function RunResults({ detail }: { detail: MLRunDetail }) {
                 <th scope="row" className="px-3 py-1.5 font-normal text-slate-300">
                   {row.label}
                   {row.hint !== undefined && (
-                    <span className="ml-1 text-slate-500">({row.hint})</span>
+                    <span className="ml-1 text-slate-400">({row.hint})</span>
                   )}
                 </th>
                 <td
@@ -1433,7 +1441,7 @@ function RunResults({ detail }: { detail: MLRunDetail }) {
       </div>
 
       {detail.test === null && (
-        <p data-testid="ml-test-absent" className="text-xs text-slate-500">
+        <p data-testid="ml-test-absent" className="text-xs text-slate-400">
           Test bölünmesi okunmadı: koşu `evaluate_test` olmadan çalıştı. Test
           sütunu bu yüzden tire gösterir.
         </p>
@@ -1454,7 +1462,7 @@ function RunResults({ detail }: { detail: MLRunDetail }) {
         <dl className="flex flex-wrap gap-x-4 gap-y-1 text-xs">
           {splitCounts.map((item) => (
             <div key={item.key} className="flex gap-1">
-              <dt className="text-slate-500">{item.label}:</dt>
+              <dt className="text-slate-400">{item.label}:</dt>
               <dd
                 data-testid={`ml-count-${item.key}`}
                 className="tabular-nums text-slate-300"
@@ -1614,7 +1622,7 @@ function EvaluationResults({ result }: { result: MLEvaluateResponse }) {
           </table>
         </div>
       ) : (
-        <p data-testid="ml-stress-empty" className="text-xs text-slate-500">
+        <p data-testid="ml-stress-empty" className="text-xs text-slate-400">
           Maliyet stresi istenmedi; tablo yok.
         </p>
       )}
@@ -1694,7 +1702,7 @@ function EvaluationResults({ result }: { result: MLEvaluateResponse }) {
         </p>
       )}
 
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-slate-400">
         Rejim satırlarına girmeyen işlemler:{" "}
         <span data-testid="ml-regime-unmatched" className="tabular-nums text-slate-300">
           {formatNumber(result.regime.unmatched_trades, 0)}
@@ -1750,7 +1758,6 @@ function RunsTable({
             return (
               <tr
                 key={run.run_id}
-                aria-selected={selected}
                 className={`border-t border-slate-800/60 ${selected ? "bg-slate-800/40" : ""}`}
               >
                 <th scope="row" className="px-3 py-1.5 font-normal">

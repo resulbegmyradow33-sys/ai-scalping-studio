@@ -42,7 +42,7 @@ const STATUS_TONE: Record<string, string> = {
   running: "border-accent/50 bg-accent/10 text-accent",
   closed: "border-slate-700 bg-slate-800/40 text-slate-300",
   stopped: "border-slate-700 bg-slate-800/40 text-slate-300",
-  failed: "border-loss/50 bg-loss/10 text-loss",
+  failed: "border-loss/50 bg-loss/10 text-rose-300",
 };
 
 const BUTTON_BASE =
@@ -118,7 +118,7 @@ function Fact({
 }) {
   return (
     <div className="flex flex-wrap gap-x-2">
-      <dt className="text-slate-500">{label}</dt>
+      <dt className="text-slate-400">{label}</dt>
       <dd
         data-testid={testId}
         className={`tabular-nums text-slate-300 ${mono ? "break-all font-mono" : ""}`}
@@ -196,11 +196,11 @@ function LedgerTable({
       )}
 
       {page === null && error === null && (
-        <p className="text-xs text-slate-500">{loading ? "Yükleniyor…" : "Tablo okunamadı."}</p>
+        <p className="text-xs text-slate-400">{loading ? "Yükleniyor…" : "Tablo okunamadı."}</p>
       )}
 
       {page !== null && page.items.length === 0 && (
-        <p className="text-xs text-slate-500">{empty}</p>
+        <p className="text-xs text-slate-400">{empty}</p>
       )}
 
       {page !== null && onPage !== undefined && (
@@ -209,7 +209,9 @@ function LedgerTable({
           aria-label={`${caption} sayfalama`}
           className="flex flex-wrap items-center justify-end gap-2"
         >
-          <span className="text-xs tabular-nums text-slate-500">{pageRange(page)}</span>
+          <span aria-live="polite" className="text-xs tabular-nums text-slate-400">
+            {pageRange(page)}
+          </span>
           <button
             type="button"
             disabled={atStart}
@@ -276,6 +278,10 @@ export default function PaperPage() {
   const [closeNotice, setCloseNotice] = useState<string | null>(null);
 
   const confirmRef = useRef<HTMLButtonElement>(null);
+  const closeTriggerRef = useRef<HTMLButtonElement>(null);
+  const detailHeadingRef = useRef<HTMLHeadingElement>(null);
+  /** Where focus goes when the inline confirm step closes. */
+  const restoreFocusRef = useRef<"trigger" | "heading" | null>(null);
 
   const refreshSessions = useCallback(() => setSessionsToken((token) => token + 1), []);
   const refreshDetail = useCallback(() => setDetailToken((token) => token + 1), []);
@@ -386,8 +392,26 @@ export default function PaperPage() {
     if (summary !== null && summary.status !== "running") setConfirming(false);
   }, [summary]);
 
+  // The confirm step is inline, not a modal: move focus to the confirm button,
+  // then return it deliberately. Without this a keyboard user lands on <body>
+  // when the confirm group unmounts.
   useEffect(() => {
-    if (confirming) confirmRef.current?.focus();
+    if (confirming) {
+      confirmRef.current?.focus();
+      return;
+    }
+    const target = restoreFocusRef.current;
+    if (target === null) return;
+    restoreFocusRef.current = null;
+
+    if (target === "trigger") {
+      const trigger = closeTriggerRef.current;
+      if (trigger !== null && !trigger.disabled) {
+        trigger.focus();
+        return;
+      }
+    }
+    detailHeadingRef.current?.focus();
   }, [confirming]);
 
   const selectSession = (sessionId: string): void => {
@@ -426,6 +450,7 @@ export default function PaperPage() {
         setSummaryMissing(false);
         setSummaryError(null);
         setCloseNotice(`Oturum kapatıldı. Bitiş: ${formatTs(updated.ended_at)}`);
+        restoreFocusRef.current = "heading";
         setConfirming(false);
         refreshDetail();
         refreshSessions();
@@ -441,6 +466,7 @@ export default function PaperPage() {
         if (error instanceof ApiError && error.status === 409) {
           // The ledger already closed it; refreshing shows the settled record.
           setCloseNotice("Oturum zaten kapalı; ikinci kapatma uygulanmadı.");
+          restoreFocusRef.current = "heading";
           setConfirming(false);
           refreshDetail();
           refreshSessions();
@@ -526,7 +552,7 @@ export default function PaperPage() {
             Listeyi yenile
           </button>
         </div>
-        <p id="paper-sessions-note" className="text-xs text-slate-500">
+        <p id="paper-sessions-note" className="text-xs text-slate-400">
           Defter yoksa liste boştur; sayfa oturum açmaz. Seçili oturum çalışırken 5 sn’de bir
           yenilenir.
         </p>
@@ -543,7 +569,7 @@ export default function PaperPage() {
             yeni oturum açmaz.
           </p>
         ) : sessionsPage.items.length === 0 ? (
-          <p data-testid="paper-sessions-page-empty" role="status" className="text-xs text-slate-500">
+          <p data-testid="paper-sessions-page-empty" role="status" className="text-xs text-slate-400">
             İstenen sayfa boş; kayıt sayısı azalmış olabilir.{" "}
             <button
               type="button"
@@ -644,7 +670,12 @@ export default function PaperPage() {
         >
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-1">
-              <h2 id="paper-detail-heading" className="text-sm font-semibold text-slate-100">
+              <h2
+                id="paper-detail-heading"
+                ref={detailHeadingRef}
+                tabIndex={-1}
+                className="text-sm font-semibold text-slate-100"
+              >
                 Oturum ayrıntısı
               </h2>
               <p className="break-all font-mono text-sm text-slate-200">{selectedId}</p>
@@ -652,7 +683,7 @@ export default function PaperPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <PaperStatusChip status={summary.status} testId="paper-detail-status" />
                   {running && (
-                    <span className="text-xs text-slate-500">5 sn’de bir yenileniyor</span>
+                    <span className="text-xs text-slate-400">5 sn’de bir yenileniyor</span>
                   )}
                 </div>
               )}
@@ -681,7 +712,10 @@ export default function PaperPage() {
                     </button>
                     <button
                       type="button"
-                      onClick={() => setConfirming(false)}
+                      onClick={() => {
+                        restoreFocusRef.current = "trigger";
+                        setConfirming(false);
+                      }}
                       disabled={closing}
                       className={SECONDARY_BUTTON}
                     >
@@ -691,6 +725,7 @@ export default function PaperPage() {
                 </div>
               ) : (
                 <button
+                  ref={closeTriggerRef}
                   type="button"
                   data-testid="paper-close-button"
                   onClick={() => {
@@ -705,7 +740,7 @@ export default function PaperPage() {
                   Oturumu kapat
                 </button>
               )}
-              <p id="paper-close-explanation" className="text-right text-xs text-slate-500">
+              <p id="paper-close-explanation" className="text-right text-xs text-slate-400">
                 {closeExplanation}
               </p>
             </div>
@@ -850,7 +885,7 @@ export default function PaperPage() {
                     <Fact label="Kayıt kaynağı" value={origin ?? "—"} />
                   </dl>
                   {specHash === null && (
-                    <p className="mt-1 text-xs text-slate-500">
+                    <p className="mt-1 text-xs text-slate-400">
                       Bu oturumda DSL spec hash’i yok; atıf yalnızca strateji ve model sürümü
                       alanlarıyla sınırlı.
                     </p>
@@ -1055,7 +1090,7 @@ export default function PaperPage() {
                         </td>
                         <td
                           className={`px-3 py-1.5 text-right tabular-nums ${
-                            row.pnl < 0 ? "text-loss" : "text-slate-200"
+                            row.pnl < 0 ? "text-rose-300" : "text-slate-200"
                           }`}
                         >
                           {formatMoney(row.pnl)}
