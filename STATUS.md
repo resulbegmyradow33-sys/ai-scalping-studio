@@ -1,7 +1,7 @@
 # STATUS — autonomous system status
 
 Snapshot: **2026-11-24**, main at
-22cecdf5e2c6634b59433925b836bda6dea33199.
+e90121aa844e0665ac448e3f9986e87631bed56f.
 
 Canonical goal: docs/requirements/master-prompt.md.
 Current evidence and gaps: docs/autonomous-system-audit-2026-11-24.md.
@@ -25,13 +25,13 @@ the production connections and independent evidence gates remain incomplete.
 | Multi-symbol data | Partial | Registry/contract metadata exists; real feed coverage remains limited |
 | Causal features and datasets | Implemented foundation | 59 causal features, chronological splits, purge/embargo; MTF alignment, ablation and true order-book coverage remain |
 | Classical ML / compact DL | Implemented research tools | Baselines and shared evaluation exist; model prediction metrics are not strategy proof |
-| Transformer benchmark | Open PR | #105; optional, behind main, not core-path priority |
+| Transformer benchmark | Implemented research tool | #105 merged; forward benchmark/evaluator round-trip, not trading edge |
 | PPO / RL | Experimental | PPO/BC exists; #108 adds evaluation action masking; training is not MaskablePPO |
 | Legacy strategy family + LinUCB | Legacy research baseline | Five fixed arms; not autonomous open-ended discovery |
 | Legacy flow_momentum card | Active compatibility incumbent | Current panel path; historical forward sample is small and not proof of the new learner |
 | Safe strategy DSL/AST | Implemented | Typed bounded AST; no generated arbitrary Python |
 | Candidate discovery | Implemented, limited | #104 merged; evolutionary search + cost-aware simulator on one validation slice; no walk-forward/OOS |
-| Champion governance | In progress | #109 open; validation-only and no OOS/walk-forward in its stated limits |
+| Champion governance | Partial, merged foundation | #109 merged; adds champion history/provider/rollback, but validation-only, no OOS/walk-forward in its stated limits |
 | Knowledge ingestion | Partial | TXT/MD/HTML/DOCX; #106 source-linked regex hypothesis drafts; PDF/OCR absent |
 | Sentence classification | Open PR | #107; heuristic classification, not semantic understanding |
 | Orchestrator | Infrastructure only | Persistent queue/control/recovery; real handlers, scheduler and measured resource guard absent |
@@ -45,8 +45,9 @@ the production connections and independent evidence gates remain incomplete.
 - #106 merged: deterministic, source-linked hypothesis drafts.
 - #108 merged: risk gates included in action masks and backtest evaluation.
 - #107 open: sentence classification; rebase required.
-- #109 open: champion governance/rollback foundation; do not treat as production promotion until independent evidence is mandatory.
-- #105 open: transformer benchmark; non-blocking for autonomous completion.
+- #109 merged: champion governance/rollback foundation; its validation-only evidence remains insufficient for production promotion.
+- #105 merged: transformer benchmark; non-blocking for autonomous completion.
+- #107 remains open and still needs rebase onto current main.
 
 ## Immediate critical path
 
