@@ -32,6 +32,15 @@ comparison must honour; it is not a fitness function. A search that only breeds
 accepted candidates stalls after the first rejection wave, and the rejection
 reasons are already recorded per trial for the human and the gate to read.
 
+The run's ``best`` is narrower than survival. With an empty (default-off) gate,
+a candidate that never trades reports ``net_profit = 0`` and would outrank every
+trading candidate that lost money: a flat policy would "win" because it did
+nothing. ``min_best_trades`` therefore requires a candidate to publish at least
+that many closed trades before it can become ``best``. ``0`` disables the rule
+for compatibility tests and explicit flat-policy runs; it is not a
+recommendation. Survival ranking is unchanged, so budget and deduplication
+behave exactly as before.
+
 Stopping is explicit. ``budget`` means the attempt cap was reached, ``patience``
 means the configured generations without a new best ran out, ``stopped`` means
 the injected ``should_stop`` said so, and ``exhausted`` means either the
@@ -44,7 +53,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -91,6 +100,7 @@ class SearchConfig:
     novelty_requirement: int = 1
     selection_metric: str = "net_profit"
     minimize: bool = False
+    min_best_trades: int = 1
 
     def __post_init__(self) -> None:
         for name in ("dataset_id", "code_version", "selection_metric"):
@@ -141,6 +151,10 @@ class SearchConfig:
             raise ValueError("novelty_requirement must be >= 0")
         if not isinstance(self.minimize, bool):
             raise TypeError("minimize must be a bool")
+        if isinstance(self.min_best_trades, bool) or not isinstance(self.min_best_trades, int):
+            raise TypeError("min_best_trades must be an int")
+        if self.min_best_trades < 0:
+            raise ValueError("min_best_trades must be >= 0")
 
 
 @dataclass(frozen=True, slots=True)
@@ -161,6 +175,12 @@ class SearchResult:
     (``invalid``, ``complexity``, ``duplicate``). A rerun on a saturated archive
     reports its duplicates there, so a caller can say "deduped" with a number
     instead of inferring it from a zero trial count.
+
+    ``tradable`` counts accepted trials whose metrics report at least
+    ``min_best_trades`` closed trades. It is the pool ``best`` was chosen from:
+    when it is zero and accepted trials exist, the run found only flat policies
+    and the decision layer can say "no tradable candidate" instead of pretending
+    the flat candidate won.
     """
 
     dataset_id: str
@@ -177,13 +197,14 @@ class SearchResult:
     best_id: str | None = None
     best_metrics: dict[str, float] | None = None
     lineage_depth: int = 0
+    tradable: int = 0
 
     def __post_init__(self) -> None:
         if self.stop_reason not in STOP_REASONS:
             raise ValueError(
                 f"stop_reason must be one of {list(STOP_REASONS)}, got {self.stop_reason!r}"
             )
-        for name in ("trials", "skipped", "accepted", "generations", "lineage_depth"):
+        for name in ("trials", "skipped", "accepted", "generations", "lineage_depth", "tradable"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise TypeError(f"{name} must be an int")
@@ -191,6 +212,8 @@ class SearchResult:
                 raise ValueError(f"{name} must be >= 0")
         if self.accepted > self.trials:
             raise ValueError("accepted cannot exceed trials")
+        if self.tradable > self.accepted:
+            raise ValueError("tradable cannot exceed accepted")
         if self.best is None and (self.best_id is not None or self.best_metrics is not None):
             raise ValueError("best_id and best_metrics require a best candidate")
         if self.best is not None and self.best_id is None:
@@ -216,6 +239,7 @@ class SearchResult:
             "trials": self.trials,
             "skipped": self.skipped,
             "accepted": self.accepted,
+            "tradable": self.tradable,
             "rejections": dict(sorted(self.rejections.items())),
             "skipped_reasons": dict(sorted(self.skipped_reasons.items())),
             "stop_reason": self.stop_reason,
@@ -242,6 +266,20 @@ def _score(result: TrialResult, metric: str) -> float | None:
     if not math.isfinite(number):  # TrialResult already rejects this; keep the guard local
         raise ValueError(f"selection metric {metric!r} is not finite")
     return number
+
+
+def _is_tradable(metrics: Mapping[str, float], min_trades: int) -> bool:
+    """Whether an accepted trial may be the run's best candidate.
+
+    ``min_trades == 0`` disables the rule (compatibility mode). Otherwise the
+    evaluator must publish ``trades`` and report at least that many closed
+    trades. A missing count is not evidence of trading, so it fails closed: an
+    evaluator that does not report trade counts cannot hand the run a champion.
+    """
+    if min_trades == 0:
+        return True
+    trades = metrics.get("trades")
+    return trades is not None and float(trades) >= float(min_trades)
 
 
 def _precedes(a: tuple[float, str], b: tuple[float, str], *, minimize: bool) -> bool:
@@ -316,6 +354,7 @@ def evolve(
     attempts = 0
     recorded = 0
     accepted = 0
+    tradable = 0
     skipped: Counter[str] = Counter()
     rejections: Counter[str] = Counter()
     scores: dict[str, float] = {}
@@ -424,6 +463,9 @@ def evolve(
                     "evaluator did not publish the selection metric "
                     f"{config.selection_metric!r} for an accepted trial"
                 )
+            if not _is_tradable(result.metrics, config.min_best_trades):
+                continue
+            tradable += 1
             if best_value is None or (
                 value < best_value if config.minimize else value > best_value
             ):
@@ -472,6 +514,7 @@ def evolve(
         best_id=best_id,
         best_metrics=best_metrics,
         lineage_depth=deepest,
+        tradable=tradable,
     )
     if summary.trials + summary.skipped != attempts:  # pragma: no cover - bookkeeping guard
         raise RuntimeError("search bookkeeping does not add up")

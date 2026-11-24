@@ -103,6 +103,17 @@ def decision_rows(archive_path: str | Path) -> list[tuple[str, str, str]]:
         ]
 
 
+def decision_details(archive_path: str | Path) -> list[dict[str, Any] | None]:
+    with DiscoveryArchive(archive_path) as archive:
+        return [record.detail for record in archive.decisions()]
+
+
+def champion_count(archive_path: str | Path) -> int:
+    with DiscoveryArchive(archive_path) as archive:
+        row = archive.connection.execute("SELECT COUNT(*) FROM champions").fetchone()
+    return 0 if row is None else int(row[0])
+
+
 def payload_of(result: Any) -> dict[str, Any]:
     """Round-trip through JSON with ``allow_nan=False``: the CLI's contract."""
     return json.loads(json.dumps(result.to_dict(), allow_nan=False))
@@ -113,7 +124,7 @@ def payload_of(result: Any) -> dict[str, Any]:
 
 def test_run_scores_a_validation_slice_and_records_its_decision(tmp_path: Path) -> None:
     root = store(tmp_path, synthetic_bars())
-    cfg = config(tmp_path, max_trials=3, population=3, generations=2, stress=(2.0,))
+    cfg = config(tmp_path, max_trials=3, population=3, generations=2, stress=(2.0,), seed=1)
 
     result = run_discovery(cfg, root=root)
 
@@ -123,9 +134,11 @@ def test_run_scores_a_validation_slice_and_records_its_decision(tmp_path: Path) 
     assert result.stop_reason == "budget"
     assert result.decision in DECISIONS
     assert result.decision != "promoted"
+    assert result.tradable > 0
     assert result.best_id is not None
     assert result.best_canonical is not None
     assert result.best_metrics is not None
+    assert result.best_metrics["trades"] > 0, "a flat policy cannot be the run's best"
 
     payload = payload_of(result)
     assert payload["best"]["candidate_id"] == result.best_id
@@ -283,14 +296,72 @@ def test_no_trade_when_the_gate_rejects_everything(tmp_path: Path) -> None:
     assert decision_rows(cfg.archive)[0][1] == "no_trade"
 
 
-def test_no_trade_when_the_best_candidate_is_flat(tmp_path: Path) -> None:
+def test_no_tradable_candidate_when_every_accepted_policy_is_flat(tmp_path: Path) -> None:
+    """Seed 0 produces accepted candidates with zero closed trades only."""
     root = store(tmp_path, constant_bars())
-    result = run_discovery(config(tmp_path, max_trials=4, population=4), root=root)
+    cfg = config(tmp_path, max_trials=3, population=3, generations=2, seed=0)
+
+    result = run_discovery(cfg, root=root)
+
+    assert result.trials == 3
+    assert result.accepted == 3
+    assert result.tradable == 0
+    assert result.best_id is None, "a zero-trade policy must not win by net_profit 0"
+    assert result.decision == "no_trade"
+    assert "no tradable candidate" in result.reason
+    assert "flat by construction" not in result.reason
+    assert champion_count(cfg.archive) == 0
+
+    details = decision_details(cfg.archive)
+    assert len(details) == 1 and details[0] is not None
+    assert details[0]["reason_code"] == "no_tradable_candidate"
+    assert details[0]["tradable"] == 0
+    assert details[0]["accepted"] == 3
+    assert details[0]["min_best_trades"] == 1
+
+
+def test_a_trading_candidate_wins_when_the_gate_is_empty_and_others_are_flat(
+    tmp_path: Path,
+) -> None:
+    """Seed 0 mixes one trading candidate with flat ones; the trader is best."""
+    root = store(tmp_path, constant_bars())
+    cfg = config(tmp_path, max_trials=4, population=4, generations=2, seed=0)
+
+    result = run_discovery(cfg, root=root)
+
+    assert result.accepted > 0
+    assert result.tradable == 1
+    assert result.best_id is not None
+    assert result.best_metrics is not None
+    assert result.best_metrics["trades"] > 0
+    assert result.best_metrics["net_profit"] < 0.0
+    assert result.decision == "no_change"
+    assert "does not beat the best baseline" in result.reason
+    assert champion_count(cfg.archive) == 0
+    details = decision_details(cfg.archive)
+    assert details[0] is not None and details[0]["reason_code"] == "no_change"
+
+
+def test_min_best_trades_zero_restores_the_flat_best_path(tmp_path: Path) -> None:
+    """Compatibility only: 0 disables the rule and the old decision returns."""
+    root = store(tmp_path, constant_bars())
+    cfg = config(
+        tmp_path,
+        max_trials=4,
+        population=4,
+        generations=1,
+        seed=0,
+        min_best_trades=0,
+    )
+
+    result = run_discovery(cfg, root=root)
 
     assert result.best_metrics is not None
     assert result.best_metrics["trades"] == 0.0
     assert result.decision == "no_trade"
     assert "flat by construction" in result.reason
+    details = decision_details(cfg.archive)
+    assert details[0] is not None and details[0]["reason_code"] == "flat_candidate"
 
 
 def test_no_change_when_nothing_beats_the_baseline(tmp_path: Path) -> None:
@@ -345,6 +416,18 @@ def test_decide_covers_every_outcome_without_promoting() -> None:
         == "no_trade"
     )
 
+    no_tradable = decide(
+        metric="net_profit",
+        trials=3,
+        accepted=3,
+        best_id=None,
+        best_metrics=None,
+        baselines=baselines,
+        tradable=0,
+    )
+    assert no_tradable[0] == "no_trade"
+    assert "no tradable candidate" in no_tradable[1]
+
     flat = decide(
         metric="net_profit",
         trials=3,
@@ -352,8 +435,20 @@ def test_decide_covers_every_outcome_without_promoting() -> None:
         best_id="a" * 64,
         best_metrics={"net_profit": 0.0, "trades": 0.0},
         baselines=baselines,
+        tradable=0,
     )
-    assert flat[0] == "no_trade" and "flat by construction" in flat[1]
+    assert flat[0] == "no_trade" and "no tradable candidate" in flat[1]
+
+    flat_compat = decide(
+        metric="net_profit",
+        trials=3,
+        accepted=1,
+        best_id="a" * 64,
+        best_metrics={"net_profit": 0.0, "trades": 0.0},
+        baselines=baselines,
+        min_best_trades=0,
+    )
+    assert flat_compat[0] == "no_trade" and "flat by construction" in flat_compat[1]
 
     unchanged = decide(
         metric="net_profit",
@@ -386,7 +481,14 @@ def test_decide_covers_every_outcome_without_promoting() -> None:
     )
     assert unmeasured[0] == "no_change"
 
-    for decision, _reason in (flat, unchanged, improved, unmeasured):
+    for decision, _reason in (
+        no_tradable,
+        flat,
+        flat_compat,
+        unchanged,
+        improved,
+        unmeasured,
+    ):
         assert decision in DECISIONS
         assert decision != "promoted"
 
@@ -422,6 +524,10 @@ def test_config_rejects_bad_budgets_and_baselines() -> None:
         DiscoveryRunConfig(stress=(0.0,))
     with pytest.raises(ValueError, match="distinct"):
         DiscoveryRunConfig(baselines=("hold", "hold"))
+    with pytest.raises(ValueError, match="min_best_trades"):
+        DiscoveryRunConfig(min_best_trades=-1)
+    with pytest.raises(TypeError, match="min_best_trades"):
+        DiscoveryRunConfig(min_best_trades=True)
 
 
 def test_result_refuses_promoted() -> None:

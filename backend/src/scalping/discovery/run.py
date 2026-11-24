@@ -25,11 +25,14 @@ What this module owns
 Decision semantics
 ------------------
 ``no_trade``
-    The gate rejected every trial, or the best accepted candidate is flat by
-    construction (zero closed trades). NO TRADE is a result, not a failure.
+    The gate rejected every trial, or no accepted candidate published at least
+    ``min_best_trades`` closed trades. A run where every accepted policy was
+    flat is "no tradable candidate", not "flat by construction": the archive
+    records which of the two happened. NO TRADE is a result, not a failure.
 ``no_change``
     No accepted candidate improved on the best baseline. This includes a rerun
-    that added no trials because the archive already held every candidate.
+    that added no trials because the archive already held every candidate, and a
+    run whose only eligible candidates lost money.
 ``rejected``
     Some accepted candidate beat the best baseline on validation, so the run
     hands it to the champion gate. The word is the archive's, not a verdict:
@@ -181,7 +184,11 @@ class DiscoveryRunConfig:
     ``stress`` are simulator cost multipliers applied to every candidate (and
     required by the gate if ``gate.require_positive_cost_stress`` names them).
     ``baselines`` is the ordered list of rule-free comparisons; order also breaks
-    a tie between equal baseline scores.
+    a tie between equal baseline scores. ``min_best_trades`` is the minimum
+    closed-trade count a candidate needs to be the run's best: an empty gate
+    would otherwise let a zero-trade policy with net profit 0 outrank every
+    trading candidate that lost money. ``0`` disables the rule for compatibility
+    tests and explicit flat-policy runs.
     """
 
     symbol: str = "XAUUSD"
@@ -209,6 +216,7 @@ class DiscoveryRunConfig:
     max_lookback: int = 20
     max_depth: int = 3
     code_version: str | None = None
+    min_best_trades: int = 1
 
     def __post_init__(self) -> None:
         _text(self.symbol, "symbol")
@@ -234,6 +242,8 @@ class DiscoveryRunConfig:
         for name in ("purge_bars", "embargo_bars"):
             if _count(getattr(self, name), name) < 0:
                 raise ValueError(f"{name} must be >= 0")
+        if _count(self.min_best_trades, "min_best_trades") < 0:
+            raise ValueError("min_best_trades must be >= 0")
         if self.patience is not None:
             patience = _count(self.patience, "patience")
             if patience < 1:
@@ -285,7 +295,9 @@ class DiscoveryRunResult:
     ``best_canonical`` is the accepted candidate's own representation, so a
     reader can replay it without the archive. ``baselines`` is the ordered table
     that was scored on the same slice. ``comparison`` repeats the numbers the
-    decision used, so a decision cannot be read out of context.
+    decision used, so a decision cannot be read out of context. ``tradable``
+    counts accepted trials that met ``min_best_trades``; zero means the run
+    found only flat policies.
     """
 
     dataset_id: str
@@ -310,6 +322,7 @@ class DiscoveryRunResult:
     decision_id: int | None
     decision_candidate: str
     archive: str
+    tradable: int = 0
 
     def __post_init__(self) -> None:
         if self.decision not in DECISIONS:
@@ -322,6 +335,12 @@ class DiscoveryRunResult:
             raise ValueError("best_metrics require a best candidate")
         if self.best_id is not None and self.best_canonical is None:
             raise ValueError("a best candidate requires its canonical payload")
+        if isinstance(self.tradable, bool) or not isinstance(self.tradable, int):
+            raise TypeError(f"tradable must be an int, got {type(self.tradable).__name__}")
+        if self.tradable < 0:
+            raise ValueError("tradable must be >= 0")
+        if self.tradable > self.accepted:
+            raise ValueError("tradable cannot exceed accepted")
 
     def to_dict(self) -> dict[str, Any]:
         """One JSON-safe payload; the CLI prints it and ``--out`` writes it."""
@@ -336,6 +355,7 @@ class DiscoveryRunResult:
             "skipped": self.skipped,
             "deduped": self.deduped,
             "accepted": self.accepted,
+            "tradable": self.tradable,
             "stop_reason": self.stop_reason,
             "rejections": dict(sorted(self.rejections.items())),
             "best": (
@@ -488,14 +508,22 @@ def decide(
     best_id: str | None,
     best_metrics: Mapping[str, float] | None,
     baselines: Sequence[Mapping[str, Any]],
+    tradable: int | None = None,
+    min_best_trades: int = 1,
 ) -> tuple[str, str]:
     """The decision policy, as a pure function of this run's numbers.
 
     Order matters and is part of the contract: a gate that rejected everything
-    is ``no_trade`` even though the baseline comparison would be undefined; a
-    flat accepted candidate is ``no_trade`` even when every baseline lost money;
-    an improvement is ``rejected`` because discovery cannot promote. ``promoted``
-    is never returned.
+    is ``no_trade`` even though the baseline comparison would be undefined; a run
+    whose accepted candidates all closed fewer than ``min_best_trades`` trades is
+    ``no_trade`` with an explicit "no tradable candidate" reason; an improvement
+    is ``rejected`` because discovery cannot promote. ``promoted`` is never
+    returned.
+
+    ``tradable`` is the number of accepted candidates eligible to be best. When
+    omitted it defaults to ``accepted`` for callers that predate the trade-count
+    rule; ``min_best_trades=0`` restores the old flat-policy behaviour and is
+    meant for compatibility tests only.
     """
     if trials > 0 and accepted == 0:
         return (
@@ -505,22 +533,42 @@ def decide(
                 "so NO TRADE is the recorded result"
             ),
         )
+    eligible = accepted if tradable is None else tradable
     if best_id is None or best_metrics is None:
+        if accepted > 0 and min_best_trades > 0 and eligible == 0:
+            return (
+                "no_trade",
+                (
+                    "no tradable candidate: no accepted candidate reported at least "
+                    f"{min_best_trades} closed trade(s), so a flat policy cannot stand in "
+                    "for a strategy; NO TRADE is the recorded result"
+                ),
+            )
         return (
             "no_change",
             f"no accepted candidate was recorded in this run ({trials} trial(s)); nothing changes",
         )
     candidate = f"candidate {best_id[:12]}"
-    trades = best_metrics.get("trades")
     value = best_metrics.get(metric)
-    if trades is not None and float(trades) == 0.0:
-        return (
-            "no_trade",
-            (
-                f"{candidate} is flat by construction (0 closed trades); "
-                "NO TRADE is the recorded result"
-            ),
-        )
+    trades = best_metrics.get("trades")
+    if trades is not None:
+        closed = float(trades)
+        if min_best_trades > 0 and closed < min_best_trades:
+            return (
+                "no_trade",
+                (
+                    f"no tradable candidate: {candidate} closed {closed:g} trade(s), "
+                    f"below the {min_best_trades} required; NO TRADE is the recorded result"
+                ),
+            )
+        if min_best_trades == 0 and closed == 0.0:
+            return (
+                "no_trade",
+                (
+                    f"{candidate} is flat by construction (0 closed trades); "
+                    "NO TRADE is the recorded result"
+                ),
+            )
     if value is None:
         return (
             "no_change",
@@ -579,6 +627,7 @@ def _search_config(
         patience=config.patience,
         complexity_cap=config.complexity_cap,
         selection_metric=config.selection_metric,
+        min_best_trades=config.min_best_trades,
     )
 
 
@@ -607,6 +656,34 @@ def _decision_target(search: SearchResult, archive: DiscoveryArchive, metric: st
             "no candidate was evaluated and the archive has none; there is nothing to decide"
         )
     return stored.candidate_id
+
+
+def _decision_code(
+    decision: str,
+    *,
+    trials: int,
+    accepted: int,
+    tradable: int,
+    min_best_trades: int,
+) -> str:
+    """Machine-readable distinction stored next to the human reason.
+
+    The decision vocabulary is shared with the champion gate, so ``no_trade``
+    alone cannot tell "the gate rejected everything" from "every accepted policy
+    was flat". The archive keeps that distinction in ``detail_json.reason_code``
+    instead of relying on prose.
+    """
+    if decision == "no_trade":
+        if trials > 0 and accepted == 0:
+            return "gate_rejected_all"
+        if accepted > 0 and min_best_trades > 0 and tradable == 0:
+            return "no_tradable_candidate"
+        return "flat_candidate"
+    if decision == "rejected":
+        return "beats_baseline"
+    if accepted == 0:
+        return "no_accepted_candidate"
+    return "no_change"
 
 
 def run_discovery(
@@ -698,9 +775,28 @@ def run_discovery(
             best_id=search.best_id,
             best_metrics=search.best_metrics,
             baselines=baselines,
+            tradable=search.tradable,
+            min_best_trades=cfg.min_best_trades,
         )
         target = _decision_target(search, archive, cfg.selection_metric)
-        record = archive.record_decision(target, decision, reason)
+        record = archive.record_decision(
+            target,
+            decision,
+            reason,
+            detail={
+                "reason_code": _decision_code(
+                    decision,
+                    trials=search.trials,
+                    accepted=search.accepted,
+                    tradable=search.tradable,
+                    min_best_trades=cfg.min_best_trades,
+                ),
+                "min_best_trades": cfg.min_best_trades,
+                "trials": search.trials,
+                "accepted": search.accepted,
+                "tradable": search.tradable,
+            },
+        )
 
     best_canonical = None if search.best is None else search.best.canonical_dict()
     best_value = (
@@ -717,6 +813,8 @@ def run_discovery(
         ),
         "trials": search.trials,
         "accepted": search.accepted,
+        "tradable": search.tradable,
+        "min_best_trades": cfg.min_best_trades,
     }
 
     return DiscoveryRunResult(
@@ -742,6 +840,7 @@ def run_discovery(
         decision_id=record.id,
         decision_candidate=target,
         archive=str(cfg.archive),
+        tradable=search.tradable,
     )
 
 
