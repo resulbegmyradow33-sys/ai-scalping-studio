@@ -5,20 +5,24 @@ right now?" without becoming a second writer. Every route here is a ``GET``; no
 request field selects a path and no handler creates, migrates or opens a job.
 
 **No invented numbers.** Each section reports ``configured: false`` when its
-store is absent and omits the counts behind it. A missing paper ledger is not
-"zero sessions"; it is a store that was never created. A store that exists but
-has no schema yet (a writer is still creating it) also reports no counts.
+store is absent. A file that exists but cannot be opened, or whose schema lacks
+the columns a reader needs, reports ``configured: true, readable: false`` and
+omits both items and counts. "The queue is empty" and "the queue could not be
+read" are different answers and the API keeps them apart.
 
 **Read-only connections.** SQLite stores are opened with a ``mode=ro`` URI and
 ``PRAGMA query_only = ON``. SQLite refuses to create a missing file, cannot
 write through the connection and takes no write lock, so a ``GET`` never
-migrates a schema and never races an orchestrator's ``BEGIN IMMEDIATE``.
+migrates a schema and never races an orchestrator's ``BEGIN IMMEDIATE``. A
+read-only connection still lets SQLite create or update ``-wal``/``-shm``
+sidecars for a WAL database when the directory is writable; the database file
+itself is never changed.
 
 **Archive compatibility.** The discovery archive is read with plain SQL rather
 than :class:`~scalping.discovery.archive.DiscoveryArchive`, because opening that
 class runs schema migrations. A v1 archive without ``champions`` answers with an
-empty champion list instead of an error, and a candidate payload is only
-inspected for optional policy metadata when it parses as a JSON object.
+empty champion list instead of an error or a migration; a champion table that
+exists but lacks the required columns is unreadable rather than empty.
 
 Nothing here accesses a locked holdout, exposes a filesystem path, starts a job
 or reads a secret. Paths are configuration installed by the app factory.
@@ -66,6 +70,29 @@ _STATE_PAUSED: Final[str] = "orchestrator.paused"
 _STATE_SAFE_MODE: Final[str] = "orchestrator.safe_mode"
 _STATE_RESEARCH_DISABLED: Final[str] = "orchestrator.research_disabled"
 
+#: Columns each reader actually touches. A v1 queue has no ``defer_count`` and
+#: must not answer as an empty queue merely because the column is missing.
+_JOBS_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "id",
+        "kind",
+        "status",
+        "attempts",
+        "defer_count",
+        "priority",
+        "created_at",
+        "scheduled_at",
+        "started_at",
+        "finished_at",
+    }
+)
+_EVENTS_COLUMNS: Final[frozenset[str]] = frozenset({"id", "job_id", "ts", "event"})
+_STATE_COLUMNS: Final[frozenset[str]] = frozenset({"key", "value"})
+_CHAMPION_COLUMNS: Final[frozenset[str]] = frozenset({"scope", "candidate_id", "promoted_at"})
+_ARCHIVE_TABLES: Final[frozenset[str]] = frozenset(
+    {"candidates", "trials", "decisions", "champions"}
+)
+
 
 # ------------------------------------------------------------------ connections
 
@@ -76,25 +103,26 @@ def _read_only(path: Path) -> Iterator[sqlite3.Connection | None]:
 
     A missing path, a directory where a file was expected, a corrupt header and a
     permission failure all yield ``None``: the endpoint then reports the store as
-    unconfigured instead of turning a dashboard poll into a 500. The URI is built
+    unreadable instead of turning a dashboard poll into a 500. The URI is built
     from server configuration only; no request value reaches this function.
     """
     if not path.is_file():
         yield None
         return
+    conn: sqlite3.Connection | None = None
     try:
-        conn = sqlite3.connect(
-            f"{path.resolve().as_uri()}?mode=ro",
-            uri=True,
-            isolation_level=None,
-        )
-    except sqlite3.Error:
-        yield None
-        return
-    try:
+        target = path.resolve()
+        uri = f"{target.as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout = 5000")
         conn.execute("PRAGMA query_only = ON")
+    except (OSError, ValueError, sqlite3.Error):
+        if conn is not None:
+            conn.close()
+        yield None
+        return
+    try:
         yield conn
     finally:
         conn.close()
@@ -108,13 +136,18 @@ def _tables(conn: sqlite3.Connection) -> frozenset[str]:
     return frozenset(str(row[0]) for row in rows)
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> frozenset[str]:
+    """Column names for an internal table name; never a request value."""
+    try:
+        rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    return frozenset(str(row[1]) for row in rows)
+
+
 def _count(conn: sqlite3.Connection, sql: str) -> int:
     row = conn.execute(sql).fetchone()
     return 0 if row is None else int(row[0])
-
-
-def _exists(conn: sqlite3.Connection, table: str) -> bool:
-    return table in _tables(conn)
 
 
 # ----------------------------------------------------------------------- paper
@@ -122,24 +155,27 @@ def _exists(conn: sqlite3.Connection, table: str) -> bool:
 
 def _paper_status(path: Path) -> AutonomyPaperStatus:
     """Session and trade counts from the paper ledger, if it has a schema."""
-    if not path.is_file():
-        return AutonomyPaperStatus(configured=False)
+    configured = path.is_file()
+    if not configured:
+        return AutonomyPaperStatus(configured=False, readable=False)
     try:
         book = PaperLedger.open_reader(path)
     except (FileNotFoundError, LedgerError, OSError, sqlite3.Error):
-        return AutonomyPaperStatus(configured=True)
+        return AutonomyPaperStatus(configured=True, readable=False)
     try:
-        if not book.has_schema():
-            return AutonomyPaperStatus(configured=True)
         conn = book.connection
+        conn.execute("PRAGMA query_only = ON")
+        if not book.has_schema():
+            return AutonomyPaperStatus(configured=True, readable=False)
         return AutonomyPaperStatus(
             configured=True,
+            readable=True,
             sessions=_count(conn, "SELECT COUNT(*) FROM sessions"),
             open_positions=_count(conn, "SELECT COUNT(*) FROM positions WHERE status = 'open'"),
             closed_trades=_count(conn, "SELECT COUNT(*) FROM trades"),
         )
     except sqlite3.Error:
-        return AutonomyPaperStatus(configured=True)
+        return AutonomyPaperStatus(configured=True, readable=False)
     finally:
         book.close()
 
@@ -168,7 +204,7 @@ def _flag(conn: sqlite3.Connection, key: str) -> bool | None:
 
 
 def _last_event(conn: sqlite3.Connection, tables: frozenset[str]) -> AutonomyLastEvent | None:
-    if "events" not in tables:
+    if "events" not in tables or not (_EVENTS_COLUMNS <= _columns(conn, "events")):
         return None
     row = conn.execute("SELECT * FROM events ORDER BY id DESC LIMIT 1").fetchone()
     if row is None:
@@ -183,15 +219,16 @@ def _last_event(conn: sqlite3.Connection, tables: frozenset[str]) -> AutonomyLas
 
 
 def _orchestrator_status(path: Path) -> AutonomyOrchestratorStatus:
-    if not path.is_file():
-        return AutonomyOrchestratorStatus(configured=False)
+    configured = path.is_file()
+    if not configured:
+        return AutonomyOrchestratorStatus(configured=False, readable=False)
     with _read_only(path) as conn:
         if conn is None:
-            return AutonomyOrchestratorStatus(configured=True)
+            return AutonomyOrchestratorStatus(configured=True, readable=False)
         try:
             tables = _tables(conn)
-            if "jobs" not in tables:
-                return AutonomyOrchestratorStatus(configured=True)
+            if not (_JOBS_COLUMNS <= _columns(conn, "jobs")):
+                return AutonomyOrchestratorStatus(configured=True, readable=False)
             counts = {"queued": 0, "running": 0, "failed": 0}
             for row in conn.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status"):
                 status = str(row["status"])
@@ -202,12 +239,13 @@ def _orchestrator_status(path: Path) -> AutonomyOrchestratorStatus:
                 "safe_mode": None,
                 "research_disabled": None,
             }
-            if "state" in tables:
+            if _STATE_COLUMNS <= _columns(conn, "state"):
                 flags["paused"] = _flag(conn, _STATE_PAUSED)
                 flags["safe_mode"] = _flag(conn, _STATE_SAFE_MODE)
                 flags["research_disabled"] = _flag(conn, _STATE_RESEARCH_DISABLED)
             return AutonomyOrchestratorStatus(
                 configured=True,
+                readable=True,
                 queued=counts["queued"],
                 running=counts["running"],
                 failed=counts["failed"],
@@ -217,7 +255,7 @@ def _orchestrator_status(path: Path) -> AutonomyOrchestratorStatus:
                 last_event=_last_event(conn, tables),
             )
         except sqlite3.Error:
-            return AutonomyOrchestratorStatus(configured=True)
+            return AutonomyOrchestratorStatus(configured=True, readable=False)
 
 
 # --------------------------------------------------------------------- discovery
@@ -252,33 +290,36 @@ def _candidate_metadata(canonical_json: object) -> tuple[str | None, str | None,
     return mode, policy_id, policy_digest
 
 
-def _champions(path: Path) -> tuple[bool, list[AutonomyChampion]]:
-    """``(configured, items)``; an older archive with no champion table is empty."""
-    if not path.is_file():
+def _champions(
+    conn: sqlite3.Connection, tables: frozenset[str]
+) -> tuple[bool, list[AutonomyChampion]]:
+    """``(readable, items)`` for the champion table.
+
+    An older archive with no ``champions`` table is readable and empty: nothing
+    was promoted under that schema. A table that exists but lacks the required
+    columns is unreadable, because an empty answer would be a lie.
+    """
+    if "champions" not in tables:
+        return True, []
+    if not (_CHAMPION_COLUMNS <= _columns(conn, "champions")):
         return False, []
-    with _read_only(path) as conn:
-        if conn is None:
-            return True, []
-        try:
-            tables = _tables(conn)
-            if "champions" not in tables:
-                return True, []
-            if "candidates" in tables:
-                rows = conn.execute(
-                    """
-                    SELECT c.scope, c.candidate_id, c.promoted_at, ca.canonical_json
-                    FROM champions AS c
-                    LEFT JOIN candidates AS ca ON ca.candidate_id = c.candidate_id
-                    ORDER BY c.scope
-                    """
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT scope, candidate_id, promoted_at, NULL AS canonical_json "
-                    "FROM champions ORDER BY scope"
-                ).fetchall()
-        except sqlite3.Error:
-            return True, []
+    candidates_joinable = "candidates" in tables and {"candidate_id", "canonical_json"} <= _columns(
+        conn, "candidates"
+    )
+    if candidates_joinable:
+        rows = conn.execute(
+            """
+            SELECT c.scope, c.candidate_id, c.promoted_at, ca.canonical_json
+            FROM champions AS c
+            LEFT JOIN candidates AS ca ON ca.candidate_id = c.candidate_id
+            ORDER BY c.scope
+            """
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT scope, candidate_id, promoted_at, NULL AS canonical_json "
+            "FROM champions ORDER BY scope"
+        ).fetchall()
     items: list[AutonomyChampion] = []
     for row in rows:
         candidate_id = str(row["candidate_id"])
@@ -288,7 +329,7 @@ def _champions(path: Path) -> tuple[bool, list[AutonomyChampion]]:
                 scope=str(row["scope"]),
                 candidate_id=candidate_id,
                 mode=mode,
-                promoted_at=str(row["promoted_at"]),
+                promoted_at=None if row["promoted_at"] is None else str(row["promoted_at"]),
                 policy_id=policy_id,
                 policy_digest=policy_digest or candidate_id,
             )
@@ -296,44 +337,64 @@ def _champions(path: Path) -> tuple[bool, list[AutonomyChampion]]:
     return True, items
 
 
-def _discoveries(path: Path) -> AutonomyDiscoveries:
-    if not path.is_file():
-        return AutonomyDiscoveries(configured=False)
+def _archive_status(
+    path: Path,
+) -> tuple[bool, bool, bool, list[AutonomyChampion], AutonomyDiscoveries]:
+    """Read both archive sections over one connection.
+
+    Returns ``(configured, readable, champions_readable, champions, discoveries)``.
+    Opening this file twice would double the I/O and could observe two different
+    snapshots while a writer commits between the calls.
+    """
+    configured = path.is_file()
+    empty = AutonomyDiscoveries(configured=configured, readable=False)
+    if not configured:
+        return False, False, False, [], empty
     with _read_only(path) as conn:
         if conn is None:
-            return AutonomyDiscoveries(configured=True)
+            return True, False, False, [], empty
         try:
             tables = _tables(conn)
+            if not (tables & _ARCHIVE_TABLES):
+                return True, False, False, [], empty
+            champions_readable, champions = _champions(conn, tables)
             runs = _count(conn, "SELECT COUNT(*) FROM trials") if "trials" in tables else None
             decisions = (
                 _count(conn, "SELECT COUNT(*) FROM decisions") if "decisions" in tables else None
             )
-            return AutonomyDiscoveries(
+            discoveries = AutonomyDiscoveries(
                 configured=True,
+                readable=True,
                 runs=runs,
                 decisions=decisions,
             )
+            return True, True, champions_readable, champions, discoveries
         except sqlite3.Error:
-            return AutonomyDiscoveries(configured=True)
+            return True, False, False, [], AutonomyDiscoveries(configured=True, readable=False)
 
 
 # -------------------------------------------------------------------------- data
 
 
 def _data_status(root: Path) -> AutonomyDataStatus:
-    """Symbols that have at least one timeframe partition on disk."""
-    if not root.is_dir():
-        return AutonomyDataStatus(configured=False)
+    """Symbols with a ``<symbol>/<timeframe>/<year>/<month>.parquet`` partition.
+
+    The glob is depth-bounded instead of recursive: a month partition is exactly
+    three levels below the symbol, so ``rglob`` would walk unrelated files.
+    """
+    configured = root.is_dir()
+    if not configured:
+        return AutonomyDataStatus(configured=False, readable=False)
     symbols: list[str] = []
     try:
         for entry in sorted(root.iterdir()):
             if not entry.is_dir() or entry.name in {"imports", "raw"}:
                 continue
-            if next(entry.rglob("*.parquet"), None) is not None:
+            if next(entry.glob("*/*/*.parquet"), None) is not None:
                 symbols.append(entry.name)
     except OSError:
-        return AutonomyDataStatus(configured=True)
-    return AutonomyDataStatus(configured=True, symbols=symbols)
+        return AutonomyDataStatus(configured=True, readable=False)
+    return AutonomyDataStatus(configured=True, readable=True, symbols=symbols)
 
 
 # ------------------------------------------------------------------------ routes
@@ -341,25 +402,39 @@ def _data_status(root: Path) -> AutonomyDataStatus:
 
 @router.get("/status", response_model=AutonomyStatus, response_model_exclude_none=True)
 def autonomy_status(request: Request) -> AutonomyStatus:
-    """Aggregate real state; absent stores carry no counts."""
-    _, champions = _champions(Path(request.app.state.discovery_archive_path))
+    """Aggregate real state; absent or unreadable stores carry no invented values."""
+    _, _, champions_readable, champions, discoveries = _archive_status(
+        Path(request.app.state.discovery_archive_path)
+    )
     return AutonomyStatus(
         paper=_paper_status(Path(request.app.state.paper_ledger_path)),
         orchestrator=_orchestrator_status(Path(request.app.state.orchestrator_db_path)),
         champions=champions,
-        discoveries=_discoveries(Path(request.app.state.discovery_archive_path)),
+        champions_readable=champions_readable,
+        discoveries=discoveries,
         data=_data_status(Path(request.app.state.data_root)),
     )
 
 
-@router.get("/champions", response_model=AutonomyChampionList)
+@router.get(
+    "/champions",
+    response_model=AutonomyChampionList,
+    response_model_exclude_none=True,
+)
 def autonomy_champions(request: Request) -> AutonomyChampionList:
     """Champions per scope, read from the archive without migrating it."""
-    configured, items = _champions(Path(request.app.state.discovery_archive_path))
-    return AutonomyChampionList(configured=configured, items=items)
+    configured, readable, champions_readable, items, _ = _archive_status(
+        Path(request.app.state.discovery_archive_path)
+    )
+    available = readable and champions_readable
+    return AutonomyChampionList(
+        configured=configured,
+        readable=available,
+        items=items if available else None,
+    )
 
 
-@router.get("/jobs", response_model=AutonomyJobPage)
+@router.get("/jobs", response_model=AutonomyJobPage, response_model_exclude_none=True)
 def autonomy_jobs(
     request: Request,
     limit: int = Query(default=JOBS_DEFAULT, ge=1, le=JOBS_MAX),
@@ -368,9 +443,11 @@ def autonomy_jobs(
     path = Path(request.app.state.orchestrator_db_path)
     configured = path.is_file()
     with _read_only(path) as conn:
-        if conn is None or not _exists(conn, "jobs"):
-            return AutonomyJobPage(configured=configured, items=[], limit=limit)
+        if conn is None:
+            return AutonomyJobPage(configured=configured, readable=False, limit=limit)
         try:
+            if not (_JOBS_COLUMNS <= _columns(conn, "jobs")):
+                return AutonomyJobPage(configured=True, readable=False, limit=limit)
             rows = conn.execute(
                 """
                 SELECT id, kind, status, attempts, defer_count, priority,
@@ -382,7 +459,7 @@ def autonomy_jobs(
                 (limit,),
             ).fetchall()
         except sqlite3.Error:
-            return AutonomyJobPage(configured=configured, items=[], limit=limit)
+            return AutonomyJobPage(configured=configured, readable=False, limit=limit)
     items = [
         AutonomyJobItem(
             id=int(row["id"]),
@@ -398,24 +475,26 @@ def autonomy_jobs(
         )
         for row in rows
     ]
-    return AutonomyJobPage(configured=configured, items=items, limit=limit)
+    return AutonomyJobPage(configured=configured, readable=True, items=items, limit=limit)
 
 
-@router.get("/events", response_model=AutonomyEventPage)
+@router.get("/events", response_model=AutonomyEventPage, response_model_exclude_none=True)
 def autonomy_events(
     request: Request,
     limit: int = Query(default=EVENTS_DEFAULT, ge=1, le=EVENTS_MAX),
 ) -> AutonomyEventPage:
-    """Newest audit events first; an absent queue is an empty page."""
+    """Newest audit events first; the free-form ``detail`` column stays private."""
     path = Path(request.app.state.orchestrator_db_path)
     configured = path.is_file()
     with _read_only(path) as conn:
-        if conn is None or not _exists(conn, "events"):
-            return AutonomyEventPage(configured=configured, items=[], limit=limit)
+        if conn is None:
+            return AutonomyEventPage(configured=configured, readable=False, limit=limit)
         try:
+            if not (_EVENTS_COLUMNS <= _columns(conn, "events")):
+                return AutonomyEventPage(configured=True, readable=False, limit=limit)
             rows = conn.execute(
                 """
-                SELECT id, job_id, ts, event, detail
+                SELECT id, job_id, ts, event
                 FROM events
                 ORDER BY id DESC
                 LIMIT ?
@@ -423,15 +502,14 @@ def autonomy_events(
                 (limit,),
             ).fetchall()
         except sqlite3.Error:
-            return AutonomyEventPage(configured=configured, items=[], limit=limit)
+            return AutonomyEventPage(configured=configured, readable=False, limit=limit)
     items = [
         AutonomyEventItem(
             id=int(row["id"]),
             job_id=None if row["job_id"] is None else int(row["job_id"]),
             ts=str(row["ts"]),
             event=str(row["event"]),
-            detail=None if row["detail"] is None else str(row["detail"]),
         )
         for row in rows
     ]
-    return AutonomyEventPage(configured=configured, items=items, limit=limit)
+    return AutonomyEventPage(configured=configured, readable=True, items=items, limit=limit)

@@ -427,17 +427,21 @@ activity without opening the write router:
 
 | Field | Meaning |
 |---|---|
-| `configured` | Whether the ledger file exists and could be opened |
+| `configured` | Whether the ledger file exists |
+| `readable` | Whether it could be opened and has the sessions schema |
 | `sessions` | Session rows in the ledger |
 | `open_positions` | Positions with `status = 'open'` |
 | `closed_trades` | Rows in `trades` |
 
-The section is read through `PaperLedger.open_reader` (`mode=ro`) with
-`PRAGMA query_only = ON`; a `GET` never creates the file or migrates it. When
-the ledger is missing the response is `{"configured": false}` and the counts
-are absent — not zero. When the file exists but has no schema yet, or cannot be
-opened, it is configured with no counts. The endpoint never exposes the ledger
-path and never starts a session or a runner. See
+The section is read through `PaperLedger.open_reader` (`mode=ro`); the API then
+sets `PRAGMA query_only = ON` on that connection. A `GET` never creates the
+database or migrates it. When the ledger is missing the response is
+`{"configured": false, "readable": false}` and the counts are absent, not zero.
+When the file exists but cannot be opened or has no schema yet, it is
+`{"configured": true, "readable": false}` with no counts. Only `readable: true`
+carries counts. A read-only WAL connection may create `-wal`/`-shm` sidecars in
+a writable directory, but the ledger file itself is unchanged. The endpoint
+never exposes the ledger path and never starts a session or a runner. See
 [`orchestrator.md`](orchestrator.md#read-only-status-api) for the full route
 table and bounds.
 

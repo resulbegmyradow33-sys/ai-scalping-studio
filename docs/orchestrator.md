@@ -204,24 +204,34 @@ line contract; `--forever` prints `started` and then `stopped`/`failed`.
 | `GET` | `/api/autonomy/status` | Aggregate paper, orchestrator, champion, discovery and data sections |
 | `GET` | `/api/autonomy/champions` | Champion per scope with `mode`, `policy_id` and `policy_digest` when the payload records them |
 | `GET` | `/api/autonomy/jobs` | Newest jobs first: status, kind, attempts and defer count |
-| `GET` | `/api/autonomy/events` | Newest audit events first |
+| `GET` | `/api/autonomy/events` | Newest audit events first; the free-form `detail` column is not exposed |
 
 The database paths are app configuration (`create_app(orchestrator_db=...,
 discovery_archive=...)`), never request fields. Both files default under
 `runs_root` to the CLI locations. Every store is opened with a `mode=ro` URI
-and `PRAGMA query_only = ON`: SQLite cannot create a missing file, cannot write
-through the connection and takes no write lock. A `GET` therefore never runs
-`init_schema`, never changes bytes on disk and keeps working while the daemon
-holds `BEGIN IMMEDIATE`; WAL readers see the last committed snapshot.
+and `PRAGMA query_only = ON`: SQLite cannot create a missing database, cannot
+write through the connection and takes no write lock. A `GET` therefore never
+runs `init_schema`, never changes the database file and keeps working while the
+daemon holds `BEGIN IMMEDIATE`; WAL readers see the last committed snapshot. A
+read-only connection to a WAL database may still create or update its `-wal` and
+`-shm` sidecars when the directory is writable. The test pins that tree exactly:
+only the database and those two sidecars may exist after a GET.
 
-A missing store answers `{"configured": false, ...}` and omits its counts. It is
-not reported as zero sessions or zero queued jobs, because those numbers were
-never read. A file that exists but has no schema yet is configured with no
-counts. `/jobs` defaults to 50 and accepts `1..500`; `/events` defaults to 100
-and accepts `1..500`; anything outside is a `422`. The discovery archive is read
-with plain SQL, so a v1 archive without `champions` returns an empty list
-instead of migrating. `runs` in `/status` is the archived trial count and
-`decisions` is the gate-decision count.
+Each section reports both flags. `configured: false` means the file is absent.
+`configured: true, readable: false` means it exists but could not be opened, has
+no schema yet, or lacks a column this reader needs; items and counts are then
+omitted instead of answering as if the queue or archive were empty. Only
+`readable: true` produces counts, and a genuinely empty store returns zero.
+
+`/jobs` defaults to 50 and accepts `1..500`; `/events` defaults to 100 and
+accepts `1..500`; anything outside is a `422`. A v1 jobs table without
+`defer_count` is unreadable in both `/status` and `/jobs`, so the two views
+never disagree. The discovery archive is read with plain SQL, so a v1 archive
+without `champions` returns an empty list instead of migrating. `runs` in
+`/status` is the archived trial count and `decisions` is the gate-decision
+count. `/status` opens the archive once and derives both sections from that
+snapshot. `events.detail` is deliberately withheld: it can contain local paths
+or handler errors that are outside the status contract.
 
 ### Honest limits
 

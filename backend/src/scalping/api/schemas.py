@@ -709,13 +709,15 @@ class PaperEquityPage(BaseModel):
 
 
 class AutonomyPaperStatus(BaseModel):
-    """Paper ledger counts; a missing ledger has ``configured=False`` and no counts.
+    """Paper ledger counts.
 
-    A store that exists but has no schema yet also omits the counts instead of
-    reporting zeros that were never read.
+    A missing ledger is ``configured=False``. A file that exists but cannot be
+    opened or has no schema is ``configured=True, readable=False``; in both cases
+    the counts are absent instead of zeros that were never read.
     """
 
     configured: bool
+    readable: bool
     sessions: int | None = None
     open_positions: int | None = None
     closed_trades: int | None = None
@@ -731,9 +733,14 @@ class AutonomyLastEvent(BaseModel):
 
 
 class AutonomyOrchestratorStatus(BaseModel):
-    """Queue counts and persisted controls; counts are absent without a jobs table."""
+    """Queue counts and persisted controls.
+
+    ``readable=False`` means the file could not be opened or the jobs table lacks
+    a column this reader needs; every count and flag is then absent.
+    """
 
     configured: bool
+    readable: bool
     queued: int | None = None
     running: int | None = None
     failed: int | None = None
@@ -760,33 +767,41 @@ class AutonomyChampion(BaseModel):
 
 
 class AutonomyChampionList(BaseModel):
-    """Every scope with a champion, plus whether the archive could be read."""
+    """Every scope with a champion.
+
+    ``items`` is present only when the archive and its champion table are
+    readable; an unreadable archive omits it rather than answering "no champions".
+    """
 
     configured: bool
-    items: list[AutonomyChampion]
+    readable: bool
+    items: list[AutonomyChampion] | None = None
 
 
 class AutonomyDiscoveries(BaseModel):
     """Archived evaluations (``runs``) and gate decisions; absent tables are ``None``."""
 
     configured: bool
+    readable: bool
     runs: int | None = None
     decisions: int | None = None
 
 
 class AutonomyDataStatus(BaseModel):
-    """Data symbols with at least one timeframe partition on disk."""
+    """Data symbols with at least one month partition on disk."""
 
     configured: bool
+    readable: bool
     symbols: list[str] | None = None
 
 
 class AutonomyStatus(BaseModel):
-    """The aggregate dashboard answer; each section owns its own configured flag."""
+    """The aggregate dashboard answer; each section owns its own readable flag."""
 
     paper: AutonomyPaperStatus
     orchestrator: AutonomyOrchestratorStatus
     champions: list[AutonomyChampion]
+    champions_readable: bool
     discoveries: AutonomyDiscoveries
     data: AutonomyDataStatus
 
@@ -807,26 +822,31 @@ class AutonomyJobItem(BaseModel):
 
 
 class AutonomyJobPage(BaseModel):
-    """Newest jobs first; bounded by ``limit``."""
+    """Newest jobs first; bounded by ``limit``; ``items`` is absent if unreadable."""
 
     configured: bool
-    items: list[AutonomyJobItem]
+    readable: bool
+    items: list[AutonomyJobItem] | None = None
     limit: int
 
 
 class AutonomyEventItem(BaseModel):
-    """One audit event; a control event has no ``job_id``."""
+    """One audit event; a control event has no ``job_id``.
+
+    The free-form ``detail`` column is deliberately not exposed: it can contain
+    local paths or handler errors that are not part of the status contract.
+    """
 
     id: int
     job_id: int | None = None
     ts: str
     event: str
-    detail: str | None = None
 
 
 class AutonomyEventPage(BaseModel):
-    """Newest audit events first; bounded by ``limit``."""
+    """Newest audit events first; bounded by ``limit``; ``items`` is absent if unreadable."""
 
     configured: bool
-    items: list[AutonomyEventItem]
+    readable: bool
+    items: list[AutonomyEventItem] | None = None
     limit: int

@@ -1,12 +1,14 @@
 """Autonomy status API: honest missing states, real counts and read-only GETs.
 
-The API is a viewer. These tests pin the two properties that make it safe to
-poll: a missing store is reported as unconfigured rather than as zeros, and a
-GET never creates, migrates or rewrites a database.
+The API is a viewer. These tests pin the properties that make it safe to poll:
+a missing store is unconfigured, an unreadable store is not "empty", and a GET
+never creates, migrates or rewrites a database.
 """
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -47,13 +49,21 @@ class _MetaCandidate:
 
 @pytest.fixture
 def paths(tmp_path: Path) -> dict[str, Path]:
-    return {
+    """Configured paths plus pre-created data and runs directories.
+
+    The directories exist before the first request so a GET that creates a file
+    is visible as a new entry, not hidden by the directory itself appearing.
+    """
+    paths = {
         "data_root": tmp_path / "data",
         "runs_root": tmp_path / "runs",
         "paper": tmp_path / "paper.sqlite",
         "orchestrator": tmp_path / "runs" / "orchestrator.sqlite3",
         "archive": tmp_path / "runs" / "discovery" / "discovery.sqlite",
     }
+    paths["data_root"].mkdir()
+    paths["runs_root"].mkdir()
+    return paths
 
 
 @pytest.fixture
@@ -66,6 +76,10 @@ def client(paths: dict[str, Path]) -> TestClient:
         discovery_archive=paths["archive"],
     )
     return TestClient(app)
+
+
+def _files_under(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*") if path.is_file())
 
 
 def _seed_paper(path: Path) -> None:
@@ -166,56 +180,121 @@ def test_status_of_missing_stores_reports_unconfigured_without_zeros(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body == {
-        "paper": {"configured": False},
-        "orchestrator": {"configured": False},
+        "paper": {"configured": False, "readable": False},
+        "orchestrator": {"configured": False, "readable": False},
         "champions": [],
-        "discoveries": {"configured": False},
-        "data": {"configured": False},
+        "champions_readable": False,
+        "discoveries": {"configured": False, "readable": False},
+        "data": {"configured": True, "readable": True, "symbols": []},
     }
     assert not paths["paper"].exists()
     assert not paths["orchestrator"].exists()
     assert not paths["archive"].exists()
 
 
-def test_list_endpoints_of_missing_stores_are_empty_pages(
+def test_list_endpoints_of_missing_stores_omit_items_and_counts(
     client: TestClient, paths: dict[str, Path]
 ) -> None:
     champions = client.get("/api/autonomy/champions")
     assert champions.status_code == 200
-    assert champions.json() == {"configured": False, "items": []}
+    assert champions.json() == {"configured": False, "readable": False}
 
     jobs = client.get("/api/autonomy/jobs")
     assert jobs.status_code == 200
-    assert jobs.json() == {"configured": False, "items": [], "limit": 50}
+    assert jobs.json() == {"configured": False, "readable": False, "limit": 50}
 
     events = client.get("/api/autonomy/events")
     assert events.status_code == 200
-    assert events.json() == {"configured": False, "items": [], "limit": 100}
+    assert events.json() == {"configured": False, "readable": False, "limit": 100}
 
     for key in ("paper", "orchestrator", "archive"):
         assert not paths[key].exists()
 
 
-def test_a_stray_empty_file_is_reported_as_an_existing_store(client: TestClient, paths) -> None:
-    """The file exists, so it is configured; nothing is invented behind it."""
-    paths["orchestrator"].parent.mkdir(parents=True)
+def test_get_leaves_precreated_directories_empty(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    """A GET on absent stores creates neither the database nor its WAL sidecars."""
+    for url in (
+        "/api/autonomy/status",
+        "/api/autonomy/champions",
+        "/api/autonomy/jobs",
+        "/api/autonomy/events",
+    ):
+        assert client.get(url).status_code == 200, url
+
+    assert _files_under(paths["runs_root"]) == []
+    assert _files_under(paths["data_root"]) == []
+    for key in ("paper", "orchestrator", "archive"):
+        assert not paths[key].exists()
+        assert not Path(f"{paths[key]}-wal").exists()
+        assert not Path(f"{paths[key]}-shm").exists()
+
+
+def test_an_unreadable_store_is_not_reported_as_empty(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    """Existing corrupt files are configured but not readable; no zero is invented."""
+    for key in ("paper", "orchestrator", "archive"):
+        paths[key].parent.mkdir(parents=True, exist_ok=True)
+        paths[key].write_bytes(b"this is not a sqlite database")
+
+    status = client.get("/api/autonomy/status").json()
+    assert status["paper"] == {"configured": True, "readable": False}
+    assert status["orchestrator"] == {"configured": True, "readable": False}
+    assert status["champions"] == []
+    assert status["champions_readable"] is False
+    assert status["discoveries"] == {"configured": True, "readable": False}
+
+    jobs = client.get("/api/autonomy/jobs").json()
+    assert jobs == {"configured": True, "readable": False, "limit": 50}
+    events = client.get("/api/autonomy/events").json()
+    assert events == {"configured": True, "readable": False, "limit": 100}
+    champions = client.get("/api/autonomy/champions").json()
+    assert champions == {"configured": True, "readable": False}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a mode-000 file")
+def test_a_file_that_cannot_be_opened_is_configured_but_unreadable(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    _seed_orchestrator(paths["orchestrator"])
+    paths["orchestrator"].chmod(0)
+    try:
+        status = client.get("/api/autonomy/status").json()
+        jobs = client.get("/api/autonomy/jobs").json()
+    finally:
+        paths["orchestrator"].chmod(0o600)
+
+    assert status["orchestrator"] == {"configured": True, "readable": False}
+    assert jobs == {"configured": True, "readable": False, "limit": 50}
+
+
+def test_a_stray_empty_file_is_configured_but_unreadable(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    """No schema is not an empty queue; it is a store this reader cannot use."""
+    paths["orchestrator"].parent.mkdir(parents=True, exist_ok=True)
     paths["orchestrator"].write_bytes(b"")
     body = client.get("/api/autonomy/status").json()
-    assert body["orchestrator"] == {"configured": True}
+    assert body["orchestrator"] == {"configured": True, "readable": False}
     assert paths["orchestrator"].read_bytes() == b""
 
 
-def test_status_lists_symbols_that_have_timeframe_partitions(
+def test_status_lists_symbols_with_a_month_partition(
     client: TestClient, paths: dict[str, Path]
 ) -> None:
     partition = paths["data_root"] / "XAUUSD" / "M1" / "2026" / "01.parquet"
-    partition.parent.mkdir(parents=True)
+    partition.parent.mkdir(parents=True, exist_ok=True)
     partition.touch()
     (paths["data_root"] / "EMPTY" / "M1").mkdir(parents=True)
+    deep = paths["data_root"] / "DEEP" / "M1" / "2026" / "01" / "02" / "x.parquet"
+    deep.parent.mkdir(parents=True, exist_ok=True)
+    deep.touch()
     (paths["data_root"] / "imports").mkdir(parents=True)
 
     body = client.get("/api/autonomy/status").json()
-    assert body["data"] == {"configured": True, "symbols": ["XAUUSD"]}
+    assert body["data"] == {"configured": True, "readable": True, "symbols": ["XAUUSD"]}
 
 
 # ------------------------------------------------------------------- seeded state
@@ -230,12 +309,14 @@ def test_status_reports_real_paper_and_orchestrator_counts(
     body = client.get("/api/autonomy/status").json()
     assert body["paper"] == {
         "configured": True,
+        "readable": True,
         "sessions": 2,
         "open_positions": 1,
         "closed_trades": 1,
     }
     orchestrator = body["orchestrator"]
     assert orchestrator["configured"] is True
+    assert orchestrator["readable"] is True
     assert (orchestrator["queued"], orchestrator["running"], orchestrator["failed"]) == (1, 1, 1)
     assert orchestrator["paused"] is True
     assert orchestrator["safe_mode"] is True
@@ -249,6 +330,7 @@ def test_status_reports_champion_metadata_and_discovery_counts(
     candidate_id = _seed_archive(paths["archive"])
 
     body = client.get("/api/autonomy/status").json()
+    assert body["champions_readable"] is True
     assert body["champions"] == [
         {
             "scope": SCOPE,
@@ -259,7 +341,12 @@ def test_status_reports_champion_metadata_and_discovery_counts(
             "policy_digest": "feedface",
         }
     ]
-    assert body["discoveries"] == {"configured": True, "runs": 1, "decisions": 2}
+    assert body["discoveries"] == {
+        "configured": True,
+        "readable": True,
+        "runs": 1,
+        "decisions": 2,
+    }
 
 
 def test_champions_route_reads_the_same_archive_without_migrating(
@@ -271,17 +358,18 @@ def test_champions_route_reads_the_same_archive_without_migrating(
     assert response.status_code == 200
     body = response.json()
     assert body["configured"] is True
+    assert body["readable"] is True
     assert [item["candidate_id"] for item in body["items"]] == [candidate_id]
     assert body["items"][0]["mode"] == "paper"
     assert paths["archive"].read_bytes() == before
 
 
-def test_an_older_archive_without_champions_answers_empty(client: TestClient, paths) -> None:
+def test_an_older_archive_without_champions_answers_readable_and_empty(
+    client: TestClient, paths
+) -> None:
     """A v1 archive has candidates/trials/decisions but no champion tables."""
-    import sqlite3
-
     path = paths["archive"]
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     try:
         conn.execute("CREATE TABLE candidates (candidate_id TEXT PRIMARY KEY)")
@@ -293,10 +381,16 @@ def test_an_older_archive_without_champions_answers_empty(client: TestClient, pa
     before = path.read_bytes()
 
     body = client.get("/api/autonomy/champions").json()
-    assert body == {"configured": True, "items": []}
+    assert body == {"configured": True, "readable": True, "items": []}
     status = client.get("/api/autonomy/status").json()
     assert status["champions"] == []
-    assert status["discoveries"] == {"configured": True, "runs": 0, "decisions": 0}
+    assert status["champions_readable"] is True
+    assert status["discoveries"] == {
+        "configured": True,
+        "readable": True,
+        "runs": 0,
+        "decisions": 0,
+    }
     # A viewer must not run the v2 migration that opening DiscoveryArchive would.
     assert path.read_bytes() == before
 
@@ -306,7 +400,7 @@ def test_champions_without_metadata_fall_back_to_the_candidate_digest(
 ) -> None:
     """Toy payloads carry no mode or policy; the archive id is still a real digest."""
     path = paths["archive"]
-    path.parent.mkdir(parents=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with DiscoveryArchive(path) as archive:
         record = archive.add_candidate(ToyCandidate((1, 2)), code_version="test-2026-11-24")
         archive.record_trial(
@@ -323,10 +417,63 @@ def test_champions_without_metadata_fall_back_to_the_candidate_digest(
             metric="net_profit",
         )
 
-    item = client.get("/api/autonomy/champions").json()["items"][0]
+    body = client.get("/api/autonomy/champions").json()
+    assert body["readable"] is True
+    item = body["items"][0]
     assert item["mode"] == "dsl"
-    assert item["policy_id"] is None
+    assert item.get("policy_id") is None
     assert item["policy_digest"] == item["candidate_id"]
+
+
+def test_a_null_promotion_stamp_is_not_stringified(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    path = paths["archive"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE champions (scope TEXT, candidate_id TEXT, promoted_at TEXT)")
+        conn.execute("INSERT INTO champions VALUES ('XAUUSD:M5', 'abc', NULL)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    item = client.get("/api/autonomy/champions").json()["items"][0]
+    assert item.get("promoted_at") is None
+
+
+def test_a_v1_queue_without_defer_count_is_unreadable_everywhere(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
+    """`/status` and `/jobs` must agree that a v1 jobs table cannot be served."""
+    path = paths["orchestrator"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """
+            CREATE TABLE jobs (
+                id INTEGER PRIMARY KEY, kind TEXT, status TEXT, attempts INTEGER,
+                priority INTEGER, created_at TEXT, scheduled_at TEXT,
+                started_at TEXT, finished_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO jobs VALUES (1, 'discovery.run', 'queued', 0, 0, "
+            "'2026-01-01', '2026-01-01', NULL, NULL)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    status = client.get("/api/autonomy/status").json()
+    assert status["orchestrator"] == {"configured": True, "readable": False}
+    assert client.get("/api/autonomy/jobs").json() == {
+        "configured": True,
+        "readable": False,
+        "limit": 50,
+    }
 
 
 # ------------------------------------------------------------------------- jobs
@@ -336,6 +483,7 @@ def test_jobs_are_newest_first_and_bounded(client: TestClient, paths: dict[str, 
     _seed_orchestrator(paths["orchestrator"])
     body = client.get("/api/autonomy/jobs", params={"limit": 2}).json()
     assert body["configured"] is True
+    assert body["readable"] is True
     assert body["limit"] == 2
     assert len(body["items"]) == 2
     assert [item["status"] for item in body["items"]] == ["queued", "running"]
@@ -353,32 +501,23 @@ def test_events_limit_is_bounded(client: TestClient, params: dict[str, int]) -> 
     assert client.get("/api/autonomy/events", params=params).status_code == 422
 
 
-def test_events_are_newest_first(client: TestClient, paths: dict[str, Path]) -> None:
+def test_events_are_newest_first_and_do_not_expose_detail(
+    client: TestClient, paths: dict[str, Path]
+) -> None:
     _seed_orchestrator(paths["orchestrator"])
     body = client.get("/api/autonomy/events", params={"limit": 3}).json()
     assert body["configured"] is True
+    assert body["readable"] is True
     assert [item["event"] for item in body["items"]] == [
         "research_disabled",
         "safe_mode_on",
         "paused",
     ]
-    assert body["items"][0]["job_id"] is None
+    assert body["items"][0].get("job_id") is None
+    assert all("detail" not in item for item in body["items"])
 
 
 # ------------------------------------------------------------------- read-only
-
-
-def test_get_never_creates_a_missing_store(client: TestClient, paths: dict[str, Path]) -> None:
-    for url in (
-        "/api/autonomy/status",
-        "/api/autonomy/champions",
-        "/api/autonomy/jobs",
-        "/api/autonomy/events",
-    ):
-        assert client.get(url).status_code == 200, url
-    for key in ("paper", "orchestrator", "archive"):
-        assert not paths[key].exists()
-    assert not paths["runs_root"].exists()
 
 
 def test_get_is_served_while_a_writer_holds_a_transaction(
@@ -402,7 +541,7 @@ def test_get_is_served_while_a_writer_holds_a_transaction(
     assert events.status_code == 200 and events.json()["items"]
 
 
-def test_get_leaves_seeded_databases_byte_identical(
+def test_get_leaves_seeded_databases_byte_identical_and_pins_the_tree(
     client: TestClient, paths: dict[str, Path]
 ) -> None:
     _seed_paper(paths["paper"])
@@ -421,18 +560,28 @@ def test_get_leaves_seeded_databases_byte_identical(
     for key, payload in before.items():
         assert paths[key].read_bytes() == payload, key
 
+    # A read-only WAL connection creates ``-shm``/``-wal`` sidecars. Nothing else
+    # may appear: a regular write connection would also create the database or
+    # change its bytes, which the snapshot above rejects.
+    expected = set()
+    for key in ("paper", "orchestrator", "archive"):
+        name = str(paths[key])
+        expected.update({name, f"{name}-wal", f"{name}-shm"})
+    actual = {str(path) for path in paths["runs_root"].parent.rglob("*") if path.is_file()}
+    assert actual == expected
+
 
 def test_every_autonomy_route_is_read_only(client: TestClient) -> None:
-    paths = {
+    routes = {
         path: set(methods)
         for path, methods in client.app.openapi()["paths"].items()
         if path.startswith("/api/autonomy")
     }
-    assert set(paths) == {
+    assert set(routes) == {
         "/api/autonomy/status",
         "/api/autonomy/champions",
         "/api/autonomy/jobs",
         "/api/autonomy/events",
     }
-    assert all(methods == {"get"} for methods in paths.values())
+    assert all(methods == {"get"} for methods in routes.values())
     assert client.post("/api/autonomy/status").status_code == 405
