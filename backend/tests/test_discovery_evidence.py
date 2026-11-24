@@ -212,13 +212,23 @@ def test_poisoned_future_rows_cannot_change_the_evidence(
     assert all(fold.test_end_row <= relative_end for fold in after.folds)
 
 
+@pytest.mark.parametrize(
+    "dataset_id",
+    [
+        f"{SYMBOL}:{TIMEFRAME}:final-test",
+        f"{SYMBOL}:{TIMEFRAME}:oos",
+        f"{SYMBOL}:{TIMEFRAME}:out-of-sample",
+        f"{SYMBOL}:{TIMEFRAME}:unseen",
+    ],
+)
 def test_a_holdout_dataset_id_is_refused(
     discovery: tuple[FeatureFrame, DatasetBundle],
+    dataset_id: str,
 ) -> None:
     features, bundle = discovery
     poisoned = replace(
         bundle,
-        manifest=replace(bundle.manifest, dataset_id=f"{SYMBOL}:{TIMEFRAME}:final-test"),
+        manifest=replace(bundle.manifest, dataset_id=dataset_id),
     )
 
     with pytest.raises(EvidenceError) as exc:

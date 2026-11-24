@@ -425,10 +425,6 @@ def _iso(stamp: np.datetime64) -> str:
     return value.replace(tzinfo=UTC).isoformat()
 
 
-def _stress_label(multiplier: float) -> str:
-    return f"x{multiplier:g}"
-
-
 def _block_edges(start: int, end: int, blocks: int) -> list[int]:
     """Contiguous half-open edges; the first blocks absorb the remainder."""
     total = end - start
@@ -915,7 +911,8 @@ def verify_evidence(
     if evidence.settings_digest != settings_digest:
         raise EvidenceError(
             "stale_settings",
-            f"bundle was built with settings {evidence.settings_digest!r}, not {settings_digest!r}",
+            f"bundle was built with settings {evidence.settings_digest!r}, "
+            f"not {settings_digest!r}",
         )
     if evidence.schema_version != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceError(

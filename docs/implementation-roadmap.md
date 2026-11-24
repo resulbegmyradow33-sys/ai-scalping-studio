@@ -37,14 +37,15 @@ loop is connected.
    rebased and green, but defer TFT/SAC/TD3/DQN/Mamba/GNN or dashboard expansion
    unless an experiment justifies it.
 
-### Immediate PR triage
+### Mainline alignment
 
-- #107: rebase onto current main; review deterministic classification as
-  heuristic triage, not semantic understanding.
-- #109: merged champion-history/provider/rollback foundation; upgrade its
-  validation-only promotion limits with mandatory OOS/walk-forward evidence.
-- #105: merged optional benchmark; do not let further model-zoo work displace
-  autonomous evidence and handler integration.
+- #105, #106, #107, #108, #109 and #110 are merged into main as of the verified
+  snapshot recorded in `STATUS.md`.
+- #107 is deterministic heuristic triage, not semantic understanding.
+- #109 is champion history/provider/rollback infrastructure, not a
+  promotion-grade OOS/walk-forward gate.
+- #105 is optional benchmark infrastructure; do not let model-zoo expansion
+  displace autonomous evidence and handler integration.
 
 Working rules for every phase:
 

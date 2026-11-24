@@ -3,8 +3,10 @@
 Phase 12 slices one and two: a persistent, restart-safe paper-trading ledger, a
 deterministic session runner, a read/write HTTP API over the ledger, and a
 disabled MT5 demo adapter skeleton. Phase 19 slice A adds an autonomous runner
-that paper-trades a validated DSL strategy spec. There is still no scheduler and
-no frontend page; a session row is a record, not a running process.
+that paper-trades a validated DSL strategy spec. Slice B adds incremental
+operation on appended bars and matured-outcome analysis. There is still no
+scheduler and no frontend page; a session row is a record, not a running
+process.
 
 ## No real-money execution
 
@@ -26,6 +28,10 @@ Implemented:
 - `scalping.paper.autonomous.AutonomousPaperRunner` — loads stored bars through
   the feature cache and paper-trades a validated DSL `StrategySpec` without a
   hand-written policy; see “Autonomous DSL runner”.
+- `scalping.paper.continuous.ContinuousPaperRunner` — advances the same session
+  as new bars are stored, refuses gaps and ordering defects, and exposes
+  `matured_outcomes` / `outcome_fingerprint` for the research loop; see
+  “Continuous operation”.
 - Restart safety: reopening a ledger and resuming a session replays the
   recorded actions, verifies the account against the stored state and only then
   appends. Duplicate history is impossible by construction.
@@ -255,6 +261,123 @@ The module imports no network client, holds no credentials and has no
 order-routing code. Real-money execution remains disabled and out of scope; the
 autonomous runner is a paper record, not a broker connection.
 
+## Continuous operation
+
+`scalping.paper.continuous.ContinuousPaperRunner` keeps one paper session
+current as bars are appended to the store. It executes the same validated
+`StrategySpec` and the same `PaperSession` / `Simulator` / `RiskEngine` path as
+the autonomous runner; it adds only a durable cursor, a strict store check and
+an `advance()` call.
+
+```python
+from scalping.paper import PaperLedger
+from scalping.paper.continuous import ContinuousPaperRunner, matured_outcomes
+
+with PaperLedger("var/paper/autonomous.db") as ledger:
+    runner = ContinuousPaperRunner(
+        ledger,
+        spec,                       # StrategySpec from the champion layer
+        "XAUUSD",
+        "M1",
+        settings,
+        store_root="data",
+        scope="XAUUSD:M1",
+    )
+    while new_bars_were_stored():
+        summary = runner.advance()
+        print(summary.new_bars, summary.new_signals, summary.new_trades)
+
+    batch = matured_outcomes(ledger, runner.session_id)
+```
+
+`advance()` reads the whole stored slice, builds or loads the causal feature
+matrix, resumes the session and appends only new decisions. The call is
+caller-driven: there is no polling thread, daemon or scheduler in this slice.
+
+### Idempotency rule
+
+The ledger is the cursor. The last processed timestamp is the newest signal in
+the session, not an in-memory counter, so a process restart resumes from the
+same bar. `PaperSession.resume()` replays the recorded actions through a fresh
+simulator and verifies balance and open position before anything is appended.
+`advance()` additionally checks that every recorded signal timestamp lands on
+the stored bar it was recorded on; a rewritten history raises
+`SessionMismatchError` instead of shifting decisions onto other bars. The result
+is idempotent by bar timestamp: a second call without new bars writes no signal,
+order, fill, trade or equity mark, and a recorded bar can never produce a second
+signal.
+
+The session id remains `auto-<symbol>-<timeframe>-<hash prefix>`. A session
+created by the autonomous runner is resumed if symbol, timeframe, strategy hash,
+window, seed and contract/risk/cost settings match; a mismatch raises
+`SessionMismatchError` rather than silently replaying a different account.
+`scope` (default `<symbol>:<timeframe>`) is recorded for audit and does not
+change the id.
+
+### The provisional last bar
+
+The newest stored bar is priced but never used as a decision bar. The simulator
+needs a following bar to evaluate stops and targets; taking the tail as a
+decision bar would book a `data_end` close and make a later append
+unreplayable. Appending `N` bars therefore advances exactly `N` decisions: the
+previous tail becomes decidable and the new tail stays provisional. This is the
+one-bar latency of continuous operation, not a skipped bar.
+
+### Gap and ordering policy
+
+Before anything is written:
+
+- the whole stored slice must be strictly increasing by `ts` and free of
+  duplicates, otherwise `BarOrderError`;
+- the range from the ledger cursor to the newest bar must contain one bar per
+  timeframe slot, otherwise `BarGapError`;
+- a jump is allowed only when the missing instants fall inside the symbol's
+  closed session window from the registry (a weekend or a daily close). A symbol
+  that is not in the registry gets the strict cadence check; a timeframe with no
+  known bar size is checked for ordering only.
+
+A gap is refused rather than skipped: silently filling it would change the
+bar-to-signal alignment and invent decisions on bars that were never stored.
+Backfill the missing partition and call `advance()` again. History before the
+cursor is not re-checked for cadence (it is already reflected in decisions), but
+ordering is checked across the whole slice.
+
+### Matured outcomes
+
+`matured_outcomes(ledger, session_id)` returns an immutable `OutcomeBatch` of
+**closed trades only**. Each row carries entry and exit timestamps, side, entry
+and exit price, lot, P&L, R multiple, exit reason, the session's canonical
+strategy hash and the stored dataset id when the session config has one. Open
+positions are not rows; the batch counts them in `open_trades`. `to_dict()` /
+`to_json()` are the JSON-safe projections.
+
+`outcome_fingerprint(batch)` is a sha256 over a canonical payload of the batch.
+It excludes `trade_id` (a re-created ledger can renumber rows) and
+`open_trades` (an open position is not matured), and sorts rows by their own
+fields, so identical outcomes hash identically regardless of read order. The
+orchestrator can store the last fingerprint and skip a research trigger when the
+same matured set is analysed again; any newly closed trade changes the hash.
+
+### Honest limits
+
+- **Single process, no scheduler.** `advance()` is a synchronous call; nothing
+  polls the store, sleeps or retries. A scheduler/daemon is the next slice.
+- **Outcomes only after close.** A trade enters the batch when `trades` has a
+  row. Until then its P&L is unrealized and excluded.
+- **Session-level data id.** The `signals` table has no data column, so the
+  dataset id is recorded once in the session config when the session is created.
+  A per-trade data hash would need a schema migration.
+- **Replay cost grows with the session.** Each `advance()` rebuilds the feature
+  matrix for the stored slice and replays the recorded actions. This is exact
+  and cheap for a paper session of a few thousand bars, but it is linear in
+  session length; snapshot resume or session rollover is future work.
+- **No gap repair.** A gap is a refusal. The runner does not fetch, interpolate
+  or invent the missing bar.
+- **No champion selection.** `spec` is supplied by the caller; this module does
+  not choose it and has no legacy fallback.
+- **No real money.** No network client, credentials or order routing exists in
+  the module; paper trading remains the only execution target.
+
 ## HTTP API
 
 `scalping.api.routes_paper` mounts under `/api/paper`. It reads and writes the
@@ -325,9 +448,8 @@ integration:
 - API/CLI wiring for `AutonomousPaperRunner`. It is constructed in-process; the
   next slice adds the endpoint/command that selects a discovered spec, runs it
   and exposes the summary.
-- A continuous feed. The autonomous runner processes the stored slice it was
-  constructed with; new bars require a new runner, which then resumes the same
-  session by id.
+- A scheduler or daemon for continuous operation. `advance()` is caller-driven;
+  nothing polls the store, sleeps or retries, and no endpoint starts a loop.
 - The Paper Trading frontend page (next slice).
 - Limit orders and partial fills. `orders.status` already has `pending`, and
   `resume` reports pending rows, but the runner only sends market orders.
@@ -366,10 +488,21 @@ sizing node cannot change the broker's lot, `max_bars` survives across calls, a
 reopened ledger keeps the attribution, and a source scan finds no network,
 credential or real-money path.
 
+`backend/tests/test_paper_continuous.py` covers incremental operation: an empty
+store and a no-new-bars call write nothing, appending 20 bars advances exactly
+20 decisions, a restart over a reopened ledger resumes without duplicate signals
+or trades, an overlapping refetch adds no duplicate signal, a gap or an
+out-of-order/duplicate bar is refused before any row is written, a session with
+a different spec hash is refused, an open position is counted but excluded from
+the matured batch, the outcome fingerprint is stable and changes when a trade
+matures, appending future bars leaves earlier signals unchanged, and a source
+scan finds no network or legacy strategy reference.
+
 ```bash
 cd backend
 uv run ruff check src tests scripts
 uv run mypy src
-uv run pytest tests/test_api_paper.py tests/test_paper_mt5.py tests/test_paper_autonomous.py -q
+uv run pytest tests/test_api_paper.py tests/test_paper_mt5.py \
+  tests/test_paper_autonomous.py tests/test_paper_continuous.py -q
 uv run pytest
 ```

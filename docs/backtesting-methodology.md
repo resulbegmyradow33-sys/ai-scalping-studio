@@ -145,8 +145,8 @@ correctly, never that the candidate has an edge.
 | Section | Fields |
 |---|---|
 | identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget` |
-| splits | `SplitBoundaries`: half-open `train`, `validation` and `test` row offsets, so a policy can tell a selection fold from the locked holdout |
 | policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
+| splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
@@ -158,6 +158,8 @@ code version or execution-settings digest is detectable before a policy reads a
 metric. `settings_digest` hashes the contract, risk and cost blocks, because
 settings are not in the dataset manifest and two bundles priced differently must
 not share identity.
+
+The schema version is stored and must equal the module's current version.
 
 ### Fold geometry
 
@@ -176,7 +178,8 @@ test:  [test_start, test_end)     no overlap with another fold
 max(config.embargo_bars, manifest.embargo_bars)`. The manifest purge is already
 at least the label horizon. The DSL policy has no fitted parameters, so the
 training range is recorded for provenance rather than refitted; "expanding"
-means every later fold's recorded history includes the earlier test blocks.
+means every later fold's recorded history includes all earlier test blocks
+except the trailing purge/embargo rows that precede the new test block.
 
 Each test block is simulated by the same `DslEvaluator` the search uses: same
 costs, risk engine, weekly session and bar order. The first `window - 1` bars of
@@ -203,10 +206,10 @@ later extension, not silently assumed.
 | Code | Trigger |
 |---|---|
 | `insufficient_folds` | fewer than 3 folds, or too few rows to fill the blocks |
-| `fold_geometry` | empty train/test/validation range, overlapping test blocks, test rows inside the timeline |
+| `fold_geometry` | empty validation/test split, empty train/test range, overlapping test blocks, test rows inside the timeline |
 | `fold_too_small` | a test block is no longer than the observation window |
 | `fold_trades_below_minimum` | a fold closes fewer trades than the policy minimum |
-| `missing_cost_stress` | no multiplier configured, no multiplier above 1.0, or a fold is missing a configured row |
+| `missing_cost_stress` | no multiplier configured, or every configured multiplier is `<= 1.0` (a no-op stress) |
 | `missing_regime_evidence` | the rule engine returned no labels |
 | `regime_coverage_below_minimum` | too few trades have a regime at entry |
 | `non_finite_evidence` | any stored metric, R multiple or CI bound is not finite |
@@ -215,9 +218,10 @@ later extension, not silently assumed.
 | `complexity_mismatch` | the configured complexity differs from the spec |
 | `invalid_trial_context` | `trial_count` exceeds `search_budget` |
 | `frame_mismatch` | the supplied feature frame is not the bundle's source frame |
-| `invalid_spec` / `invalid_settings` | the DSL spec fails validation, or the settings cannot be hashed |
-| `stale_dataset` / `stale_dataset_checksum` / `stale_spec` / `stale_code_version` / `stale_settings` | verification identity differs from the expected data build, spec, code or settings |
-| `schema_mismatch` | the bundle layout version is not the one the verifier reads |
+| `invalid_spec` | the DSL spec fails validation |
+| `invalid_settings` | the supplied settings cannot be canonicalised |
+| `stale_dataset` / `stale_dataset_checksum` / `stale_spec` / `stale_code_version` / `stale_settings` | verification identity differs |
+| `schema_mismatch` | the bundle schema version is not the current one |
 | `checksum_mismatch` / `missing_section` | a bundle was edited or is incomplete |
 
 ### What is still missing
