@@ -21,8 +21,10 @@ LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
-- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing.
-- [docs/autonomous-system-audit-2026-11-24.md](docs/autonomous-system-audit-2026-11-24.md) — current autonomous-system audit and ordered gaps.
+- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
+  the exact commands that reproduce each claim.
+- [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
+- [docs/autonomous-system-audit-2026-11-24.md](docs/autonomous-system-audit-2026-11-24.md) — historical autonomous-system audit and ordered gaps.
 - [AGENTS.md](AGENTS.md) — mandatory instructions for every human/AI contributor.
 - [docs/architecture-audit.md](docs/architecture-audit.md) — historical 2026-11-22 snapshot.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
@@ -76,7 +78,7 @@ RL result: imitation + PPO is stable but weaker than the rule (+0.012 R and
 
 ```
 backend/   FastAPI, Parquet store, features, simulator, PPO, strategy card
-frontend/  Next.js 15 panel (simulator, training, performance, data)
+frontend/  Next.js 15 panel (simulator, training, performance, data, paper)
 docs/      design, live strategy, forward test, RL notes
 ```
 
@@ -87,7 +89,7 @@ The backend is Python 3.12 managed by `uv`; the frontend is Next.js + Tailwind.
 ```bash
 cd backend
 uv sync
-uv run pytest                       # ~500 tests
+uv run pytest                       # full backend suite
 
 uv run python -m scalping.cli data synth \
   --root ../demo-data --symbol XAUUSD --start 2024-10-01 --end 2024-10-10
@@ -117,6 +119,21 @@ uv run python -m scalping.cli serve \
 
 `runs/strategy_card.json` is runtime state and is gitignored; the tracked seed
 lives in `backend/config/`.
+
+## Verify the current claims
+
+`STATUS.md` lists the pytest files and CLI invocations behind each status row.
+Two examples:
+
+```bash
+cd backend
+uv run pytest tests/test_promotion_policy.py tests/test_locked_holdout.py
+uv run python -m scalping.cli discovery run --root ../data-ticks5-store \
+  --symbol XAUUSD --timeframe M5 --max-trials 64 --seed 0
+```
+
+Main is red on `tests/test_api_autonomy.py` as of 2026-11-24; the cause and the
+latest green CI run id are recorded in `STATUS.md`.
 
 ## Data
 

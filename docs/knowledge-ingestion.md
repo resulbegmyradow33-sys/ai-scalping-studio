@@ -416,6 +416,40 @@ promotion, and the paper runner is the only execution target. A supported
 hypothesis does not become a champion; a converted proposal does not become an
 order.
 
+## Orchestrator bridge (approved proposals only)
+
+The queue bridge lives outside this package, in
+`backend/src/scalping/orchestrator/proposal_handlers.py`. It is the only path
+from an approved proposal to a `discovery.run` job:
+
+- `ProposalQueueTriggerSource` calls `proposals_for_queue(store, limit)` and
+  reads **approved** records only. Proposed, rejected and converted records are
+  never bridged, and the source never calls `approve`, `reject` or
+  `link_candidate`.
+- A record is eligible when its symbol/timeframe is in the project registry, its
+  required bar columns and feature groups are non-empty, and an optional
+  `dataset_id` hint does not name a locked test/holdout split. A missing or
+  unknown scope, a missing data requirement and a holdout-looking hint each
+  produce one `proposal.not_queued` audit event instead of a job.
+- The emitted payload is the same explicit `DiscoveryRequest` the production
+  handler validates (`symbol`, `timeframe`, `max_trials`, `seed`, `stress`,
+  `gate`, `population`, `generations`, `patience`, `horizon`). The search policy
+  comes from a caller-supplied `DiscoveryTemplate`; nothing is inherited.
+- Dedupe is `discovery.run:proposal:<proposal id>:<payload sha256>`, backed by a
+  cursor in the job store. A repeat scan or a process restart does not create a
+  second job, and changing the template is a new experiment rather than a
+  deduplicated old one.
+- The optional `knowledge.proposals` handler records a proposal snapshot and
+  returns `queue_discovery` with `queued: false` / `executed: false`. It does not
+  read the proposal store, run discovery or enqueue work.
+
+The bridge does not change this package's status rules. `approved` still enters
+the queue, `rejected` never does, and `link_candidate` remains the only way to
+reach `converted`. A proposal converted after its job was queued does not retract
+the job; the owner still controls that queue decision. The full trigger contract,
+refusal vocabulary and honest limits are in
+[`docs/orchestrator.md`](orchestrator.md#approved-proposals-as-discovery-triggers-knowledge-bridge).
+
 ## Boundaries
 
 - **Document text is never a trusted strategy or an order.** Nothing in this
@@ -457,12 +491,19 @@ read-back rollback, schema-v1→v2 migration with backfilled decisions,
 concurrent rejected inserts, reopen persistence and the absence of
 strategy/order/network imports.
 
+The bridge is covered separately in
+`backend/tests/test_proposal_bridge.py`: approved-only emission, payload
+validation against the real discovery handler, crash/restart dedupe, refusal
+reasons, holdout-hint refusal, provenance in the audit log and the
+proposal-only `knowledge.proposals` handler.
+
 Run:
 
 ```sh
 cd backend
 uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py \
-  tests/test_knowledge_extract.py tests/test_hypothesis_routing.py -q
+  tests/test_knowledge_extract.py tests/test_hypothesis_routing.py \
+  tests/test_proposal_bridge.py -q
 uv run ruff check src tests scripts
 uv run mypy src
 ```

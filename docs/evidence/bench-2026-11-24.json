@@ -1,0 +1,447 @@
+{
+  "schema": "scalping.bench.evidence/1",
+  "generated_at": "2026-11-24T15:45:46+00:00",
+  "base_commit": "693f8a37ed5f5fdfbabb7bbbed0bd468468c9875",
+  "branch": "feat/perfreal",
+  "host": {
+    "os": "macOS 27.2.1 (build 26B131)",
+    "model": "Mac14,3 (Apple M2)",
+    "cpu_count": 8,
+    "total_ram_mb": 8192,
+    "disk_free_gib": 113,
+    "load_average_at_start": "3.69 3.03 2.79",
+    "note": "measurements taken while the interactive desktop session was open; one heavy job at a time"
+  },
+  "datasets": [
+    {
+      "store": "data-ticks5-store",
+      "timeframe": "M1",
+      "parquet_files": 244,
+      "size_mb": 53.2,
+      "store_digest_sha256": "a2c7bb441641e763ac1fc92e58843afdeb783435e04d8f0841a763b9e87084da",
+      "bars_available": 1773331,
+      "first_ts": "2021-05-24T00:00:00+00:00",
+      "last_ts": "2026-05-22T20:59:00+00:00"
+    },
+    {
+      "store": "data-real-store",
+      "timeframe": "H1",
+      "parquet_files": 1015,
+      "size_mb": 112.3,
+      "store_digest_sha256": "fdb7c5950e876a8c6a12bc88b587b78eabb2c17674e8a61fd99888884b90412c",
+      "bars_available": 100083,
+      "first_ts": "2009-03-15T21:00:00+00:00",
+      "last_ts": "2026-01-09T21:00:00+00:00"
+    }
+  ],
+  "commands": [
+    "cd backend && uv run python scripts/bench_pipeline.py --real-store --store-root ../../../data-ticks5-store --timeframe M1 --rows 20000 --repeats 3 --warmup 1 --max-trials 5 --out ../../runs/bench/m1-ticks5-20k.json",
+    "cd backend && uv run python scripts/bench_pipeline.py --real-store --store-root ../../../data-ticks5-store --timeframe M1 --rows 200000 --repeats 3 --warmup 1 --max-trials 5 --out ../../runs/bench/m1-ticks5-200k.json",
+    "cd backend && uv run python scripts/bench_pipeline.py --real-store --store-root ../../../data-real-store --timeframe H1 --rows 200000 --repeats 3 --warmup 1 --max-trials 5 --out ../../runs/bench/h1-real-200k.json",
+    "uv run pytest tests/test_bench_pipeline.py -q"
+  ],
+  "static_statistics": {
+    "aggregation": "median/min/max over 3 measured repeats; one discarded warmup call per stage",
+    "repeats": 3,
+    "warmup": 1
+  },
+  "suites": [
+    {
+      "id": "m1_ticks5_20k",
+      "store": "data-ticks5-store",
+      "timeframe": "M1",
+      "rows": 20000,
+      "suite_peak_rss_mb": 839.6,
+      "exit_code": 0,
+      "generated_at": "2026-11-24T15:40:54+00:00",
+      "environment": {
+        "python": "3.12.13",
+        "implementation": "CPython",
+        "platform": "macOS-27.2.1-arm64-arm-64bit",
+        "machine": "arm64",
+        "processor": "arm",
+        "cpu_count": 8,
+        "total_ram_mb": 8192.0
+      },
+      "stages": [
+        {
+          "stage": "features_build",
+          "ok": true,
+          "rows": 20000,
+          "wall_seconds_median": 0.093994,
+          "wall_seconds_min": 0.089471,
+          "wall_seconds_max": 0.104235,
+          "cpu_total_seconds_median": 0.166345,
+          "rss_peak_mb": 839.59375,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "dataset_build",
+          "ok": true,
+          "rows": 19939,
+          "wall_seconds_median": 0.104973,
+          "wall_seconds_min": 0.095269,
+          "wall_seconds_max": 0.109735,
+          "cpu_total_seconds_median": 0.171086,
+          "rss_peak_mb": 839.59375,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "discovery_smoke",
+          "ok": true,
+          "rows": 2990,
+          "wall_seconds_median": 0.774409,
+          "wall_seconds_min": 0.760329,
+          "wall_seconds_max": 0.8115,
+          "cpu_total_seconds_median": 0.850106,
+          "rss_peak_mb": 839.59375,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "evidence_build",
+          "ok": true,
+          "rows": 19939,
+          "wall_seconds_median": 1.539478,
+          "wall_seconds_min": 1.523111,
+          "wall_seconds_max": 3.461568,
+          "cpu_total_seconds_median": 1.62632,
+          "rss_peak_mb": 839.59375,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "paper_advance",
+          "ok": false,
+          "rows": null,
+          "wall_seconds_median": 0.0,
+          "wall_seconds_min": 0.0,
+          "wall_seconds_max": 0.0,
+          "cpu_total_seconds_median": 0.0,
+          "rss_peak_mb": null,
+          "rss_delta_mb": null,
+          "disk_delta_mb": null,
+          "error": "warmup failed: BarGapError: session 'auto-XAUUSD-M1-5445208829553470': missing bar at 2021-05-24T04:04:00+00:00 before 2021-05-24T04:05:00+00:00"
+        }
+      ],
+      "summary": {
+        "stages": 5,
+        "ok": 4,
+        "failed": 1,
+        "wall_seconds_median_total": 2.512853,
+        "max_rss_delta_mb": 0.0
+      }
+    },
+    {
+      "id": "m1_ticks5_200k",
+      "store": "data-ticks5-store",
+      "timeframe": "M1",
+      "rows": 200000,
+      "suite_peak_rss_mb": 883.9,
+      "exit_code": 0,
+      "generated_at": "2026-11-24T15:43:41+00:00",
+      "environment": {
+        "python": "3.12.13",
+        "implementation": "CPython",
+        "platform": "macOS-27.2.1-arm64-arm-64bit",
+        "machine": "arm64",
+        "processor": "arm",
+        "cpu_count": 8,
+        "total_ram_mb": 8192.0
+      },
+      "stages": [
+        {
+          "stage": "features_build",
+          "ok": true,
+          "rows": 200000,
+          "wall_seconds_median": 0.832873,
+          "wall_seconds_min": 0.825039,
+          "wall_seconds_max": 0.833501,
+          "cpu_total_seconds_median": 1.099396,
+          "rss_peak_mb": 883.96875,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "dataset_build",
+          "ok": true,
+          "rows": 199939,
+          "wall_seconds_median": 1.076236,
+          "wall_seconds_min": 1.008328,
+          "wall_seconds_max": 1.270741,
+          "cpu_total_seconds_median": 1.292355,
+          "rss_peak_mb": 883.96875,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "discovery_smoke",
+          "ok": true,
+          "rows": 29990,
+          "wall_seconds_median": 8.283032,
+          "wall_seconds_min": 8.27288,
+          "wall_seconds_max": 10.182582,
+          "cpu_total_seconds_median": 8.360289,
+          "rss_peak_mb": 883.96875,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "evidence_build",
+          "ok": true,
+          "rows": 199939,
+          "wall_seconds_median": 3.294168,
+          "wall_seconds_min": 3.186715,
+          "wall_seconds_max": 3.700639,
+          "cpu_total_seconds_median": 3.685316,
+          "rss_peak_mb": 883.96875,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "paper_advance",
+          "ok": false,
+          "rows": null,
+          "wall_seconds_median": 0.0,
+          "wall_seconds_min": 0.0,
+          "wall_seconds_max": 0.0,
+          "cpu_total_seconds_median": 0.0,
+          "rss_peak_mb": null,
+          "rss_delta_mb": null,
+          "disk_delta_mb": null,
+          "error": "warmup failed: BarGapError: session 'auto-XAUUSD-M1-5445208829553470': missing bar at 2021-05-24T04:04:00+00:00 before 2021-05-24T04:05:00+00:00"
+        }
+      ],
+      "summary": {
+        "stages": 5,
+        "ok": 4,
+        "failed": 1,
+        "wall_seconds_median_total": 13.486309,
+        "max_rss_delta_mb": 0.0
+      }
+    },
+    {
+      "id": "h1_real_200k",
+      "store": "data-real-store",
+      "timeframe": "H1",
+      "rows": 200000,
+      "suite_peak_rss_mb": 438.8,
+      "exit_code": 0,
+      "generated_at": "2026-11-24T15:41:53+00:00",
+      "environment": {
+        "python": "3.12.13",
+        "implementation": "CPython",
+        "platform": "macOS-27.2.1-arm64-arm-64bit",
+        "machine": "arm64",
+        "processor": "arm",
+        "cpu_count": 8,
+        "total_ram_mb": 8192.0
+      },
+      "stages": [
+        {
+          "stage": "features_build",
+          "ok": true,
+          "rows": 100083,
+          "wall_seconds_median": 0.61565,
+          "wall_seconds_min": 0.606637,
+          "wall_seconds_max": 0.690794,
+          "cpu_total_seconds_median": 0.808789,
+          "rss_peak_mb": 400.28125,
+          "rss_delta_mb": 13.109375,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "dataset_build",
+          "ok": true,
+          "rows": 100022,
+          "wall_seconds_median": 0.649735,
+          "wall_seconds_min": 0.625825,
+          "wall_seconds_max": 0.653559,
+          "cpu_total_seconds_median": 0.840065,
+          "rss_peak_mb": 422.328125,
+          "rss_delta_mb": 19.203125,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "discovery_smoke",
+          "ok": true,
+          "rows": 15003,
+          "wall_seconds_median": 4.051559,
+          "wall_seconds_min": 3.833169,
+          "wall_seconds_max": 4.263257,
+          "cpu_total_seconds_median": 4.36045,
+          "rss_peak_mb": 438.765625,
+          "rss_delta_mb": 3.890625,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "evidence_build",
+          "ok": true,
+          "rows": 100022,
+          "wall_seconds_median": 0.906441,
+          "wall_seconds_min": 0.896483,
+          "wall_seconds_max": 0.924108,
+          "cpu_total_seconds_median": 1.191643,
+          "rss_peak_mb": 438.765625,
+          "rss_delta_mb": 0.0,
+          "disk_delta_mb": null,
+          "error": null
+        },
+        {
+          "stage": "paper_advance",
+          "ok": false,
+          "rows": null,
+          "wall_seconds_median": 0.0,
+          "wall_seconds_min": 0.0,
+          "wall_seconds_max": 0.0,
+          "cpu_total_seconds_median": 0.0,
+          "rss_peak_mb": null,
+          "rss_delta_mb": null,
+          "disk_delta_mb": null,
+          "error": "warmup failed: BarGapError: session 'auto-XAUUSD-H1-5445208829553470': missing bar at 2009-05-25T17:00:00+00:00 before 2009-05-25T22:00:00+00:00"
+        }
+      ],
+      "summary": {
+        "stages": 5,
+        "ok": 4,
+        "failed": 1,
+        "wall_seconds_median_total": 6.223385,
+        "max_rss_delta_mb": 19.203
+      }
+    }
+  ],
+  "feature_cache": {
+    "how": "inline uv run python: ParquetStore.read(...).head(rows) -> cached_build_features(FeatureCache(tmpdir), Settings()) once (miss+build+save) then 3 hits; frame_meta is recomputed on every call and is included in hit time",
+    "measurements": [
+      {
+        "store": "data-ticks5-store",
+        "timeframe": "M1",
+        "input_rows": 20000,
+        "feature_rows": 20000,
+        "feature_cols": 59,
+        "cold_miss_seconds": 0.253522,
+        "hit_seconds_median": 0.014127,
+        "hit_seconds_min": 0.013731,
+        "hit_seconds_max": 0.016269,
+        "stats": {
+          "hits": 3,
+          "misses": 1,
+          "saves": 1,
+          "corrupt": 0,
+          "errors": 0,
+          "load_seconds": 0.037212,
+          "save_seconds": 0.013966,
+          "entries": 1
+        },
+        "entry_bytes": 5843032
+      },
+      {
+        "store": "data-real-store",
+        "timeframe": "H1",
+        "input_rows": 20000,
+        "feature_rows": 20000,
+        "feature_cols": 59,
+        "cold_miss_seconds": 0.210123,
+        "hit_seconds_median": 0.010631,
+        "hit_seconds_min": 0.009547,
+        "hit_seconds_max": 0.011203,
+        "stats": {
+          "hits": 3,
+          "misses": 1,
+          "saves": 1,
+          "corrupt": 0,
+          "errors": 0,
+          "load_seconds": 0.026234,
+          "save_seconds": 0.009315,
+          "entries": 1
+        },
+        "entry_bytes": 5843032
+      },
+      {
+        "store": "data-ticks5-store",
+        "timeframe": "M1",
+        "input_rows": 200000,
+        "feature_rows": 200000,
+        "feature_cols": 59,
+        "cold_miss_seconds": 1.522588,
+        "hit_seconds_median": 0.103575,
+        "hit_seconds_min": 0.097476,
+        "hit_seconds_max": 0.127853,
+        "stats": {
+          "hits": 3,
+          "misses": 1,
+          "saves": 1,
+          "corrupt": 0,
+          "errors": 0,
+          "load_seconds": 0.278301,
+          "save_seconds": 0.213285,
+          "entries": 1
+        },
+        "entry_bytes": 58403038
+      }
+    ]
+  },
+  "temp_store_write": [
+    {
+      "store": "data-ticks5-store",
+      "timeframe": "M1",
+      "rows": 20000,
+      "write_seconds": 0.0863,
+      "parquet_bytes": 536236
+    },
+    {
+      "store": "data-ticks5-store",
+      "timeframe": "M1",
+      "rows": 200000,
+      "write_seconds": 0.094,
+      "parquet_bytes": 5297475
+    },
+    {
+      "store": "data-real-store",
+      "timeframe": "H1",
+      "rows": 100083,
+      "write_seconds": 0.6915,
+      "parquet_bytes": 2608592
+    }
+  ],
+  "not_run": [
+    {
+      "stage": "paper_advance",
+      "reason": "BarGapError on real bars; the paper runner requires contiguous session bars and fails closed on market gaps. Paper logic was not modified (out of scope).",
+      "m1_error": "missing bar at 2021-05-24T04:04:00+00:00 before 2021-05-24T04:05:00+00:00",
+      "h1_error": "missing bar at 2009-05-25T17:00:00+00:00 before 2009-05-25T22:00:00+00:00"
+    }
+  ],
+  "claims": {
+    "kind": "local_measurement",
+    "data_sources": [
+      "real_store"
+    ],
+    "validation": false,
+    "profitability": false,
+    "m2_acceptance": false,
+    "text": "Local wall/CPU/RSS/disk measurements on one Mac mini M2 at one time, on bounded real samples. They do not validate a strategy, prove profitability or satisfy M2 acceptance. paper_advance did not run on real bars (gap check)."
+  },
+  "limitations": [
+    "samples are the first N chronological bars (frame.head), not a random or stratified sample",
+    "M1 200k is 11.3% of the 1,773,331 stored M1 bars; H1 200k is the whole 100,083-bar H1 store",
+    "rss_delta_mb is high-water growth and reads 0.0 once an earlier stage set the peak; rss_peak_mb is the useful number",
+    "per-stage disk_delta_mb is null because no stage set disk_path; disk is reported from store size, cache entry size and a separate temp-store write measurement",
+    "discovery_smoke uses population=2, generations=1 and max_trials=5: a pipeline smoke, not a search experiment",
+    "evidence_build uses a fixed always-long spec, folds=3, bootstrap_samples=100 and cost_stress (1.5, 2.0): fold geometry and cost arithmetic only",
+    "single machine, warm page cache after the first read, interactive desktop processes present; no confidence intervals"
+  ]
+}
