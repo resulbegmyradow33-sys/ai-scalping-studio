@@ -1,5 +1,7 @@
 # Team workflow
 
+**All human and AI contributors must read the repository-root AGENTS.md before starting work.** It points to the canonical master requirements, dated audit, task board and roadmap. Tool-specific instruction files only delegate to AGENTS.md; they must not create competing project goals.
+
 How work moves from an idea to `main` without breaking the validated system.
 The repository is public; write access is granted per person, not per team (a
 personal GitHub account has collaborators, not org teams).
@@ -174,3 +176,33 @@ secret scanning, push protection and CodeQL. `scripts/setup_github.sh` applies:
 The local `pre-push` hook remains as defense in depth. If the repository ever
 becomes private again, server-side protection disappears on the Free plan and
 the hook becomes the only local gate.
+
+
+## AI-agent and multi-contributor contract
+
+- The root AGENTS.md is mandatory for OpenCode/Codex-style agents; CLAUDE.md,
+  GEMINI.md and .github/copilot-instructions.md point to the same contract.
+- Before coding, read the current main, the assigned issue, the dated
+  autonomous-system audit, master prompt and task board. Check open PRs to avoid
+  duplicate or conflicting work.
+- One issue/one logical PR. Do not start a second overlapping implementation
+  while another PR owns the same files or interface; coordinate/rebase first.
+- Do not merge, force-push, close another contributor's PR or change branch
+  protection. The maintainer owns integration.
+- A PR must state which master-prompt requirement it satisfies, which legacy
+  path it touches, the acceptance test, measured resource impact and what is
+  still unproven.
+- No new strategy family/model architecture is accepted without a falsifiable
+  experiment question, baseline, data id/checksum, cost-aware evaluation and a
+  reason the existing system cannot answer it.
+- A green unit suite is code evidence, not OOS validation or profitability.
+
+
+## OpenCode Desktop team setup
+
+The repository's OpenCode Desktop configuration, role-based agents, slash
+commands, cloud-model inheritance, isolated worktree policy and M2 resource
+limits are documented in `docs/opencode-team-workflow.md`. The project config
+sets `autonomy-lead` as the default agent; it deliberately does not pin a
+provider/model, so the owner's currently selected cloud model is inherited by
+subagents. The trading application itself remains independent of cloud LLMs.

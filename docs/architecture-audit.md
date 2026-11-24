@@ -1,6 +1,6 @@
-# Architecture audit — 2026-11-22
+# Historical architecture audit — 2026-11-22 (superseded)
 
-Audit of `main` (then `feat/v1`) at commit `e3c8095`, before the audit documents were added.
+Historical snapshot of main (then feat/v1) at commit e3c8095, before the autonomous DSL/discovery/orchestrator slices were added. **Do not use this document as the current status.** The current audit is docs/autonomous-system-audit-2026-11-24.md.
 Method: source-tree inventory, targeted reading of every module named below,
 `rg` for classes and capabilities, dependency files, test collection, and the
 recorded test/evaluation runs. This is an engineering audit, not a line-by-line

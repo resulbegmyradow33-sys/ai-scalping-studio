@@ -1,8 +1,14 @@
 # Master requirements — AI Scalping Studio
 
-Status: canonical project brief. This file restates the master prompt that
-defines the target system. It is the shared contract between collaborators; the
-audit and roadmap measure the repository against it.
+Status: canonical project brief. This file is the highest-level product and
+engineering contract shared by every human and AI contributor. The root
+AGENTS.md and tool-specific instruction files make this contract discoverable.
+
+Precedence: Sections 28–38 define the actual autonomous objective and supersede
+any earlier generic catalog of strategies, model families or methods. Earlier
+lists are research options, not a mandatory implementation checklist. When this
+brief conflicts with an older status document, use the latest dated audit and
+task board for implementation state; never weaken the objective.
 
 - Repository: `https://github.com/resulbegmyradow33-sys/ai-scalping-studio`
 - Target hardware: Mac mini M2, Apple Silicon, 8 GB unified memory, 256 GB SSD.
@@ -134,11 +140,24 @@ classifiers, autoencoder representations. Learn strategy performance by regime.
 
 ## 11. Strategy research
 
-Momentum, trend, mean reversion, breakout, volatility expansion, price action,
-flow momentum, order flow, liquidity, measurable ICT/SMC rules. Measure win
-rate, PF, expectancy, average R, DD, Sharpe, Sortino, holding time, frequency,
-costs, slippage sensitivity, performance by timeframe and regime. The engine
-must be able to select **NO TRADE**.
+The core engine discovers strategies from reusable, causal, data-grounded
+primitives; it is not a menu of named strategies. It must discover and test its
+own entry, exit, holding, sizing proposal, position-management and NO-TRADE
+behaviour without requiring the owner to provide a recipe.
+
+Named methods such as momentum, trend, mean reversion, breakout, volatility
+expansion, price action, flow momentum, order flow, liquidity or measurable
+ICT/SMC rules may be retained as optional baselines or research hypotheses.
+They must not constrain candidate generation, become mandatory search seeds,
+or be treated as the desired answer. Subjective ICT/SMC labels are not objective
+features unless translated into causal, reproducible measurements.
+
+Measure net expectancy in R, profit factor, drawdown, Sharpe/Sortino where the
+sample supports them, trade count, holding time, frequency, turnover, costs,
+slippage sensitivity, regime/timeframe stability and uncertainty. Always compare
+on identical timestamps, data versions and execution assumptions. The engine
+must be able to select NO TRADE or conclude that no candidate beats the
+incumbent.
 
 ## 12. Ensemble and decision intelligence
 
@@ -556,24 +575,36 @@ a collection of fashionable model names.
 
 ## 35. Updated execution priorities
 
-The existing phases remain, but the autonomous objective is not postponed to a
-cosmetic final feature. After data integrity, leakage-safe datasets and the
-minimum usable ML/RL evaluation foundations are reliable, prioritise in this
-order:
+Do not restart completed phases or expand the model zoo while the autonomous
+loop remains disconnected. Continue from the current repository state and work
+in this dependency order:
 
-1. Complete the autonomous learning registry, experiment lineage, scheduler,
-   champion/candidate gate and rollback.
-2. Build the strategy DSL and autonomous strategy discovery/search engine.
-3. Build document/data knowledge ingestion and hypothesis traceability.
-4. Connect the Learning Orchestrator to new data, new documents, strategy
-   discovery, model training, evaluation and paper feedback.
-5. Complete independent risk and realistic execution simulation.
-6. Run the full closed loop in paper trading and expose its state in the UI.
-7. Expand model families only when measured evidence supports the added cost.
+1. Complete leakage-safe strategy evidence: validation folds, walk-forward,
+   untouched OOS, cost stress, regime coverage, stability and multiple-testing
+   controls. Keep the final test split locked.
+2. Make champion governance fail-closed: require complete evidence, compare a
+   candidate with the incumbent on the same windows, preserve immutable
+   provenance, and support audited rejection/rollback.
+3. Connect real handlers and a persistent scheduler to the orchestrator:
+   ingestion, validation, discovery, evaluation, promotion review, paper
+   sessions, outcome analysis and drift checks. Add measured RAM/CPU/disk
+   resource guards and paper/training isolation.
+4. Route source-linked research hypotheses into quantitative discovery. PDF/OCR
+   and richer parsing are useful only when they can be tested and traced; prose
+   must never become a trading rule directly.
+5. Connect the validated DSL champion to autonomous paper trading, continuous
+   new-bar processing, matured-outcome attribution and the next research cycle.
+   No champion means NO TRADE, not a silent legacy-strategy fallback.
+6. Prove the full loop on real XAUUSD data within the target Mac mini M2 budget.
+7. Complete dashboard/monitoring work that exposes real artifacts and job state.
+8. Expand neural/RL/model families only when a measured experiment answers a
+   specific question and improves the validated system.
 
-Do not block the strategy-independent discovery engine on implementing every
-listed neural architecture. Do not treat a manual strategy library as the
-strategy discovery engine.
+Do not block strategy-independent discovery on every listed neural architecture.
+Do not treat a manual strategy library, a fixed bandit arm list or a prompt as
+the discovery engine.
+
+---
 
 ## 36. Additional acceptance criteria for the actual autonomous objective
 
@@ -611,3 +642,46 @@ A module name, prompt instruction, architecture diagram or placeholder does
 not satisfy an acceptance criterion. Each item requires code, tests and a
 recorded reproducible run. Even passing these criteria proves system
 functionality, not future profitability.
+
+
+## 37. Legacy strategy and model classification
+
+The following existing components are compatibility and comparison assets,
+not the target autonomous learner:
+
+| Component | Classification | Required treatment |
+|---|---|---|
+| flow_momentum, FlowMomentumRule, PolicyCard, strategy_card.json, nightly_calibrate.py | Legacy incumbent/runtime path with historical evidence | Preserve for reproducibility and baseline comparison. Do not use it to seed or constrain DSL search. Retire its default/fallback promotion path only after the DSL champion has passed acceptance and migration tests. |
+| strategy/signals.py five fixed signal families + strategy/bandit.py LinUCB | Legacy finite strategy-menu selector | Keep as an optional benchmark/ablation. Do not expand the arm list as a substitute for open-ended candidate discovery. |
+| PPO/behaviour cloning and nightly_rl.py | Experimental learning baseline | Keep isolated and compare fairly. It is not the autonomous strategy engine and cannot promote itself without the same evidence gates. |
+| hold, ret_5, and the incumbent flow rule | Baseline suite | Use only for identical-window comparisons; never restrict the generated search space. |
+
+No legacy component may be deleted merely because it is old. First inventory
+all imports, API/UI paths, tests and stored artifacts; then migrate behind a
+versioned interface, prove parity where relevant, and remove only in a separate
+reviewed change. Until migration is complete, label its status honestly in the
+UI and documentation.
+
+## 38. Required evidence and promotion invariants
+
+- A discovery validation winner is a candidate, never a champion by itself.
+- Search fitness and promotion evidence are separate. Search may use validation;
+  promotion requires independent chronological evidence and an untouched final
+  test protocol. Repeatedly tuning against the same holdout invalidates its
+  independence.
+- Production/paper promotion must fail closed when required evidence or policy
+  thresholds are absent. Zero/empty default criteria are acceptable only for
+  exploratory search, never for promotion.
+- Record every attempted candidate, including invalid/duplicate/rejected ones,
+  so multiple-testing exposure and search budgets are measurable.
+- No automatic promotion may bypass sample-size, OOS, walk-forward, cost-stress,
+  regime/stability, champion-comparison or provenance requirements. A manual
+  override must be separate, explicit, reasoned and never silently treated as
+  validated evidence.
+- A paper champion is a validated DSL spec selected by the archive. The paper
+  runner must not silently fall back to a handwritten strategy when no valid
+  champion exists; it must stay flat and report why.
+- Every paper outcome feeds research only after the trade is fully matured and
+  correctly attributed. Training feedback must never contaminate locked OOS.
+- Risk limits remain independent and immutable. Real-money routing remains
+  disabled.
