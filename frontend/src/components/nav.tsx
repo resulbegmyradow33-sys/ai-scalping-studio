@@ -11,6 +11,7 @@ const items = [
   { href: "/paper", label: "Paper Trading" },
   { href: "/autonomy", label: "Otonomi" },
   { href: "/intelligence", label: "Piyasa Zekâsı" },
+  { href: "/strategies", label: "Strateji Zekâsı" },
   { href: "/data", label: "Veri" },
 ] as const;
 

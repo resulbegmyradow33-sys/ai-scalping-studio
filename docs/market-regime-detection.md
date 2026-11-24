@@ -182,7 +182,46 @@ The panel page `/intelligence` reads this endpoint: current axes, the
 full-slice distribution and a timeline of the last bars. It renders the API
 values verbatim and states that a regime is not a forecast.
 
-## 9. Limits
+## 9. Strategy Intelligence page
+
+`/strategies` answers a different question from `/intelligence`: *what is the
+system running, and how is this slice distributed across regimes?* It reads
+three existing read-only endpoints and adds no derived numbers.
+
+| Section | Source | What it shows |
+|---|---|---|
+| Regime distribution | `GET /api/regime` | `counts` as a captioned table (`regime`, `bars`, `share`); every value is the response field, the percent is `share * 100` |
+| Panel card | `GET /api/strategy/card` | `active: true` → `legacy` badge for `flow_momentum`; `active: false` → `fallback` badge for the legacy M1 momentum |
+| DSL champions | `GET /api/autonomy/champions` | `readable: false` → "unreadable", never "no champions"; readable and empty → "no champion", which means NO TRADE |
+| Strategy × regime | not exposed | an explicit gap notice with the reason |
+
+The strategy × regime table is **not on the wire**. `strategy_regime_table`
+in `regime/strategy.py` needs the closed `Trade` rows of a simulator pass plus
+the regime labels; trade rows exist only inside an evaluation, not as a stored
+read-only resource. The page therefore does not join or aggregate anything in
+the browser. For a finished ML run, `POST /api/ml/evaluate` returns a
+per-regime breakdown under `regime.rows` (`trades`, `win_rate`, `expectancy_r`,
+`total_r`, `pnl`, `profit_factor`) plus `unmatched_trades`; that is one run's
+evaluation, not a card × regime table.
+
+Honesty rules applied on the page:
+
+- an unreadable champion archive is not rendered as an empty list;
+- `mode` on a champion row is displayed verbatim and the page notes that the
+  backend defaults it to `dsl` when the archived payload names no mode;
+- an empty slice (`rows: 0`) shows the import hint and keeps the card
+  classification, which does not depend on bars;
+- a failed request renders the error detail and never falls through to the
+  empty state;
+- the page has one `role="status"` live region for the settled regime summary;
+  loading is not announced.
+
+Adding a read-only `strategy × regime` endpoint later requires a stored trade
+source (a paper session or a completed evaluation artefact) and the same
+backward as-of join that `trades_with_regime` already implements. Until then
+the page states the absence.
+
+## 10. Limits
 
 - Regime labels are descriptive, not predictive. Do not report "the regime
   predicts the next move"; the correct claim is "strategy X performed like this
@@ -192,6 +231,6 @@ values verbatim and states that a regime is not a forecast.
 - Unsupervised states have no inherent meaning beyond their ordering by mean
   return; a narrative name ("accumulation", "distribution") must be backed by
   the per-state statistics, not assigned by hand.
-- The API endpoint and Market Intelligence page are the next slice of Phase 4;
-  they reuse this row-aligned contract, the transition/dwell tables and the
-  strategy-by-regime report.
+- `/api/regime`, `/intelligence` and `/strategies` reuse the row-aligned
+  contract; the transition/dwell tables and the strategy-by-regime report stay
+  research-side until an endpoint exposes a stored trade source.

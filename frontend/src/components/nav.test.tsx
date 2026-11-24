@@ -34,4 +34,13 @@ describe("Nav", () => {
       "aria-current",
     );
   });
+
+  it("links to the strategy intelligence page", () => {
+    navigation.pathname = "/strategies";
+    render(<Nav />);
+
+    const link = screen.getByRole("link", { name: "Strateji Zekâsı" });
+    expect(link).toHaveAttribute("href", "/strategies");
+    expect(link).toHaveAttribute("aria-current", "page");
+  });
 });
