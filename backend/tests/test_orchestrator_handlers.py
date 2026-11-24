@@ -16,17 +16,23 @@ ledger. The properties pinned here are the ones a queue depends on:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from promotion_evidence import evidence_for
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
+from scalping.discovery.promotion import (
+    PROMOTION_V1,
+    EvidenceIdentity,
+    promote_with_evidence,
+)
 from scalping.discovery.protocols import TrialResult
 from scalping.knowledge.index import KnowledgeIndex
 from scalping.orchestrator import JobStore, Orchestrator
@@ -54,6 +60,13 @@ SYMBOL = "XAUUSD"
 TIMEFRAME = "M1"
 START = datetime(2026, 1, 5, tzinfo=UTC)
 END = START + timedelta(days=1)
+DATASET_CHECKSUM = "c1" * 32
+SETTINGS_DIGEST = "c2" * 32
+TEST_POLICY = replace(
+    PROMOTION_V1,
+    policy_id="handler-test-policy",
+    require_locked_oos=False,
+)
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -154,9 +167,31 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             code_version="test",
             seed=0,
         )
-        # Seeding only: the production path is promote_evidence; this test does not
-        # exercise the promotion policy, so the exploratory metric path is used.
-        archive.promote_exploratory(record.candidate_id, scope=scope, reason="unit test promotion")
+        # Seed through the evidence API: the paper provider only accepts an
+        # evidence-mode champion. This is a test policy, not PROMOTION_V1.
+        evidence = evidence_for(
+            spec_hash=record.candidate_id,
+            dataset_id=dataset_id,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            code_version="test",
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            expectancy_r=0.5,
+        )
+        promote_with_evidence(
+            archive,
+            record.candidate_id,
+            evidence,
+            TEST_POLICY,
+            scope=scope,
+            reason="unit test promotion",
+            expected_identity=EvidenceIdentity(
+                code_version="test",
+                dataset_checksum=DATASET_CHECKSUM,
+                settings_digest=SETTINGS_DIGEST,
+            ),
+        )
         champion = archive.champion(scope)
     assert champion is not None and champion.candidate.candidate_id == spec.canonical_hash()
     return spec

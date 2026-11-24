@@ -67,6 +67,7 @@ __all__ = [
     "DECISIONS",
     "DEFAULT_SCOPE",
     "MANUAL_OVERRIDE_POLICY_ID",
+    "PROMOTION_MODES",
     "SCHEMA_VERSION",
     "ArchiveError",
     "CandidateRecord",
@@ -75,13 +76,14 @@ __all__ = [
     "ChampionRecord",
     "DecisionRecord",
     "DiscoveryArchive",
+    "EvidenceRecord",
     "TrialRecord",
     "UnknownCandidateError",
 ]
 
 #: Schema version written by this module. A database from a newer module is
 #: refused instead of being written with an older layout.
-SCHEMA_VERSION: int = 2
+SCHEMA_VERSION: int = 3
 
 #: Default scope key. A real deployment passes ``<symbol>:<timeframe>``
 #: (:func:`scalping.discovery.champion.scope_for` builds it); this literal keeps
@@ -99,6 +101,11 @@ MANUAL_OVERRIDE_POLICY_ID: Final[str] = "manual-override"
 DECISIONS: frozenset[str] = frozenset(
     {"promoted", "rejected", "no_change", "no_trade", "rolled_back"}
 )
+
+#: How a champion was selected. Only ``evidence`` is a production promotion and
+#: only an ``evidence`` champion may trade paper. ``exploratory`` is the old
+#: one-metric research path; ``manual`` is a recorded human override.
+PROMOTION_MODES: frozenset[str] = frozenset({"evidence", "exploratory", "manual"})
 
 
 #: Metric names are used to build a JSON path, so they stay in a conservative
@@ -272,6 +279,48 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         END
         """,
     ),
+    3: (
+        # A champion's selection mode is part of its governance identity: only
+        # ``evidence`` may trade paper. Existing rows predate the column and were
+        # metric-only, so ``exploratory`` is the honest default.
+        """
+        ALTER TABLE champion_promotions
+        ADD COLUMN mode TEXT NOT NULL DEFAULT 'exploratory'
+            CHECK (mode IN ('evidence', 'exploratory', 'manual'))
+        """,
+        "ALTER TABLE champion_promotions ADD COLUMN evidence_checksum TEXT",
+        """
+        ALTER TABLE champions
+        ADD COLUMN mode TEXT NOT NULL DEFAULT 'exploratory'
+            CHECK (mode IN ('evidence', 'exploratory', 'manual'))
+        """,
+        "ALTER TABLE champions ADD COLUMN evidence_checksum TEXT",
+        # The immutable evidence bundle that justified an evidence promotion.
+        # Content-addressed by its own checksum, so the same bundle stored twice
+        # is one row and the champion row points at the exact bytes it used.
+        """
+        CREATE TABLE IF NOT EXISTS evidence (
+            checksum TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL REFERENCES candidates(candidate_id) ON DELETE RESTRICT,
+            canonical_json TEXT NOT NULL,
+            dataset_id TEXT NOT NULL,
+            dataset_checksum TEXT NOT NULL,
+            settings_digest TEXT NOT NULL,
+            code_version TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS evidence_candidate_idx ON evidence(candidate_id, created_at)",
+        """
+        CREATE TRIGGER IF NOT EXISTS evidence_canonical_json_insert
+        BEFORE INSERT ON evidence
+        FOR EACH ROW WHEN json_valid(NEW.canonical_json) = 0
+            OR json_type(NEW.canonical_json) <> 'object'
+        BEGIN
+            SELECT RAISE(ABORT, 'evidence.canonical_json must be a JSON object');
+        END
+        """,
+    ),
 }
 
 
@@ -415,6 +464,8 @@ class ChampionPromotion:
     previous_value: float | None
     reason: str
     created_at: str
+    mode: str = "exploratory"
+    evidence_checksum: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -428,6 +479,8 @@ class ChampionPromotion:
             "previous_value": self.previous_value,
             "reason": self.reason,
             "created_at": self.created_at,
+            "mode": self.mode,
+            "evidence_checksum": self.evidence_checksum,
         }
 
 
@@ -448,6 +501,8 @@ class ChampionRecord:
     promoted_at: str
     reason: str
     previous_candidate_id: str | None
+    mode: str = "exploratory"
+    evidence_checksum: str | None = None
 
     @property
     def canonical(self) -> dict[str, Any]:
@@ -464,6 +519,45 @@ class ChampionRecord:
             "promoted_at": self.promoted_at,
             "reason": self.reason,
             "previous_candidate_id": self.previous_candidate_id,
+            "mode": self.mode,
+            "evidence_checksum": self.evidence_checksum,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRecord:
+    """One immutable evidence bundle stored with the promotion that used it."""
+
+    checksum: str
+    candidate_id: str
+    canonical_json: str
+    dataset_id: str
+    dataset_checksum: str
+    settings_digest: str
+    code_version: str
+    created_at: str
+
+    @property
+    def payload(self) -> dict[str, Any]:
+        """The stored bundle as a fresh dict; callers may mutate it."""
+        try:
+            data = json.loads(self.canonical_json)
+        except json.JSONDecodeError as exc:  # pragma: no cover - triggers prevent this
+            raise ArchiveError(f"evidence {self.checksum!r} has invalid JSON: {exc}") from exc
+        if not isinstance(data, dict):  # pragma: no cover - triggers prevent this
+            raise ArchiveError(f"evidence {self.checksum!r} is not a JSON object")
+        return data
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "checksum": self.checksum,
+            "candidate_id": self.candidate_id,
+            "dataset_id": self.dataset_id,
+            "dataset_checksum": self.dataset_checksum,
+            "settings_digest": self.settings_digest,
+            "code_version": self.code_version,
+            "created_at": self.created_at,
+            "payload": self.payload,
         }
 
 
@@ -686,11 +780,25 @@ def _decision_from_row(row: sqlite3.Row) -> DecisionRecord:
     )
 
 
+def _evidence_from_row(row: sqlite3.Row) -> EvidenceRecord:
+    return EvidenceRecord(
+        checksum=str(row["checksum"]),
+        candidate_id=str(row["candidate_id"]),
+        canonical_json=str(row["canonical_json"]),
+        dataset_id=str(row["dataset_id"]),
+        dataset_checksum=str(row["dataset_checksum"]),
+        settings_digest=str(row["settings_digest"]),
+        code_version=str(row["code_version"]),
+        created_at=str(row["created_at"]),
+    )
+
+
 def _promotion_from_row(row: sqlite3.Row) -> ChampionPromotion:
     previous = row["previous_candidate_id"]
     metric = row["metric"]
     value = row["value"]
     previous_value = row["previous_value"]
+    evidence_checksum = row["evidence_checksum"]
     return ChampionPromotion(
         id=int(row["id"]),
         scope=str(row["scope"]),
@@ -702,6 +810,8 @@ def _promotion_from_row(row: sqlite3.Row) -> ChampionPromotion:
         previous_value=None if previous_value is None else float(previous_value),
         reason=str(row["reason"]),
         created_at=str(row["created_at"]),
+        mode=str(row["mode"]),
+        evidence_checksum=None if evidence_checksum is None else str(evidence_checksum),
     )
 
 
@@ -1373,8 +1483,8 @@ class DiscoveryArchive:
                     """
                     INSERT INTO champion_promotions (
                         scope, kind, candidate_id, previous_candidate_id,
-                        metric, value, previous_value, reason, created_at
-                    ) VALUES (?, 'promoted', ?, ?, ?, ?, ?, ?, ?)
+                        metric, value, previous_value, reason, created_at, mode
+                    ) VALUES (?, 'promoted', ?, ?, ?, ?, ?, ?, ?, 'exploratory')
                     """,
                     (
                         scope,
@@ -1392,13 +1502,17 @@ class DiscoveryArchive:
                     raise ArchiveError("promotion insert returned no id")
                 tx.execute(
                     """
-                    INSERT INTO champions (scope, candidate_id, promotion_id, promoted_at, reason)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO champions (
+                        scope, candidate_id, promotion_id, promoted_at, reason, mode
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'exploratory')
                     ON CONFLICT(scope) DO UPDATE SET
                         candidate_id = excluded.candidate_id,
                         promotion_id = excluded.promotion_id,
                         promoted_at = excluded.promoted_at,
-                        reason = excluded.reason
+                        reason = excluded.reason,
+                        mode = excluded.mode,
+                        evidence_checksum = NULL
                     """,
                     (scope, candidate_id, promotion_id, stamp, reason_text),
                 )
@@ -1422,6 +1536,7 @@ class DiscoveryArchive:
                                 "previous_value": previous_value,
                                 "forced": force,
                                 "promotion_id": int(promotion_id),
+                                "mode": "exploratory",
                             }
                         ),
                     ),
@@ -1439,6 +1554,7 @@ class DiscoveryArchive:
                     promoted_at=stamp,
                     reason=reason_text,
                     previous_candidate_id=previous_id,
+                    mode="exploratory",
                 )
         except sqlite3.IntegrityError as exc:
             raise ArchiveError(f"promotion of {candidate_id!r} failed: {exc}") from exc
@@ -1447,7 +1563,7 @@ class DiscoveryArchive:
             raise ArchiveError("promotion record is missing")
         return record
 
-    def promote_evidence(
+    def _promote_evidence(
         self,
         candidate_id: str,
         *,
@@ -1455,48 +1571,36 @@ class DiscoveryArchive:
         reason: str,
         policy_id: str,
         policy_version: int,
+        policy_digest: str,
         evidence_checksum: str,
         dataset_id: str,
         dataset_checksum: str,
         settings_digest: str,
+        code_version: str,
         candidate_spec_hash: str,
+        evidence_payload: Mapping[str, Any],
         champion_checksum: str | None = None,
+        champion_candidate_id: str | None = None,
         detail: Mapping[str, Any] | None = None,
     ) -> ChampionRecord:
-        """Promote through a promotion-policy decision, not through a metric.
+        """Store an evidence promotion through a sealed policy decision.
 
-        This is the production path. The caller has already evaluated a
-        :class:`~scalping.discovery.promotion.PromotionDecision`; this method
-        stores the governance facts an auditor needs and refuses to invent any:
+        Private on purpose: :func:`scalping.discovery.promotion.promote_with_evidence`
+        is the only caller. It evaluates the policy internally and passes the
+        primitives here, so a caller cannot reach this method with a forged
+        ``accepted`` flag.
 
-        * ``candidate_spec_hash`` must equal ``candidate_id``, because the id is
-          the canonical hash of the spec the evidence was built for.
-        * ``policy_id`` must be a named policy other than the reserved
-          manual-override id, and ``policy_version`` must be positive.
-        * ``evidence_checksum`` must be a sha256 hex digest; the decision that
-          carried it is the only reason this promotion exists.
-        * ``dataset_checksum`` and ``settings_digest`` are required digests: a
-          promotion must name the exact data build and execution settings it
-          was measured under.
-        * every scope token must appear in ``dataset_id``, the same convention
-          trials use, so evidence from another symbol/timeframe cannot promote
-          here.
+        The method enforces the remaining links itself:
 
-        The promotion row stores no metric (``metric``/``value`` are NULL) and
-        the decision's ``detail_json`` records the policy id/version, the
-        evidence checksum, the champion checksum, the dataset id/checksum, the
-        settings digest and the candidate spec hash. That makes an evidence
-        promotion distinguishable from an exploratory metric-only promotion by
-        inspection, not by convention.
-
-        This is the archive primitive. Call
-        :func:`scalping.discovery.promotion.promote_with_evidence` in production
-        code: it owns the ``PromotionDecision`` type check and the
-        spec-hash/candidate-id link, so a caller cannot skip the policy by
-        reaching this method with hand-written strings.
-
-        No force flag exists. A rejected decision cannot be forced through this
-        method; a manual override is a separate record and is not accepted here.
+        * the candidate must have an **accepted** trial on ``dataset_id``
+          (``no_accepted_trial``), so evidence cannot float free of an
+          evaluation the archive recorded;
+        * the evidence payload is stored content-addressed by its checksum and
+          the champion row points at that exact row;
+        * if a champion exists, ``champion_candidate_id`` must name it, so a
+          promotion evaluated against one champion cannot land on another;
+        * the promotion row and the champion pointer both carry
+          ``mode = 'evidence'`` and no metric.
         """
         candidate_id = _require_text(candidate_id, "candidate_id")
         scope = _require_scope(scope)
@@ -1510,14 +1614,17 @@ class DiscoveryArchive:
             raise TypeError(f"policy_version must be an int, got {type(policy_version).__name__}")
         if policy_version < 1:
             raise ValueError(f"policy_version must be >= 1, got {policy_version}")
+        policy_digest = _require_digest(policy_digest, "policy_digest")
         evidence_checksum = _require_digest(evidence_checksum, "evidence_checksum")
         dataset_checksum = _require_digest(dataset_checksum, "dataset_checksum")
         settings_digest = _require_digest(settings_digest, "settings_digest")
+        code_version = _require_text(code_version, "code_version")
         champion_checksum = (
             None
             if champion_checksum is None
             else _require_digest(champion_checksum, "champion_checksum")
         )
+        champion_candidate_id = _optional_text(champion_candidate_id, "champion_candidate_id")
         candidate_spec_hash = _require_digest(candidate_spec_hash, "candidate_spec_hash")
         if candidate_spec_hash != candidate_id:
             raise ArchiveError(
@@ -1530,6 +1637,14 @@ class DiscoveryArchive:
                 f"dataset {dataset_id!r} does not name scope {scope!r}; "
                 "evidence from another market cannot promote here"
             )
+        if not isinstance(evidence_payload, Mapping):
+            raise TypeError(
+                f"evidence_payload must be a mapping, got {type(evidence_payload).__name__}"
+            )
+        try:
+            payload_json = _canonical_json(evidence_payload)
+        except (TypeError, ValueError) as exc:
+            raise ArchiveError(f"evidence payload is not canonical JSON: {exc}") from exc
         if detail is not None and not isinstance(detail, Mapping):
             raise TypeError(f"detail must be a mapping, got {type(detail).__name__}")
         tokens = _scope_tokens(scope)
@@ -1547,36 +1662,105 @@ class DiscoveryArchive:
                 if candidate_row is None:
                     raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
 
+                accepted = tx.execute(
+                    """
+                    SELECT 1 FROM trials
+                    WHERE candidate_id = ? AND dataset_id = ? AND code_version = ?
+                      AND accepted = 1
+                    LIMIT 1
+                    """,
+                    (candidate_id, dataset_id, code_version),
+                ).fetchone()
+                if accepted is None:
+                    raise ArchiveError(
+                        f"no_accepted_trial: candidate {candidate_id!r} has no accepted trial "
+                        f"on {dataset_id!r} under code version {code_version!r}; evidence "
+                        "promotion needs a recorded evaluation"
+                    )
+
                 row = tx.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
                 previous_id = None if row is None else str(row["candidate_id"])
+                if previous_id != champion_candidate_id:
+                    raise ArchiveError(
+                        f"champion of {scope!r} is {previous_id!r}, not "
+                        f"{champion_candidate_id!r}; the evidence was evaluated against "
+                        "another comparison baseline"
+                    )
                 if previous_id == candidate_id:
                     raise ArchiveError(
                         f"candidate {candidate_id!r} is already the champion of {scope!r}"
+                    )
+
+                stored = tx.execute(
+                    """
+                    SELECT candidate_id, canonical_json, dataset_id, dataset_checksum,
+                           settings_digest, code_version
+                    FROM evidence WHERE checksum = ?
+                    """,
+                    (evidence_checksum,),
+                ).fetchone()
+                if stored is not None:
+                    if (
+                        str(stored["candidate_id"]) != candidate_id
+                        or str(stored["canonical_json"]) != payload_json
+                        or str(stored["dataset_id"]) != dataset_id
+                        or str(stored["dataset_checksum"]) != dataset_checksum
+                        or str(stored["settings_digest"]) != settings_digest
+                        or str(stored["code_version"]) != code_version
+                    ):
+                        raise ArchiveError(
+                            f"evidence checksum {evidence_checksum[:12]} is already stored "
+                            "for different content"
+                        )
+                else:
+                    tx.execute(
+                        """
+                        INSERT INTO evidence (
+                            checksum, candidate_id, canonical_json, dataset_id,
+                            dataset_checksum, settings_digest, code_version, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            evidence_checksum,
+                            candidate_id,
+                            payload_json,
+                            dataset_id,
+                            dataset_checksum,
+                            settings_digest,
+                            code_version,
+                            stamp,
+                        ),
                     )
 
                 cursor = tx.execute(
                     """
                     INSERT INTO champion_promotions (
                         scope, kind, candidate_id, previous_candidate_id,
-                        metric, value, previous_value, reason, created_at
-                    ) VALUES (?, 'promoted', ?, ?, NULL, NULL, NULL, ?, ?)
+                        metric, value, previous_value, reason, created_at, mode,
+                        evidence_checksum
+                    ) VALUES (?, 'promoted', ?, ?, NULL, NULL, NULL, ?, ?, 'evidence', ?)
                     """,
-                    (scope, candidate_id, previous_id, reason_text, stamp),
+                    (scope, candidate_id, previous_id, reason_text, stamp, evidence_checksum),
                 )
                 promotion_id = cursor.lastrowid
                 if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
                     raise ArchiveError("promotion insert returned no id")
                 tx.execute(
                     """
-                    INSERT INTO champions (scope, candidate_id, promotion_id, promoted_at, reason)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO champions (
+                        scope, candidate_id, promotion_id, promoted_at, reason, mode,
+                        evidence_checksum
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'evidence', ?)
                     ON CONFLICT(scope) DO UPDATE SET
                         candidate_id = excluded.candidate_id,
                         promotion_id = excluded.promotion_id,
                         promoted_at = excluded.promoted_at,
-                        reason = excluded.reason
+                        reason = excluded.reason,
+                        mode = excluded.mode,
+                        evidence_checksum = excluded.evidence_checksum
                     """,
-                    (scope, candidate_id, promotion_id, stamp, reason_text),
+                    (scope, candidate_id, promotion_id, stamp, reason_text, evidence_checksum),
                 )
 
                 payload = dict(detail or {})
@@ -1586,12 +1770,16 @@ class DiscoveryArchive:
                         "mode": "evidence",
                         "policy_id": policy_id,
                         "policy_version": policy_version,
+                        "policy_digest": policy_digest,
                         "evidence_checksum": evidence_checksum,
                         "champion_checksum": champion_checksum,
+                        "champion_candidate_id": previous_id,
+                        "comparison": "first" if previous_id is None else "champion",
                         "candidate_spec_hash": candidate_spec_hash,
                         "dataset_id": dataset_id,
                         "dataset_checksum": dataset_checksum,
                         "settings_digest": settings_digest,
+                        "code_version": code_version,
                         "previous_candidate_id": previous_id,
                         "promotion_id": int(promotion_id),
                     }
@@ -1614,9 +1802,150 @@ class DiscoveryArchive:
                     promoted_at=stamp,
                     reason=reason_text,
                     previous_candidate_id=previous_id,
+                    mode="evidence",
+                    evidence_checksum=evidence_checksum,
                 )
         except sqlite3.IntegrityError as exc:
             raise ArchiveError(f"evidence promotion of {candidate_id!r} failed: {exc}") from exc
+
+        if record is None:  # pragma: no cover - the insert just committed
+            raise ArchiveError("promotion record is missing")
+        return record
+
+    def _promote_manual(
+        self,
+        candidate_id: str,
+        *,
+        scope: str = DEFAULT_SCOPE,
+        reason: str,
+        candidate_spec_hash: str,
+        dataset_id: str,
+        evidence_checksum: str | None = None,
+        champion_candidate_id: str | None = None,
+        detail: Mapping[str, Any] | None = None,
+    ) -> ChampionRecord:
+        """Store a human override as ``mode = 'manual'``; never paper-eligible.
+
+        A manual champion is an audit record for a human decision. It still needs
+        a known candidate, a trial on the dataset and a matching spec hash, but
+        it deliberately does not claim policy compliance. The provider refuses
+        it for paper trading.
+        """
+        candidate_id = _require_text(candidate_id, "candidate_id")
+        scope = _require_scope(scope)
+        reason = _require_text(reason, "reason")
+        candidate_spec_hash = _require_digest(candidate_spec_hash, "candidate_spec_hash")
+        if candidate_spec_hash != candidate_id:
+            raise ArchiveError(
+                f"override was recorded for spec {candidate_spec_hash[:12]}, "
+                f"not candidate {candidate_id[:12]}"
+            )
+        dataset_id = _require_text(dataset_id, "dataset_id")
+        if not _scope_tokens(scope) <= _scope_tokens(dataset_id):
+            raise ArchiveError(f"dataset {dataset_id!r} does not name scope {scope!r}")
+        if evidence_checksum is not None:
+            evidence_checksum = _require_digest(evidence_checksum, "evidence_checksum")
+        champion_candidate_id = _optional_text(champion_candidate_id, "champion_candidate_id")
+        if detail is not None and not isinstance(detail, Mapping):
+            raise TypeError(f"detail must be a mapping, got {type(detail).__name__}")
+        tokens = _scope_tokens(scope)
+        stamp = _now()
+        reason_text = f"{reason}; manual override, not policy evidence"
+
+        record: ChampionRecord | None = None
+        try:
+            with self._transaction() as tx:
+                candidate_row = tx.execute(
+                    "SELECT * FROM candidates WHERE candidate_id = ?", (candidate_id,)
+                ).fetchone()
+                if candidate_row is None:
+                    raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
+                trial = tx.execute(
+                    "SELECT 1 FROM trials WHERE candidate_id = ? AND dataset_id = ? LIMIT 1",
+                    (candidate_id, dataset_id),
+                ).fetchone()
+                if trial is None:
+                    raise ArchiveError(
+                        f"no_trial: candidate {candidate_id!r} has no trial on {dataset_id!r}"
+                    )
+                row = tx.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
+                previous_id = None if row is None else str(row["candidate_id"])
+                if previous_id != champion_candidate_id:
+                    raise ArchiveError(
+                        f"champion of {scope!r} is {previous_id!r}, not {champion_candidate_id!r}"
+                    )
+                if previous_id == candidate_id:
+                    raise ArchiveError(
+                        f"candidate {candidate_id!r} is already the champion of {scope!r}"
+                    )
+
+                cursor = tx.execute(
+                    """
+                    INSERT INTO champion_promotions (
+                        scope, kind, candidate_id, previous_candidate_id,
+                        metric, value, previous_value, reason, created_at, mode,
+                        evidence_checksum
+                    ) VALUES (?, 'promoted', ?, ?, NULL, NULL, NULL, ?, ?, 'manual', ?)
+                    """,
+                    (scope, candidate_id, previous_id, reason_text, stamp, evidence_checksum),
+                )
+                promotion_id = cursor.lastrowid
+                if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
+                    raise ArchiveError("promotion insert returned no id")
+                tx.execute(
+                    """
+                    INSERT INTO champions (
+                        scope, candidate_id, promotion_id, promoted_at, reason, mode,
+                        evidence_checksum
+                    )
+                    VALUES (?, ?, ?, ?, ?, 'manual', ?)
+                    ON CONFLICT(scope) DO UPDATE SET
+                        candidate_id = excluded.candidate_id,
+                        promotion_id = excluded.promotion_id,
+                        promoted_at = excluded.promoted_at,
+                        reason = excluded.reason,
+                        mode = excluded.mode,
+                        evidence_checksum = excluded.evidence_checksum
+                    """,
+                    (scope, candidate_id, promotion_id, stamp, reason_text, evidence_checksum),
+                )
+
+                payload = dict(detail or {})
+                payload.update(
+                    {
+                        "scope": scope,
+                        "mode": "manual",
+                        "candidate_spec_hash": candidate_spec_hash,
+                        "dataset_id": dataset_id,
+                        "evidence_checksum": evidence_checksum,
+                        "champion_candidate_id": previous_id,
+                        "previous_candidate_id": previous_id,
+                        "promotion_id": int(promotion_id),
+                    }
+                )
+                tx.execute(
+                    """
+                    INSERT INTO decisions (
+                        candidate_id, decision, reason, champion_id, created_at, detail_json
+                    ) VALUES (?, 'promoted', ?, ?, ?, ?)
+                    """,
+                    (candidate_id, reason_text, candidate_id, stamp, self._detail_json(payload)),
+                )
+
+                latest = _latest_accepted(tx, candidate_id, tokens)
+                record = ChampionRecord(
+                    scope=scope,
+                    candidate=_candidate_from_row(candidate_row),
+                    metrics={} if latest is None else latest.metrics,
+                    promotion_id=int(promotion_id),
+                    promoted_at=stamp,
+                    reason=reason_text,
+                    previous_candidate_id=previous_id,
+                    mode="manual",
+                    evidence_checksum=evidence_checksum,
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ArchiveError(f"manual promotion of {candidate_id!r} failed: {exc}") from exc
 
         if record is None:  # pragma: no cover - the insert just committed
             raise ArchiveError("promotion record is missing")
@@ -1642,6 +1971,7 @@ class DiscoveryArchive:
         if promotion is None:  # pragma: no cover - the foreign key prevents this
             raise ArchiveError(f"champion promotion {row['promotion_id']!r} is missing")
         previous = promotion["previous_candidate_id"]
+        evidence_checksum = row["evidence_checksum"]
         return ChampionRecord(
             scope=scope,
             candidate=candidate,
@@ -1650,7 +1980,41 @@ class DiscoveryArchive:
             promoted_at=str(row["promoted_at"]),
             reason=str(row["reason"]),
             previous_candidate_id=None if previous is None else str(previous),
+            mode=str(row["mode"]),
+            evidence_checksum=None if evidence_checksum is None else str(evidence_checksum),
         )
+
+    def evidence_record(self, checksum: str) -> EvidenceRecord | None:
+        """The stored evidence bundle with ``checksum``, or ``None``."""
+        checksum = _require_digest(checksum, "checksum")
+        row = (
+            self._connection()
+            .execute("SELECT * FROM evidence WHERE checksum = ?", (checksum,))
+            .fetchone()
+        )
+        return None if row is None else _evidence_from_row(row)
+
+    def champion_evidence(self, scope: str = DEFAULT_SCOPE) -> EvidenceRecord | None:
+        """The evidence row that promoted the current champion, if any.
+
+        ``None`` means the champion was not promoted through the evidence path
+        (exploratory or manual) or predates schema v3. A promotion policy treats
+        that as a missing comparison baseline, not as an empty bundle.
+        """
+        scope = _require_scope(scope)
+        row = (
+            self._connection()
+            .execute("SELECT mode, evidence_checksum FROM champions WHERE scope = ?", (scope,))
+            .fetchone()
+        )
+        if row is None or row["mode"] != "evidence" or row["evidence_checksum"] is None:
+            return None
+        record = self.evidence_record(str(row["evidence_checksum"]))
+        if record is None:  # pragma: no cover - the pointer is written with the row
+            raise ArchiveError(
+                f"champion of {scope!r} points at missing evidence {row['evidence_checksum']!r}"
+            )
+        return record
 
     def rollback(
         self, scope: str = DEFAULT_SCOPE, *, to_candidate_id: str, reason: str
@@ -1693,31 +2057,67 @@ class DiscoveryArchive:
                         f"candidate {to_candidate_id!r} was never the champion of {scope!r}; "
                         "promote it instead"
                     )
+                prior = tx.execute(
+                    """
+                    SELECT mode, evidence_checksum FROM champion_promotions
+                    WHERE scope = ? AND candidate_id = ?
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (scope, to_candidate_id),
+                ).fetchone()
+                restored_mode = "exploratory" if prior is None else str(prior["mode"])
+                restored_evidence = (
+                    None
+                    if prior is None or prior["evidence_checksum"] is None
+                    else str(prior["evidence_checksum"])
+                )
 
                 reason_text = f"{reason}; rolled back from {current[:12]}"
                 cursor = tx.execute(
                     """
                     INSERT INTO champion_promotions (
                         scope, kind, candidate_id, previous_candidate_id,
-                        metric, value, previous_value, reason, created_at
-                    ) VALUES (?, 'rolled_back', ?, ?, NULL, NULL, NULL, ?, ?)
+                        metric, value, previous_value, reason, created_at, mode,
+                        evidence_checksum
+                    ) VALUES (?, 'rolled_back', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
                     """,
-                    (scope, to_candidate_id, current, reason_text, stamp),
+                    (
+                        scope,
+                        to_candidate_id,
+                        current,
+                        reason_text,
+                        stamp,
+                        restored_mode,
+                        restored_evidence,
+                    ),
                 )
                 promotion_id = cursor.lastrowid
                 if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
                     raise ArchiveError("rollback insert returned no id")
                 tx.execute(
                     """
-                    INSERT INTO champions (scope, candidate_id, promotion_id, promoted_at, reason)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO champions (
+                        scope, candidate_id, promotion_id, promoted_at, reason, mode,
+                        evidence_checksum
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(scope) DO UPDATE SET
                         candidate_id = excluded.candidate_id,
                         promotion_id = excluded.promotion_id,
                         promoted_at = excluded.promoted_at,
-                        reason = excluded.reason
+                        reason = excluded.reason,
+                        mode = excluded.mode,
+                        evidence_checksum = excluded.evidence_checksum
                     """,
-                    (scope, to_candidate_id, promotion_id, stamp, reason_text),
+                    (
+                        scope,
+                        to_candidate_id,
+                        promotion_id,
+                        stamp,
+                        reason_text,
+                        restored_mode,
+                        restored_evidence,
+                    ),
                 )
                 tx.execute(
                     """
@@ -1735,6 +2135,8 @@ class DiscoveryArchive:
                                 "scope": scope,
                                 "previous_candidate_id": current,
                                 "promotion_id": int(promotion_id),
+                                "mode": restored_mode,
+                                "evidence_checksum": restored_evidence,
                             }
                         ),
                     ),
@@ -1753,6 +2155,8 @@ class DiscoveryArchive:
                     promoted_at=stamp,
                     reason=reason_text,
                     previous_candidate_id=current,
+                    mode=restored_mode,
+                    evidence_checksum=restored_evidence,
                 )
         except sqlite3.IntegrityError as exc:
             raise ArchiveError(f"rollback to {to_candidate_id!r} failed: {exc}") from exc
