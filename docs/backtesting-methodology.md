@@ -149,6 +149,7 @@ correctly, never that the candidate has an edge.
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
@@ -262,16 +263,17 @@ build is the same holdout.
    one winner. A second unlock for the same `(dataset_id, dataset_checksum)`
    raises `HoldoutSpent`, even when it names a different spec.
 
-   The decision must be **sealed** by `evaluate_promotion` and its
-   `policy_digest` must match the supplied policy; a hand-constructed or
-   mutated decision is refused. Because `PROMOTION_V1` requires the
-   `locked_oos` section that does not exist before the spend, the pre-holdout
-   eligibility check uses the same named policy/version with
-   `require_locked_oos=False`. That check authorises the one spend; the final
-   promotion later re-evaluates the attached bundle with `PROMOTION_V1`
-   (`require_locked_oos=True`). The holdout result records the digest of the
-   decision that actually unlocked it, so the audit distinguishes the two
-   checks.
+   The decision must be **sealed** by `evaluate_promotion`; a hand-constructed
+   or mutated decision is refused. `policy` is the **target production policy**
+   the holdout is being spent for and must be in
+   `scalping.discovery.promotion.PRODUCTION_POLICIES`. Because `PROMOTION_V1`
+   requires the `locked_oos` section that does not exist before the spend, the
+   eligibility decision comes from a named non-production policy with
+   `require_locked_oos=False`. `unlock` records the target policy's id, version
+   and digest in the holdout row/token/result, so the final promotion sees a
+   matching section and re-evaluates the attached bundle with `PROMOTION_V1`
+   (`require_locked_oos=True`). The eligibility decision is preserved in
+   `decision_json`, so the audit distinguishes the two checks.
 3. **Evaluate once.** `evaluate_holdout(features_or_bundle, spec, config,
    ledger=..., unlock_token=...)` validates the single-use token, claims the one
    evaluation slot, slices the manifest's final test rows, and runs the existing
@@ -284,11 +286,16 @@ build is the same holdout.
 4. **Verify.** `verify_holdout_result(result, evidence)` re-derives the result
    checksum and checks the dataset id/checksum, spec hash, code version,
    settings digest, symbol and timeframe against the evidence identity.
-5. **Attach.** `attach_holdout(evidence, result)` returns a **new** immutable
-   `CandidateEvidence` with a `locked_oos` section; the input bundle is not
-   mutated. The section is what `require_locked_oos=True` recognises. Attaching
-   the same result twice is idempotent, and a result unlocked by a different
-   evidence checksum cannot be attached.
+5. **Attach.** `attach_holdout(evidence, result)` returns a **new, type-exact**
+   `CandidateEvidence` with a frozen `LockedOOSEvidence` section; the input
+   bundle is not mutated. The section's `checksum` is the canonical
+   `locked_oos_checksum(section)`, and its `evidence_checksum` is the
+   pre-attachment evidence bundle's checksum. The test range must equal
+   `splits.test_start_row/end_row`, start at or after
+   `splits.validation_end_row`, and carry ordered timestamps after the last
+   validation fold. The section is what `require_locked_oos=True` recognises.
+   Attaching the same result twice is idempotent, and a result unlocked by a
+   different evidence checksum cannot be attached.
 
 Nothing reads the test rows before unlock. A refused unlock never receives a
 feature frame; `evaluate_holdout` validates the token and claims the evaluation
@@ -343,10 +350,10 @@ after seeing the result, destroys the property this ledger exists to protect.
 - **Wire the holdout into the autonomous path.** The protocol, ledger and
   evidence attachment exist and are tested, but discovery/orchestration do not
   yet call them, and no real XAUUSD holdout has been spent. The production policy
-  sets `require_locked_oos=True`, so every bundle without a valid locked-OOS
-  section rejects with `missing_locked_oos`; that rejection is honest and
-  expected, not a bug. The holdout slice attaches the section, after which the
-  policy can evaluate the complete evidence bundle.
+  sets `require_locked_oos=True`, so every bundle without a valid frozen
+  `LockedOOSEvidence` field rejects with `missing_locked_oos`; that rejection is
+  honest and expected, not a bug. The holdout slice attaches the section, after
+  which the policy can evaluate the complete evidence bundle.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
   folds may overlap the validation/selection window, but no deflated metric or

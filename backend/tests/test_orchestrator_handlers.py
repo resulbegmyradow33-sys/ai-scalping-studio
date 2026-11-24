@@ -29,9 +29,10 @@ from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
 from scalping.discovery.promotion import (
+    PRODUCTION_POLICIES,
     PROMOTION_V1,
     EvidenceIdentity,
-    promote_with_evidence,
+    _promote_for_tests,
 )
 from scalping.discovery.protocols import TrialResult
 from scalping.knowledge.index import KnowledgeIndex
@@ -67,6 +68,15 @@ TEST_POLICY = replace(
     policy_id="handler-test-policy",
     require_locked_oos=False,
 )
+
+
+@pytest.fixture(autouse=True)
+def _register_handler_test_policy():
+    PRODUCTION_POLICIES[TEST_POLICY.digest] = TEST_POLICY
+    try:
+        yield
+    finally:
+        PRODUCTION_POLICIES.pop(TEST_POLICY.digest, None)
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -166,6 +176,8 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             dataset_id=dataset_id,
             code_version="test",
             seed=0,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
         )
         # Seed through the evidence API: the paper provider only accepts an
         # evidence-mode champion. This is a test policy, not PROMOTION_V1.
@@ -179,7 +191,7 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             settings_digest=SETTINGS_DIGEST,
             expectancy_r=0.5,
         )
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             record.candidate_id,
             evidence,
@@ -385,6 +397,32 @@ def test_paper_advance_without_a_champion_is_no_trade_and_writes_nothing(
     assert data["reason"]
     assert not harness.context.paper_ledger_path.exists()
     assert not harness.context.discovery_archive_path.exists()
+
+
+def test_paper_advance_with_a_non_evidence_champion_is_no_trade(
+    harness: Harness,
+) -> None:
+    seed_champion(harness.context)
+    with DiscoveryArchive(harness.context.discovery_archive_path) as archive:
+        archive.connection.execute(
+            """
+            UPDATE champions SET mode = 'exploratory', policy_id = NULL,
+                policy_version = NULL, policy_digest = NULL, evidence_checksum = NULL
+            """
+        )
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 20},
+        dedupe="paper-non-evidence-champion",
+    )
+
+    assert outcome.status == "succeeded"
+    data = data_of(row)
+    assert data["action"] == "no_trade"
+    assert data["reason_class"] == "no_evidence_champion"
+    assert data["touched"] is False
+    assert not harness.context.paper_ledger_path.exists()
 
 
 def test_paper_advance_runs_the_governed_champion_and_dedupes(

@@ -69,7 +69,7 @@ import hashlib
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import asdict, dataclass, fields, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Final
 
@@ -96,6 +96,7 @@ __all__ = [
     "EvidenceError",
     "EvidencePolicy",
     "FoldEvidence",
+    "LockedOOSEvidence",
     "RegimeEvidence",
     "SplitBoundaries",
     "StressEvidence",
@@ -103,6 +104,7 @@ __all__ = [
     "build_evidence",
     "evidence_checksum",
     "evidence_from_dict",
+    "locked_oos_checksum",
     "per_trade_regimes",
     "regime_labels",
     "regime_rows",
@@ -112,7 +114,7 @@ __all__ = [
 ]
 
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
-#: Version 3 adds the optional ``locked_oos`` section produced by
+#: Version 3 adds the optional frozen ``locked_oos`` section produced by
 #: :func:`scalping.discovery.holdout.attach_holdout`.
 EVIDENCE_SCHEMA_VERSION: Final[int] = 3
 
@@ -363,6 +365,127 @@ class SplitBoundaries:
 
 
 @dataclass(frozen=True, slots=True)
+class LockedOOSEvidence:
+    """The single authorised result of spending the locked final holdout.
+
+    The section is a real dataclass field on :class:`CandidateEvidence`, not a
+    dictionary a subclass can inject through ``to_dict``. Its own ``checksum``
+    covers every field, and the promotion policy additionally requires its
+    identity, policy and test-row range to match the bundle.
+    """
+
+    checksum: str
+    evidence_checksum: str
+    dataset_id: str
+    dataset_checksum: str
+    symbol: str
+    timeframe: str
+    spec_hash: str
+    spec_version: int
+    complexity: int
+    code_version: str
+    settings_digest: str
+    policy_id: str
+    policy_version: int
+    test_start_row: int
+    test_end_row: int
+    test_rows: int
+    test_start_ts: str
+    test_end_ts: str
+    trades: int
+    net_profit: float
+    profit_factor: float
+    win_rate: float
+    expectancy_r: float
+    total_r: float
+    max_drawdown: float
+    expectancy_r_ci95_low: float
+    expectancy_r_ci95_high: float
+    total_r_ci95_low: float
+    total_r_ci95_high: float
+    bootstrap_samples: int
+    bootstrap_confidence: float
+    bootstrap_method: str
+    regime_coverage: float
+    regimes: tuple[RegimeEvidence, ...] = ()
+    stress: tuple[StressEvidence, ...] = ()
+    created_at: str = ""
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        for name in (
+            "checksum",
+            "evidence_checksum",
+            "dataset_id",
+            "dataset_checksum",
+            "symbol",
+            "timeframe",
+            "spec_hash",
+            "code_version",
+            "settings_digest",
+            "policy_id",
+            "test_start_ts",
+            "test_end_ts",
+            "bootstrap_method",
+            "created_at",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty str")
+        for name in ("checksum", "evidence_checksum"):
+            text = getattr(self, name)
+            if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+                raise ValueError(f"{name} must be a lowercase sha256 hex digest")
+        for name in (
+            "spec_version",
+            "complexity",
+            "policy_version",
+            "test_start_row",
+            "test_end_row",
+            "test_rows",
+            "trades",
+            "bootstrap_samples",
+            "schema_version",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int")
+            if value < 0:
+                raise ValueError(f"{name} must be >= 0")
+        if self.trades < 1:
+            raise ValueError("a locked holdout must report at least one trade")
+        if self.policy_version < 1 or self.schema_version < 1:
+            raise ValueError("policy_version and schema_version must be >= 1")
+        if self.test_end_row <= self.test_start_row:
+            raise ValueError("locked holdout test range must be non-empty")
+        for name in (
+            "net_profit",
+            "profit_factor",
+            "win_rate",
+            "expectancy_r",
+            "total_r",
+            "max_drawdown",
+            "expectancy_r_ci95_low",
+            "expectancy_r_ci95_high",
+            "total_r_ci95_low",
+            "total_r_ci95_high",
+            "bootstrap_confidence",
+            "regime_coverage",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+        for name in ("win_rate", "regime_coverage"):
+            value = float(getattr(self, name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a fraction in [0, 1]")
+        if not 0.0 < float(self.bootstrap_confidence) < 1.0:
+            raise ValueError("bootstrap_confidence must be in (0, 1)")
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateEvidence:
     """Immutable evidence bundle for one candidate on one dataset build.
 
@@ -393,11 +516,11 @@ class CandidateEvidence:
     checksum: str
     created_at: str
     schema_version: int = EVIDENCE_SCHEMA_VERSION
-    #: Optional locked-final-holdout section. It is omitted from :meth:`to_dict`
-    #: while ``None`` so every bundle built before this section existed keeps the
-    #: same checksum; :func:`scalping.discovery.holdout.attach_holdout` returns a
-    #: new bundle with it filled in and the checksum re-derived.
-    locked_oos: Mapping[str, Any] | None = None
+    #: Optional frozen locked-final-holdout section. It is omitted from
+    #: :meth:`to_dict` while ``None`` so every bundle built before this section
+    #: existed keeps the same checksum; ``attach_holdout`` returns a new bundle
+    #: with it filled in and the checksum re-derived.
+    locked_oos: LockedOOSEvidence | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe nested payload; the checksum is computed over this minus stamps."""
@@ -918,9 +1041,22 @@ def evidence_checksum(evidence: CandidateEvidence) -> str:
     metric, so a bundle whose stored ``checksum`` was overwritten is caught
     instead of being believed. ``verify_evidence`` uses the same function.
     """
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     return _checksum_payload(evidence.to_dict())
+
+
+def locked_oos_checksum(section: LockedOOSEvidence) -> str:
+    """Canonical checksum of one frozen locked-holdout section.
+
+    The section's own checksum covers every field except ``checksum`` and the
+    ``created_at`` stamp, mirroring :func:`evidence_checksum`. The promotion
+    policy re-derives it so an edited section is rejected before its metrics are
+    read.
+    """
+    if type(section) is not LockedOOSEvidence:
+        raise TypeError(f"section must be a LockedOOSEvidence, got {type(section).__name__}")
+    return _checksum_payload(asdict(section))
 
 
 def _nested(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
@@ -1026,12 +1162,71 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
                 for regime in _nested_list(aggregate, "regime_trades")
             ),
         )
-        extra: dict[str, Any] = {}
-        if any(item.name == "locked_oos" for item in fields(CandidateEvidence)):
-            # Forward-compatible with the locked-holdout slice: when that field
-            # exists, a stored bundle that carries a section must round-trip it,
-            # or the checksum no longer re-derives.
-            extra["locked_oos"] = payload.get("locked_oos")
+        locked_raw = payload.get("locked_oos")
+        if locked_raw is None:
+            locked = None
+        else:
+            if not isinstance(locked_raw, Mapping):
+                raise EvidenceError("missing_section", "locked_oos must be a JSON object")
+            locked = LockedOOSEvidence(
+                checksum=str(locked_raw["checksum"]),
+                evidence_checksum=str(locked_raw["evidence_checksum"]),
+                dataset_id=str(locked_raw["dataset_id"]),
+                dataset_checksum=str(locked_raw["dataset_checksum"]),
+                symbol=str(locked_raw["symbol"]),
+                timeframe=str(locked_raw["timeframe"]),
+                spec_hash=str(locked_raw["spec_hash"]),
+                spec_version=int(locked_raw["spec_version"]),
+                complexity=int(locked_raw["complexity"]),
+                code_version=str(locked_raw["code_version"]),
+                settings_digest=str(locked_raw["settings_digest"]),
+                policy_id=str(locked_raw["policy_id"]),
+                policy_version=int(locked_raw["policy_version"]),
+                test_start_row=int(locked_raw["test_start_row"]),
+                test_end_row=int(locked_raw["test_end_row"]),
+                test_rows=int(locked_raw["test_rows"]),
+                test_start_ts=str(locked_raw["test_start_ts"]),
+                test_end_ts=str(locked_raw["test_end_ts"]),
+                trades=int(locked_raw["trades"]),
+                net_profit=float(locked_raw["net_profit"]),
+                profit_factor=float(locked_raw["profit_factor"]),
+                win_rate=float(locked_raw["win_rate"]),
+                expectancy_r=float(locked_raw["expectancy_r"]),
+                total_r=float(locked_raw["total_r"]),
+                max_drawdown=float(locked_raw["max_drawdown"]),
+                expectancy_r_ci95_low=float(locked_raw["expectancy_r_ci95_low"]),
+                expectancy_r_ci95_high=float(locked_raw["expectancy_r_ci95_high"]),
+                total_r_ci95_low=float(locked_raw["total_r_ci95_low"]),
+                total_r_ci95_high=float(locked_raw["total_r_ci95_high"]),
+                bootstrap_samples=int(locked_raw["bootstrap_samples"]),
+                bootstrap_confidence=float(locked_raw["bootstrap_confidence"]),
+                bootstrap_method=str(locked_raw["bootstrap_method"]),
+                regime_coverage=float(locked_raw["regime_coverage"]),
+                regimes=tuple(
+                    RegimeEvidence(
+                        regime=str(regime["regime"]),
+                        trades=int(regime["trades"]),
+                        net_profit=float(regime["net_profit"]),
+                        win_rate=float(regime["win_rate"]),
+                        expectancy_r=float(regime["expectancy_r"]),
+                        total_r=float(regime["total_r"]),
+                    )
+                    for regime in _nested_list(locked_raw, "regimes")
+                ),
+                stress=tuple(
+                    StressEvidence(
+                        multiplier=float(stress["multiplier"]),
+                        trades=int(stress["trades"]),
+                        net_profit=float(stress["net_profit"]),
+                        profit_factor=float(stress["profit_factor"]),
+                        max_drawdown=float(stress["max_drawdown"]),
+                        expectancy_r=float(stress["expectancy_r"]),
+                    )
+                    for stress in _nested_list(locked_raw, "stress")
+                ),
+                created_at=str(locked_raw.get("created_at", "")),
+                schema_version=int(locked_raw.get("schema_version", 1)),
+            )
         return CandidateEvidence(
             spec_hash=str(payload["spec_hash"]),
             spec_version=int(payload["spec_version"]),
@@ -1052,7 +1247,7 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
             checksum=str(payload["checksum"]),
             created_at=str(payload["created_at"]),
             schema_version=int(payload.get("schema_version", EVIDENCE_SCHEMA_VERSION)),
-            **extra,
+            locked_oos=locked,
         )
     except EvidenceError:
         raise
@@ -1076,7 +1271,7 @@ def verify_evidence(
     Every failure is a typed :class:`EvidenceError` with a stable code; a caller
     must not catch and ignore one.
     """
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if evidence.dataset_id != dataset_id:
         raise EvidenceError(

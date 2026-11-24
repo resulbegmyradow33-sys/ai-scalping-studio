@@ -37,6 +37,7 @@ from scalping.discovery.archive import (
     ChampionRecord,
     DiscoveryArchive,
 )
+from scalping.discovery.promotion import is_production_policy_digest
 from scalping.strategy.dsl import StrategySpec
 from scalping.strategy.dsl.nodes import DslValidationError
 
@@ -85,6 +86,9 @@ class ChampionSpec:
     metrics: dict[str, float]
     mode: str = "evidence"
     evidence_checksum: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    policy_digest: str | None = None
 
     @property
     def spec_hash(self) -> str:
@@ -102,6 +106,9 @@ class ChampionSpec:
             "metrics": dict(self.metrics),
             "mode": self.mode,
             "evidence_checksum": self.evidence_checksum,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "policy_digest": self.policy_digest,
             "spec": self.spec.canonical_dict(),
         }
 
@@ -172,6 +179,15 @@ class ChampionProvider:
                 f"promoted in {record.mode!r} mode; only an evidence-mode champion may "
                 "trade paper"
             )
+        if (
+            not is_production_policy_digest(record.policy_digest)
+            or record.policy_id is None
+            or record.policy_version is None
+        ):
+            raise NoEvidenceChampion(
+                f"champion {record.candidate.candidate_id!r} in scope {resolved!r} was "
+                "promoted by a policy that is not in the production allow-list"
+            )
         spec = self._load(record)
         return ChampionSpec(
             scope=record.scope,
@@ -183,6 +199,9 @@ class ChampionProvider:
             metrics=dict(record.metrics),
             mode=record.mode,
             evidence_checksum=record.evidence_checksum,
+            policy_id=record.policy_id,
+            policy_version=record.policy_version,
+            policy_digest=record.policy_digest,
         )
 
     def spec(self, scope: str | None = None) -> StrategySpec:

@@ -62,9 +62,12 @@ from scalping.discovery.evaluate import DslEvaluator
 from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidenceError,
+    LockedOOSEvidence,
     RegimeEvidence,
     StressEvidence,
     bootstrap_ci,
+    evidence_checksum,
+    locked_oos_checksum,
     per_trade_regimes,
     regime_labels,
     regime_rows,
@@ -75,6 +78,7 @@ from scalping.discovery.evidence import (
 from scalping.discovery.promotion import (
     PromotionDecision,
     PromotionPolicy,
+    is_production_policy,
     is_sealed_decision,
 )
 from scalping.discovery.protocols import canonical_json
@@ -1004,13 +1008,22 @@ class HoldoutLedger:
     ) -> HoldoutToken:
         """Spend the holdout once, if and only if the evidence gate passed.
 
-        The checks run in this order: the row must exist and still be sealed
-        (a spent row refuses with :class:`HoldoutSpent` even for a different
-        spec), the decision must be an accepted :class:`PromotionDecision` from
-        the supplied policy version, and its dataset/checksum/spec/code/settings
-        identity must match the sealed holdout. The status transition is one
-        conditional ``UPDATE``; concurrent callers therefore produce exactly one
-        winner.
+        ``decision`` is the sealed eligibility verdict produced by
+        :func:`~scalping.discovery.promotion.evaluate_promotion` under a
+        pre-holdout policy (``require_locked_oos=False``); it must be accepted
+        and its dataset/checksum/spec/code/settings identity must match the
+        sealed holdout. ``policy`` is the **target production policy** the
+        holdout is being spent for; it must be in
+        :data:`~scalping.discovery.promotion.PRODUCTION_POLICIES`, and the
+        result records its id/version/digest so the final promotion sees a
+        matching ``locked_oos`` section. The two are deliberately separate:
+        production cannot demand the section before the spend, but the spend
+        must still be attributable to the policy that will judge it.
+
+        The row must exist and still be sealed (a spent row refuses with
+        :class:`HoldoutSpent` even for a different spec). The status transition
+        is one conditional ``UPDATE``; concurrent callers therefore produce
+        exactly one winner.
         """
         if not isinstance(holdout, HoldoutSpec):
             raise TypeError(f"holdout must be a HoldoutSpec, got {type(holdout).__name__}")
@@ -1042,6 +1055,18 @@ class HoldoutLedger:
                 dataset_id=holdout.dataset_id,
                 dataset_checksum=holdout.dataset_checksum,
                 detail=f"expected PromotionPolicy, got {type(policy).__name__}",
+            )
+        if not is_production_policy(policy):
+            self._refuse(
+                action="unlock",
+                actor=actor,
+                reason="non_production_policy",
+                dataset_id=holdout.dataset_id,
+                dataset_checksum=holdout.dataset_checksum,
+                detail=(
+                    f"{policy.policy_id!r} v{policy.version} digest "
+                    f"{policy.digest[:12]} is not a registered production policy"
+                ),
             )
 
         record = self.get(holdout.dataset_id, holdout.dataset_checksum)
@@ -1098,31 +1123,6 @@ class HoldoutLedger:
                 dataset_checksum=record.dataset_checksum,
                 detail=f"policy {decision.policy_id} v{decision.version}: {decision.summary}",
             )
-        if decision.policy_id != policy.policy_id or decision.version != policy.version:
-            self._refuse(
-                action="unlock",
-                actor=actor,
-                reason="decision_policy_mismatch",
-                dataset_id=record.dataset_id,
-                dataset_checksum=record.dataset_checksum,
-                detail=(
-                    f"decision is {decision.policy_id} v{decision.version}; "
-                    f"caller supplied {policy.policy_id} v{policy.version}"
-                ),
-            )
-        if decision.policy_digest != policy.digest:
-            self._refuse(
-                action="unlock",
-                actor=actor,
-                reason="decision_policy_mismatch",
-                dataset_id=record.dataset_id,
-                dataset_checksum=record.dataset_checksum,
-                detail=(
-                    "the decision was sealed by a different policy payload; "
-                    "re-evaluate it with the policy being applied"
-                ),
-            )
-
         expected = (
             holdout.dataset_id,
             holdout.dataset_checksum,
@@ -1185,9 +1185,9 @@ class HoldoutLedger:
             spec_hash=record.spec_hash,
             code_version=record.code_version,
             settings_digest=record.settings_digest,
-            policy_id=decision.policy_id,
-            policy_version=decision.version,
-            policy_digest=decision.policy_digest,
+            policy_id=policy.policy_id,
+            policy_version=policy.version,
+            policy_digest=policy.digest,
             evidence_checksum=decision.evidence_checksum,
         )
         stamp = _now()
@@ -1210,9 +1210,9 @@ class HoldoutLedger:
                    AND result_json IS NULL
                 """,
                 (
-                    decision.policy_id,
-                    decision.version,
-                    decision.policy_digest,
+                    policy.policy_id,
+                    policy.version,
+                    policy.digest,
                     decision.evidence_checksum,
                     decision_payload,
                     stamp,
@@ -1232,7 +1232,10 @@ class HoldoutLedger:
                     reason=reason,
                     dataset_id=record.dataset_id,
                     dataset_checksum=record.dataset_checksum,
-                    detail=f"policy {decision.policy_id} v{decision.version}",
+                    detail=(
+                        f"target policy {policy.policy_id} v{policy.version}; "
+                        f"eligibility decision {decision.policy_id} v{decision.version}"
+                    ),
                 )
 
         if not won:
@@ -1881,6 +1884,121 @@ def _iso_ts(stamp: Any) -> str:
 # --- verification / evidence attachment ---------------------------------------
 
 
+def _locked_section(
+    result: LockedHoldoutResult,
+    *,
+    evidence_checksum: str | None = None,
+) -> LockedOOSEvidence:
+    """Map the spent result onto the frozen ``LockedOOSEvidence`` contract.
+
+    The section is a real dataclass field on :class:`CandidateEvidence`; every
+    identity and test-range field is copied, not recomputed. Its own checksum is
+    the canonical section checksum, not the result checksum, and
+    ``evidence_checksum`` is the pre-attachment evidence bundle's checksum.
+    """
+    if result.trades < 1:
+        raise HoldoutError(
+            "locked_oos_requires_trades",
+            "a locked holdout must report at least one trade before it can be attached",
+        )
+    if result.test_rows != result.test_end_row - result.test_start_row:
+        raise HoldoutError(
+            "holdout_test_range_mismatch",
+            (
+                f"test_rows {result.test_rows} does not equal "
+                f"[{result.test_start_row}, {result.test_end_row})"
+            ),
+        )
+    checksum = result.evidence_checksum if evidence_checksum is None else evidence_checksum
+    draft = LockedOOSEvidence(
+        checksum="0" * 64,
+        evidence_checksum=checksum,
+        dataset_id=result.dataset_id,
+        dataset_checksum=result.dataset_checksum,
+        symbol=result.symbol,
+        timeframe=result.timeframe,
+        spec_hash=result.spec_hash,
+        spec_version=result.spec_version,
+        complexity=result.complexity,
+        code_version=result.code_version,
+        settings_digest=result.settings_digest,
+        policy_id=result.policy_id,
+        policy_version=result.policy_version,
+        test_start_row=result.test_start_row,
+        test_end_row=result.test_end_row,
+        test_rows=result.test_rows,
+        test_start_ts=result.test_start_ts,
+        test_end_ts=result.test_end_ts,
+        trades=result.trades,
+        net_profit=result.net_profit,
+        profit_factor=result.profit_factor,
+        win_rate=result.win_rate,
+        expectancy_r=result.expectancy_r,
+        total_r=result.total_r,
+        max_drawdown=result.max_drawdown,
+        expectancy_r_ci95_low=result.expectancy_r_ci95_low,
+        expectancy_r_ci95_high=result.expectancy_r_ci95_high,
+        total_r_ci95_low=result.total_r_ci95_low,
+        total_r_ci95_high=result.total_r_ci95_high,
+        bootstrap_samples=result.bootstrap_samples,
+        bootstrap_confidence=result.bootstrap_confidence,
+        bootstrap_method=result.bootstrap_method,
+        regime_coverage=result.regime_coverage,
+        regimes=result.regimes,
+        stress=result.stress,
+        created_at=result.created_at,
+        schema_version=result.schema_version,
+    )
+    return replace(draft, checksum=locked_oos_checksum(draft))
+
+
+def _validate_holdout_range(result: LockedHoldoutResult, evidence: CandidateEvidence) -> None:
+    """The section must describe the evidence bundle's declared final split."""
+    splits = evidence.splits
+    if result.test_start_row < splits.validation_end_row:
+        raise HoldoutError(
+            "holdout_starts_before_validation_end",
+            (
+                f"holdout starts at row {result.test_start_row}, before validation ends at "
+                f"{splits.validation_end_row}"
+            ),
+        )
+    if (result.test_start_row, result.test_end_row) != (
+        splits.test_start_row,
+        splits.test_end_row,
+    ):
+        raise HoldoutError(
+            "holdout_test_range_mismatch",
+            (
+                f"holdout rows [{result.test_start_row}, {result.test_end_row}) do not match "
+                f"the evidence test split [{splits.test_start_row}, {splits.test_end_row})"
+            ),
+        )
+    try:
+        start = datetime.fromisoformat(result.test_start_ts)
+        end = datetime.fromisoformat(result.test_end_ts)
+    except ValueError as exc:
+        raise HoldoutError("invalid_holdout_timestamp", str(exc)) from exc
+    if start >= end:
+        raise HoldoutError(
+            "invalid_holdout_timestamp",
+            f"holdout start {result.test_start_ts!r} is not before {result.test_end_ts!r}",
+        )
+    if evidence.folds:
+        try:
+            last_fold_end = datetime.fromisoformat(evidence.folds[-1].test_end_ts)
+        except ValueError as exc:  # pragma: no cover - the builder writes ISO stamps
+            raise HoldoutError("invalid_holdout_timestamp", str(exc)) from exc
+        if start <= last_fold_end:
+            raise HoldoutError(
+                "holdout_timestamp_before_validation",
+                (
+                    f"holdout starts at {result.test_start_ts!r}, not after the last fold "
+                    f"ending at {evidence.folds[-1].test_end_ts!r}"
+                ),
+            )
+
+
 def verify_holdout_result(
     result: LockedHoldoutResult,
     evidence: CandidateEvidence,
@@ -1889,13 +2007,13 @@ def verify_holdout_result(
 
     Identity is checked first (dataset id/checksum, spec, code version,
     settings, symbol and timeframe), then the result's own canonical checksum.
-    If the evidence already carries a ``locked_oos`` section, it must name the
-    same result checksum. This function raises; a caller must not swallow the
-    error and use the numbers anyway.
+    If the evidence already carries a ``locked_oos`` section, it must be the
+    exact frozen section this result maps to. This function raises; a caller
+    must not swallow the error and use the numbers anyway.
     """
     if not isinstance(result, LockedHoldoutResult):
         raise TypeError(f"result must be a LockedHoldoutResult, got {type(result).__name__}")
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if result.schema_version != HOLDOUT_SCHEMA_VERSION:
         raise HoldoutError(
@@ -1922,43 +2040,96 @@ def verify_holdout_result(
             "checksum_mismatch",
             f"holdout result checksum {result.checksum!r} does not match {expected_checksum!r}",
         )
+    _validate_holdout_range(result, evidence)
 
     if evidence.locked_oos is not None:
         section = evidence.locked_oos
-        if not isinstance(section, Mapping):
-            raise HoldoutError("locked_oos_mismatch", "the evidence holdout section is not a map")
-        if section.get("checksum") != result.checksum:
+        if section.checksum != locked_oos_checksum(section):
+            raise HoldoutError(
+                "locked_oos_checksum_mismatch",
+                "the evidence locked_oos checksum does not re-derive",
+            )
+        if section.evidence_checksum != result.evidence_checksum:
+            raise HoldoutError(
+                "locked_oos_evidence_mismatch",
+                "the evidence locked_oos section names a different source evidence checksum",
+            )
+        expected_section = _locked_section(result, evidence_checksum=section.evidence_checksum)
+        if section != expected_section:
             raise HoldoutError(
                 "locked_oos_mismatch",
-                "the evidence holdout section names a different result checksum",
+                "the evidence locked_oos field is not the section this result maps to",
             )
+
+
+def _copy_with_locked_oos(
+    evidence: CandidateEvidence,
+    section: LockedOOSEvidence,
+    checksum: str,
+) -> CandidateEvidence:
+    """Type-exact copy; never a subclass returned by ``dataclasses.replace``."""
+    return CandidateEvidence(
+        spec_hash=evidence.spec_hash,
+        spec_version=evidence.spec_version,
+        complexity=evidence.complexity,
+        dataset_id=evidence.dataset_id,
+        dataset_checksum=evidence.dataset_checksum,
+        symbol=evidence.symbol,
+        timeframe=evidence.timeframe,
+        code_version=evidence.code_version,
+        settings_digest=evidence.settings_digest,
+        seed=evidence.seed,
+        trial_count=evidence.trial_count,
+        search_budget=evidence.search_budget,
+        splits=evidence.splits,
+        policy=evidence.policy,
+        folds=evidence.folds,
+        aggregate=evidence.aggregate,
+        checksum=checksum,
+        created_at=evidence.created_at,
+        schema_version=evidence.schema_version,
+        locked_oos=section,
+    )
 
 
 def attach_holdout(
     evidence: CandidateEvidence,
     result: LockedHoldoutResult,
 ) -> CandidateEvidence:
-    """Return a **new** evidence bundle carrying the locked-holdout section.
+    """Return a **new, type-exact** evidence bundle with the frozen holdout section.
 
     The input bundle is frozen and is never mutated. The result must match the
     evidence identity and must have been unlocked for this exact bundle
     (``result.evidence_checksum == evidence.checksum``), which prevents attaching
     a holdout result to a different candidate that happens to share a dataset.
-    Attaching the same result to an already-attached bundle is idempotent.
+    Attaching the same result to an already-attached bundle is idempotent. The
+    return value is always exactly :class:`CandidateEvidence`, even when the
+    input was a subclass.
     """
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if not isinstance(result, LockedHoldoutResult):
         raise TypeError(f"result must be a LockedHoldoutResult, got {type(result).__name__}")
     verify_holdout_result(result, evidence)
 
     if evidence.locked_oos is not None:
-        section = evidence.locked_oos
-        if isinstance(section, Mapping) and section.get("checksum") == result.checksum:
+        expected = _locked_section(result, evidence_checksum=evidence.locked_oos.evidence_checksum)
+        if evidence.locked_oos == expected:
             return evidence
         raise HoldoutError(
             "locked_oos_conflict",
             "the evidence already carries a different locked-holdout section",
+        )
+    section = _locked_section(result, evidence_checksum=evidence.checksum)
+    if section.evidence_checksum != evidence.checksum:
+        raise HoldoutError(
+            "locked_oos_evidence_mismatch",
+            "the section's evidence checksum is not this bundle's checksum",
+        )
+    if section.checksum != locked_oos_checksum(section):
+        raise HoldoutError(
+            "locked_oos_checksum_mismatch",
+            "the section's canonical checksum did not re-derive",
         )
     if result.evidence_checksum != evidence.checksum:
         raise HoldoutError(
@@ -1969,14 +2140,8 @@ def attach_holdout(
             ),
         )
 
-    section = result.to_dict()
-    payload = evidence.to_dict()
-    payload["locked_oos"] = section
-    body = dict(payload)
-    body.pop("checksum", None)
-    body.pop("created_at", None)
-    checksum = hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
-    attached = replace(evidence, locked_oos=section, checksum=checksum)
+    draft = _copy_with_locked_oos(evidence, section, "0" * 64)
+    attached = _copy_with_locked_oos(evidence, section, evidence_checksum(draft))
     verify_evidence(
         attached,
         dataset_id=attached.dataset_id,

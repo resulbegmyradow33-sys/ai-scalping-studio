@@ -70,12 +70,15 @@ attaches one**. Every other check can pass and the decision still rejects with
 from __future__ import annotations
 
 import hashlib
+import hmac
 import math
+import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from scalping.discovery._evidence_auth import issue as _issue_authorization
 from scalping.discovery.archive import (
     MANUAL_OVERRIDE_POLICY_ID,
     ArchiveError,
@@ -96,6 +99,7 @@ from scalping.discovery.protocols import canonical_json
 
 __all__ = [
     "MANUAL_OVERRIDE_POLICY_ID",
+    "PRODUCTION_POLICIES",
     "PROMOTION_V1",
     "EvidenceIdentity",
     "ManualOverride",
@@ -104,6 +108,8 @@ __all__ = [
     "PromotionRefused",
     "PromotionRejection",
     "evaluate_promotion",
+    "is_production_policy",
+    "is_production_policy_digest",
     "is_sealed_decision",
     "manual_override",
     "promote_manual_override",
@@ -299,6 +305,11 @@ class PromotionPolicy:
             raise ValueError(
                 f"max_selection_fold_share must be in [0, 1] (0 disables it), got {share!r}"
             )
+        if self.policy_id == "promotion-v1":
+            if not self.require_locked_oos:
+                raise ValueError("the production policy cannot disable require_locked_oos")
+            if float(share) < 0.05:
+                raise ValueError("the production policy must keep max_selection_fold_share >= 0.05")
 
     @property
     def digest(self) -> str:
@@ -355,6 +366,29 @@ PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     max_selection_fold_share=0.4,
 )
 
+#: The only policies the public production path accepts, keyed by field digest.
+#: A modified copy has a different digest and is refused with
+#: ``non_production_policy``. Tests may add their own entry explicitly to exercise
+#: the provider; production code must not.
+PRODUCTION_POLICIES: Final[dict[str, PromotionPolicy]] = {PROMOTION_V1.digest: PROMOTION_V1}
+
+
+def is_production_policy(policy: PromotionPolicy) -> bool:
+    """True when ``policy`` is exactly a registered production policy."""
+    if not isinstance(policy, PromotionPolicy):
+        return False
+    registered = PRODUCTION_POLICIES.get(policy.digest)
+    return (
+        registered is not None
+        and registered.policy_id == policy.policy_id
+        and registered.version == policy.version
+    )
+
+
+def is_production_policy_digest(digest: str | None) -> bool:
+    """True when ``digest`` belongs to a registered production policy."""
+    return isinstance(digest, str) and digest in PRODUCTION_POLICIES
+
 
 @dataclass(frozen=True, slots=True)
 class PromotionRejection:
@@ -394,10 +428,27 @@ class EvidenceIdentity:
                 raise ValueError(f"{name} must be a non-empty string")
 
 
-#: Module-private identity of a genuine decision. Constructing the sentinel
-#: elsewhere is impossible, and the digest half makes ``dataclasses.replace`` of
-#: a valid decision fail unless the payload is unchanged.
-_DECISION_SEAL: Final[object] = object()
+class _DecisionSealer:
+    """Per-process HMAC key for genuine decisions; never a public sentinel.
+
+    ``evaluate_promotion`` signs the canonical payload. A hand-built decision has
+    no valid tag, and ``dataclasses.replace`` of a real decision with a changed
+    field fails verification because the payload no longer matches its tag.
+    """
+
+    __slots__ = ("_key",)
+
+    def __init__(self) -> None:
+        self._key = secrets.token_bytes(32)
+
+    def sign(self, payload: str) -> str:
+        return hmac.new(self._key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def verify(self, payload: str, tag: object) -> bool:
+        return isinstance(tag, str) and hmac.compare_digest(self.sign(payload), tag)
+
+
+_SEALER = _DecisionSealer()
 
 
 @dataclass(frozen=True, slots=True)
@@ -429,17 +480,10 @@ class PromotionDecision:
     code_version: str | None
     observed: Mapping[str, Any] = field(default_factory=dict, compare=False)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
-    _seal: object | None = field(default=None, repr=False, compare=False)
+    _seal: str = field(default="", repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self._seal is _DECISION_SEAL:
-            object.__setattr__(self, "_seal", (_DECISION_SEAL, self._content_digest()))
-        elif not (
-            isinstance(self._seal, tuple)
-            and len(self._seal) == 2
-            and self._seal[0] is _DECISION_SEAL
-            and self._seal[1] == self._content_digest()
-        ):
+        if not _SEALER.verify(self._content(), self._seal):
             raise ValueError("a PromotionDecision must be produced by evaluate_promotion")
         if not isinstance(self.accepted, bool):
             raise TypeError(f"accepted must be a bool, got {type(self.accepted).__name__}")
@@ -459,8 +503,8 @@ class PromotionDecision:
         if self.policy_id == MANUAL_OVERRIDE_POLICY_ID:
             raise ValueError("a promotion decision cannot claim the manual-override policy")
 
-    def _content_digest(self) -> str:
-        return hashlib.sha256(canonical_json(self.to_dict()).encode("utf-8")).hexdigest()
+    def _content(self) -> str:
+        return canonical_json(self.to_dict())
 
     @property
     def codes(self) -> tuple[str, ...]:
@@ -499,22 +543,31 @@ class PromotionDecision:
 
 
 def is_sealed_decision(decision: object) -> bool:
-    """True only for a :class:`PromotionDecision` built by ``evaluate_promotion``.
+    """True only for a :class:`PromotionDecision` signed by ``evaluate_promotion``.
 
-    The constructor already refuses a hand-built decision, but this predicate is
-    the explicit gate a consumer such as the locked holdout uses. It re-derives
-    the content digest, so ``object.__new__`` bypasses and replaced fields are
-    rejected as well.
+    The constructor already refuses an unsigned decision, but this predicate is
+    the explicit gate a consumer such as the locked holdout uses. It re-verifies
+    the HMAC over the canonical payload, so ``object.__new__`` bypasses and
+    ``dataclasses.replace`` with a changed field are rejected as well.
     """
     if not isinstance(decision, PromotionDecision):
         return False
-    seal = getattr(decision, "_seal", None)
-    if not (isinstance(seal, tuple) and len(seal) == 2 and seal[0] is _DECISION_SEAL):
-        return False
     try:
-        return bool(seal[1] == decision._content_digest())
-    except (KeyError, TypeError, ValueError):
+        return bool(_SEALER.verify(decision._content(), getattr(decision, "_seal", "")))
+    except (AttributeError, KeyError, TypeError, ValueError):
         return False
+
+
+def _sealed_decision(**kwargs: Any) -> PromotionDecision:
+    """Build and sign a decision; only ``evaluate_promotion`` calls this."""
+    kwargs.setdefault("observed", {})
+    kwargs.setdefault("created_at", datetime.now(UTC).isoformat(timespec="seconds"))
+    decision = object.__new__(PromotionDecision)
+    for name, value in kwargs.items():
+        object.__setattr__(decision, name, value)
+    object.__setattr__(decision, "_seal", _SEALER.sign(decision._content()))
+    decision.__post_init__()
+    return decision
 
 
 @dataclass(frozen=True, slots=True)
@@ -622,36 +675,32 @@ def _stress_row(fold_stress: Sequence[Any], multiplier: float) -> Any | None:
 def _locked_oos(evidence: CandidateEvidence, policy: PromotionPolicy) -> bool:
     """True when a valid locked-holdout section is attached to this bundle.
 
-    The current evidence builder does not add the section; the locked-holdout
-    slice attaches it after one authorised evaluation. Presence alone is not
-    enough: the section must name a digest, a positive trade count and the same
-    dataset, spec, code version, settings and policy as the promotion. That
-    stops an unrelated or hand-written section from unlocking promotion.
+    The section is the real ``CandidateEvidence.locked_oos`` dataclass field, so
+    a subclass overriding ``to_dict`` cannot invent one. Its own checksum,
+    identity, policy and test-row range must match this bundle and policy.
     """
-    payload = evidence.to_dict().get("locked_oos")
-    if not isinstance(payload, Mapping):
+    section = evidence.locked_oos
+    if section is None:
         return False
-    checksum = payload.get("checksum")
-    trades = payload.get("trades")
-    if not (
-        isinstance(checksum, str)
-        and len(checksum) == 64
-        and all(character in "0123456789abcdef" for character in checksum)
-        and isinstance(trades, int)
-        and not isinstance(trades, bool)
-        and trades > 0
-    ):
+    if len(section.checksum) != 64 or len(section.evidence_checksum) != 64:
         return False
-    for name, expected in (
-        ("dataset_id", evidence.dataset_id),
-        ("dataset_checksum", evidence.dataset_checksum),
-        ("spec_hash", evidence.spec_hash),
-        ("code_version", evidence.code_version),
-        ("settings_digest", evidence.settings_digest),
-        ("policy_id", policy.policy_id),
-        ("policy_version", policy.version),
+    if section.trades <= 0:
+        return False
+    for observed, expected in (
+        (section.dataset_id, evidence.dataset_id),
+        (section.dataset_checksum, evidence.dataset_checksum),
+        (section.symbol, evidence.symbol),
+        (section.timeframe, evidence.timeframe),
+        (section.spec_hash, evidence.spec_hash),
+        (section.spec_version, evidence.spec_version),
+        (section.code_version, evidence.code_version),
+        (section.settings_digest, evidence.settings_digest),
+        (section.policy_id, policy.policy_id),
+        (section.policy_version, policy.version),
+        (section.test_start_row, evidence.splits.test_start_row),
+        (section.test_end_row, evidence.splits.test_end_row),
     ):
-        if payload.get(name) != expected:
+        if observed != expected:
             return False
     return True
 
@@ -797,6 +846,48 @@ def _check_bundle(
             required="aggregate",
         )
         return
+
+    if isinstance(evidence.policy, EvidencePolicy):
+        if evidence.policy.folds != len(folds):
+            _reject(
+                rejections,
+                "inconsistent_evidence",
+                "the evidence policy fold count does not match the folds",
+                observed=len(folds),
+                required=evidence.policy.folds,
+            )
+        if (
+            evidence.policy.bootstrap_samples != aggregate.bootstrap_samples
+            or evidence.policy.bootstrap_confidence != aggregate.bootstrap_confidence
+        ):
+            _reject(
+                rejections,
+                "inconsistent_evidence",
+                "the evidence policy bootstrap settings do not match the aggregate",
+                observed=f"{aggregate.bootstrap_samples}/{aggregate.bootstrap_confidence:g}",
+                required=(
+                    f"{evidence.policy.bootstrap_samples}/{evidence.policy.bootstrap_confidence:g}"
+                ),
+            )
+        expected_stress = {float(value) for value in evidence.policy.cost_stress}
+        for fold in folds:
+            if fold.trades < evidence.policy.min_trades_per_fold:
+                _reject(
+                    rejections,
+                    "inconsistent_evidence",
+                    f"fold {fold.fold} has fewer trades than the evidence policy minimum",
+                    observed=fold.trades,
+                    required=evidence.policy.min_trades_per_fold,
+                )
+            observed_stress = {float(row.multiplier) for row in fold.stress}
+            if observed_stress != expected_stress:
+                _reject(
+                    rejections,
+                    "inconsistent_evidence",
+                    f"fold {fold.fold} stress multipliers do not match the evidence policy",
+                    observed=",".join(f"x{value:g}" for value in sorted(observed_stress)),
+                    required=",".join(f"x{value:g}" for value in sorted(expected_stress)),
+                )
 
     if isinstance(evidence.splits, SplitBoundaries):
         splits = evidence.splits
@@ -1501,7 +1592,7 @@ def evaluate_promotion(
     """
     if not isinstance(policy, PromotionPolicy):
         raise TypeError(f"policy must be a PromotionPolicy, got {type(policy).__name__}")
-    if champion_evidence is not None and not isinstance(champion_evidence, CandidateEvidence):
+    if champion_evidence is not None and type(champion_evidence) is not CandidateEvidence:
         raise TypeError(
             "champion_evidence must be a CandidateEvidence or None, "
             f"got {type(champion_evidence).__name__}"
@@ -1517,7 +1608,7 @@ def evaluate_promotion(
     rejections: list[PromotionRejection] = []
     observed: dict[str, Any] = {}
 
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         code = "missing_evidence" if evidence is None else "invalid_evidence"
         _reject(
             rejections,
@@ -1526,7 +1617,7 @@ def evaluate_promotion(
             observed="absent" if evidence is None else type(evidence).__name__,
             required="CandidateEvidence",
         )
-        return PromotionDecision(
+        return _sealed_decision(
             accepted=False,
             rejections=tuple(rejections),
             policy_id=policy.policy_id,
@@ -1541,7 +1632,6 @@ def evaluate_promotion(
             settings_digest=None,
             code_version=None,
             observed=observed,
-            _seal=_DECISION_SEAL,
         )
 
     _check_bundle(evidence, policy, rejections, observed, expected_identity)
@@ -1555,7 +1645,7 @@ def evaluate_promotion(
     )
 
     accepted = not rejections
-    return PromotionDecision(
+    return _sealed_decision(
         accepted=accepted,
         rejections=tuple(rejections),
         policy_id=policy.policy_id,
@@ -1570,7 +1660,6 @@ def evaluate_promotion(
         settings_digest=evidence.settings_digest or None,
         code_version=evidence.code_version or None,
         observed=observed,
-        _seal=_DECISION_SEAL,
     )
 
 
@@ -1600,7 +1689,7 @@ def manual_override(
     checksum = None
     spec_hash = None
     dataset_id = None
-    if isinstance(evidence, CandidateEvidence):
+    if type(evidence) is CandidateEvidence:
         try:
             checksum = evidence_checksum(evidence)
         except (TypeError, ValueError):  # pragma: no cover - defensive
@@ -1621,7 +1710,7 @@ def manual_override(
     )
 
 
-def promote_with_evidence(
+def _promote_with_evidence(
     archive: DiscoveryArchive,
     candidate_id: str,
     evidence: CandidateEvidence,
@@ -1630,18 +1719,12 @@ def promote_with_evidence(
     scope: str,
     reason: str,
     expected_identity: EvidenceIdentity,
+    require_production: bool,
 ) -> ChampionRecord:
-    """Evaluate ``policy`` internally and promote only if it accepts.
-
-    There is no accepted-decision argument to pass and no public archive method
-    to bypass. The champion is read from the archive; when one exists its stored
-    evidence is the comparison baseline, and a champion without stored evidence
-    is a rejection (``champion_evidence_missing``). A first promotion records
-    explicitly that there was no baseline.
-    """
+    """Internal promotion; ``require_production`` is set only by tests."""
     if not isinstance(archive, DiscoveryArchive):
         raise TypeError(f"archive must be a DiscoveryArchive, got {type(archive).__name__}")
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if not isinstance(policy, PromotionPolicy):
         raise TypeError(f"policy must be a PromotionPolicy, got {type(policy).__name__}")
@@ -1652,11 +1735,28 @@ def promote_with_evidence(
     candidate_id = _text(candidate_id, "candidate_id")
     scope = _text(scope, "scope")
     reason = _text(reason, "reason")
+    if require_production and not is_production_policy(policy):
+        raise PromotionRefused(
+            "non_production_policy: only a registered production policy may promote; "
+            f"{policy.policy_id!r} v{policy.version} digest {policy.digest[:12]} is not registered"
+        )
 
     champion = archive.champion(scope)
     champion_id = None if champion is None else champion.candidate.candidate_id
     champion_evidence: CandidateEvidence | None = None
-    if champion is not None:
+    replaces_non_evidence: dict[str, Any] | None = None
+    champion_for_comparison: str | None = champion_id
+    if champion is not None and champion.mode != "evidence":
+        # A legacy exploratory/manual champion has no evidence bridge. Replacing
+        # it is an explicit, audited first evidence promotion, not a comparison.
+        champion_for_comparison = None
+        replaces_non_evidence = {
+            "previous_candidate_id": champion_id,
+            "previous_mode": champion.mode,
+            "previous_promotion_id": champion.promotion_id,
+            "previous_reason": champion.reason,
+        }
+    elif champion is not None:
         record = archive.champion_evidence(scope)
         if record is not None:
             try:
@@ -1680,7 +1780,7 @@ def promote_with_evidence(
         evidence,
         policy,
         champion_evidence=champion_evidence,
-        champion_spec_hash=champion_id,
+        champion_spec_hash=champion_for_comparison,
         expected_identity=expected_identity,
     )
     if not decision.accepted:
@@ -1696,6 +1796,24 @@ def promote_with_evidence(
     if decision.evidence_checksum is None:  # pragma: no cover - constructor enforces
         raise PromotionRefused("an accepted decision has no evidence checksum")
 
+    detail: dict[str, Any] = {
+        "decision_summary": decision.summary,
+        "observed": dict(decision.observed),
+        "rejection_codes": [],
+    }
+    if replaces_non_evidence is not None:
+        detail["replaces_non_evidence"] = replaces_non_evidence
+
+    authorization_payload = {
+        "candidate_id": candidate_id,
+        "evidence_checksum": decision.evidence_checksum,
+        "policy_digest": decision.policy_digest,
+        "dataset_id": evidence.dataset_id,
+        "dataset_checksum": evidence.dataset_checksum,
+        "settings_digest": evidence.settings_digest,
+        "code_version": evidence.code_version,
+        "champion_candidate_id": champion_id,
+    }
     return archive._promote_evidence(
         candidate_id,
         scope=scope,
@@ -1712,11 +1830,69 @@ def promote_with_evidence(
         evidence_payload=evidence.to_dict(),
         champion_checksum=decision.champion_checksum,
         champion_candidate_id=champion_id,
-        detail={
-            "decision_summary": decision.summary,
-            "observed": dict(decision.observed),
-            "rejection_codes": [],
-        },
+        replaces_non_evidence=replaces_non_evidence is not None,
+        authorization=_issue_authorization(authorization_payload),
+        authorization_payload=authorization_payload,
+        detail=detail,
+    )
+
+
+def promote_with_evidence(
+    archive: DiscoveryArchive,
+    candidate_id: str,
+    evidence: CandidateEvidence,
+    policy: PromotionPolicy,
+    *,
+    scope: str,
+    reason: str,
+    expected_identity: EvidenceIdentity,
+) -> ChampionRecord:
+    """Evaluate a **registered production policy** and promote only if it accepts.
+
+    There is no accepted-decision argument to pass, no public archive method to
+    bypass and no unregistered policy. A non-registered policy is refused with
+    ``non_production_policy``. The champion is read from the archive: an
+    evidence champion is the comparison baseline, an exploratory/manual champion
+    is replaced as an explicitly audited first evidence promotion.
+    """
+    return _promote_with_evidence(
+        archive,
+        candidate_id,
+        evidence,
+        policy,
+        scope=scope,
+        reason=reason,
+        expected_identity=expected_identity,
+        require_production=True,
+    )
+
+
+def _promote_for_tests(
+    archive: DiscoveryArchive,
+    candidate_id: str,
+    evidence: CandidateEvidence,
+    policy: PromotionPolicy,
+    *,
+    scope: str,
+    reason: str,
+    expected_identity: EvidenceIdentity,
+) -> ChampionRecord:
+    """Private seed path for tests; never call it from production code.
+
+    It bypasses only the production registry. The evaluation, seal, archive
+    verification, accepted-trial link and audit rows are the same as the public
+    path. Tests that need the provider to read the champion must also add the
+    test policy digest to ``PRODUCTION_POLICIES`` explicitly.
+    """
+    return _promote_with_evidence(
+        archive,
+        candidate_id,
+        evidence,
+        policy,
+        scope=scope,
+        reason=reason,
+        expected_identity=expected_identity,
+        require_production=False,
     )
 
 
