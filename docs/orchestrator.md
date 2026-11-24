@@ -23,6 +23,8 @@ process, not an operating-system service.
 | `backend/src/scalping/orchestrator/handlers.py` | `HandlerContext`, payload validators, the five pipeline handlers |
 | `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
 | `backend/src/scalping/orchestrator/daemon.py` | `DaemonConfig`, `OrchestratorDaemon`, tick order, background loop, status |
+| `backend/src/scalping/orchestrator/paper_triggers.py` | Matured paper outcomes as a trigger; proposal-only handler |
+| `backend/src/scalping/orchestrator/proposal_handlers.py` | Approved experiment proposals as `discovery.run` triggers; optional `knowledge.proposals` handler |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
 | `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
@@ -898,6 +900,126 @@ recommendation, not work.
   reviewed decisions, and the final OOS/holdout split is never touched here.
 
 
+## Approved proposals as discovery triggers (knowledge bridge)
+
+`ProposalQueueTriggerSource` in `proposal_handlers.py` is the explicit seam
+between the knowledge approval gate and the queue. It reads
+`proposals_for_queue(ProposalStore, limit)` — approved records only — and emits
+one ordinary `discovery.run` trigger per eligible proposal. It is **not**
+registered by `register_default_handlers`; a caller adds it to `scan_once` or the
+daemon when the owner wants approved proposals to become queue work.
+
+### Trigger contract
+
+| Field | Value |
+|---|---|
+| `kind` | `discovery.run` (the same kind the production handler validates) |
+| `dedupe_key` | `discovery.run:proposal:<proposal id>:<payload sha256>` |
+| payload | The fields of `DiscoveryRequest`: `symbol`, `timeframe`, `max_trials`, `seed`, `stress`, `gate`, `population`, `generations`, `patience`, `horizon` |
+| `max_retries` | `1` by default; a transient queue failure must not consume an approval |
+
+The search policy comes from an explicit `DiscoveryTemplate`. The gate and
+cost-stress policy are required inputs, not inherited defaults: an approved
+proposal names the question, not the evidence policy. The payload intentionally
+contains no proposal fields because the current `discovery.run` handler rejects
+unknown keys. Provenance lives in the dedupe key, the cursor document and the
+`proposal.discovery_queued` audit event (`proposal_id`, `hypothesis_id`, scope,
+dataset hint, required columns/groups, payload hash, approval actor/reason).
+
+### Eligibility and refusal reasons
+
+A proposal emits only when all of these hold:
+
+- its status is `approved` (the queue cannot return a proposed, rejected or
+  converted record);
+- `symbol` and `timeframe` are non-empty and in the project registry;
+- `required_columns` and `required_groups` are non-empty;
+- an optional `dataset_id` is non-empty and does not name a test/holdout split.
+  The schema only permits `dataset_id` on a `converted` record, so this check is
+  defensive against a store written outside the API; an approved proposal
+  normally has no dataset id.
+
+Anything else writes one `proposal.not_queued` event with a machine-readable
+reason. The reason is rewritten only when it changes, so a periodic scan does
+not flood the audit log.
+
+| `reason` | Meaning |
+|---|---|
+| `not_approved` | The queue returned a non-approved record (defensive) |
+| `missing_scope` | Empty symbol or timeframe |
+| `unknown_scope` | Scope outside the project registry |
+| `missing_data` | No required bar columns or feature groups |
+| `holdout_data` | Dataset hint contains `test`/`holdout`/`final`/`locked`/`oos` and similar tokens |
+| `invalid_proposal` | The record is not an `ExperimentProposal` or has no usable payload |
+| `truncated` | The per-scan emission cap stopped before this record; a later scan resumes |
+
+### Dedupe and the cursor
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.knowledge.proposals:<absolute proposal store path>`:
+
+```json
+{"version": 1,
+ "emitted": {"<proposal id>:<payload sha256>": "<proposal id>"},
+ "not_queued": {"<proposal id>": "<reason>"},
+ "pending_ack": {"<proposal id>:<payload sha256>": "<proposal id>"}}
+```
+
+`scan()` computes it and `seen()` persists it, matching every other trigger
+source. An unacknowledged identity stays in `pending_ack` and is re-emitted on
+the next scan; the store's `dedupe_key` prevents a second job if the crash
+happened after `enqueue`. Changing the `DiscoveryTemplate` changes the payload
+hash, so the same proposal becomes a deliberately different experiment rather
+than being silently deduplicated as the old one. A proposal that is rejected or
+converted **after** its job was queued does not retract the job; the owner still
+owns the queue decision.
+
+### Optional proposal-only handler
+
+`make_proposal_handler()` / `register_proposal_handler(registry)` bind
+`knowledge.proposals`. The handler accepts the snapshot built by
+`proposal_message(proposal, payload_hash=...)`, validates its types, status and
+scope, writes `proposal.received`, and returns:
+
+- `action: "queue_discovery"`, `queued: false`, `executed: false` for an approved
+  snapshot with no holdout dataset hint;
+- `action: "no_action"` for any other status, or for a snapshot whose dataset id
+  names a locked split.
+
+It never opens the proposal store, reads a bar, executes discovery, approves a
+proposal or enqueues another job. `JobContext.store` is the read-only facade, so
+the handler could not enqueue even by mistake.
+
+### Governance boundaries
+
+- **No auto-approval.** The source only reads the approved queue. `propose`,
+  `approve`, `reject` and `link_candidate` are never called from this module.
+- **No auto-promotion.** A queued `discovery.run` still records only
+  `no_trade`/`no_change`/`rejected` through the existing handler.
+- **Conversion is explicit.** The only path from `approved` to `converted` is
+  `ProposalStore.link_candidate(candidate_hash, dataset_id, actor=...)` after a
+  reviewed discovery run produced a candidate. The bridge never converts a
+  proposal and never invents a dataset id.
+- **No holdout access.** `proposal_handlers.py` imports no discovery or holdout
+  module and refuses a holdout-looking hint before a job exists.
+
+### Honest limits
+
+- **One scan reads at most 1 000 approved proposals and emits at most
+  `max_proposals` (default 100).** A larger approved backlog is covered over
+  successive scans until it exceeds the read bound; beyond that a record is not
+  scanned. This is a bound, not a queue property.
+- **The bridge is caller-wired.** Nothing installs the source by default, so an
+  approved proposal becomes a job only when a caller passes the source to
+  `scan_once` or the daemon.
+- **A queued job is not an execution.** The bridge creates queue rows. The
+  orchestrator still decides when to run them, under the resource guard and
+  research controls.
+- **No retraction.** Rejecting or converting a proposal after its trigger was
+  acknowledged does not cancel the queued job or rewind the cursor.
+- **The cursor grows with emitted and refused proposals.** There is no pruning
+  or compaction yet.
+
 ## Verification
 
 ```
@@ -1001,6 +1123,19 @@ a read-only facade with no `enqueue` or cross-job `cancel`; an injected `kind`
 and an out-of-range scan bound are rejected; and `since` plus `max_proposals`
 keep a large historical ledger from emitting an unbounded backlog.
 
+The proposal-bridge tests (`tests/test_proposal_bridge.py`) cover: approved-only
+emission with proposed/rejected/converted records skipped and no status change;
+the emitted payload round-tripping through the real `DiscoveryRequest`; constant
+parity with the discovery handler; a bare scan creating no job, archive or
+discovery execution; an import scan proving no discovery/holdout module is
+reached; cursor and store dedupe across a crash and a job-store restart; a
+changed template producing a new payload hash and job; refusal reasons for
+missing/unknown scope, missing required data and a holdout-looking dataset hint
+that are not repeated; provenance fields in the audit event and cursor; and the
+optional `knowledge.proposals` handler returning `queue_discovery` / `no_action`
+with `queued: false` / `executed: false`, no second job and permanent failure for
+an invalid snapshot.
+
 The daemon tests cover: config bounds and profile/type selection; tick scans
 before it drains; trigger dedupe across ticks; pause and safe mode still scan and
 enqueue but claim nothing; disabled research leaves research queued while
@@ -1067,8 +1202,12 @@ Not proven by it:
   clock; a purely simulated clock would leave the recovered job scheduled in the
   future. Production calls `start()` with `now=None`, so this is a test-seam
   limitation, not a runtime defect.
-- **A proposal is still not executed.** The paper-outcome handler records
-  `queue_discovery`; nothing turns that proposal into a queued discovery job.
+- **A paper-outcome proposal is still not executed.** The paper-outcome handler
+  records `queue_discovery`; nothing turns that result into a queued discovery
+  job. The separate knowledge bridge
+  (`tests/test_proposal_bridge.py`) queues `discovery.run` only for an
+  owner-approved `ProposalStore` record when a caller explicitly wires
+  `ProposalQueueTriggerSource`.
 - **Synthetic inputs only.** One day of seeded M1 proves wiring, not market
   behaviour, data quality or edge. No real bar, ledger or document is read.
 - **One process.** Nothing here exercises a second daemon, a lease, or two
