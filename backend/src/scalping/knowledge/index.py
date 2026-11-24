@@ -801,6 +801,25 @@ class KnowledgeIndex:
         )
         return [_section_from_row(row) for row in rows]
 
+    def section(self, doc_id: str, ordinal: int) -> SectionRecord | None:
+        """One section by document and ordinal, or ``None`` when absent.
+
+        This is the read path citation checks use: a source ref names
+        ``(doc_id, ordinal)`` and needs the section text to compare its quote
+        against.
+        """
+        doc_id = _require_text(doc_id, "doc_id")
+        ordinal = _require_non_negative(ordinal, "ordinal")
+        row = (
+            self._connection()
+            .execute(
+                "SELECT * FROM sections WHERE doc_id = ? AND ordinal = ?",
+                (doc_id, ordinal),
+            )
+            .fetchone()
+        )
+        return None if row is None else _section_from_row(row)
+
     def chunks(self, section_id: int) -> list[ChunkRecord]:
         """Chunks of one section in order."""
         section_id = _require_non_negative(section_id, "section_id")
@@ -816,6 +835,16 @@ class KnowledgeIndex:
         return "\n\n".join(section.text for section in self.sections(doc_id))
 
     # --------------------------------------------------------------- hypotheses
+
+    def hypothesis_exists(self, hypothesis_id: str) -> bool:
+        """Whether a hypothesis row exists; a read-only existence check."""
+        hypothesis_id = _require_text(hypothesis_id, "hypothesis_id")
+        row = (
+            self._connection()
+            .execute("SELECT 1 FROM hypotheses WHERE hypothesis_id = ?", (hypothesis_id,))
+            .fetchone()
+        )
+        return row is not None
 
     def create_hypothesis(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate to :func:`scalping.knowledge.hypothesis.create_hypothesis`."""

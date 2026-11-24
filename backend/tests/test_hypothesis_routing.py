@@ -21,6 +21,7 @@ from scalping.knowledge import (
     ProposalStore,
     RoutingError,
     SourceRef,
+    canonical_proposal_id,
     create_hypothesis,
     extract_hypotheses,
     proposals_for_queue,
@@ -64,7 +65,30 @@ def _proposal(
     hypothesis: Hypothesis, index: KnowledgeIndex, store: ProposalStore
 ) -> ExperimentProposal:
     return store.create(
-        propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+        propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index),
+        index=index,
+    )
+
+
+def _rewrite(proposal: ExperimentProposal, **changes: object) -> ExperimentProposal:
+    """Apply changes and recompute the id, so payload checks reach the source check."""
+    candidate = replace(proposal, **changes)
+    return replace(
+        candidate,
+        proposal_id=canonical_proposal_id(
+            hypothesis_id=candidate.hypothesis_id,
+            source_refs=candidate.source_refs,
+            symbol=candidate.symbol,
+            timeframe=candidate.timeframe,
+            hypothesis_kind=candidate.hypothesis_kind,
+            kind_source=candidate.kind_source,
+            required_columns=candidate.required_columns,
+            required_groups=candidate.required_groups,
+            dsl_observation=candidate.dsl_observation,
+            dsl_condition=candidate.dsl_condition,
+            dsl_expected_effect=candidate.dsl_expected_effect,
+            falsification_test=candidate.falsification_test,
+        ),
     )
 
 
@@ -94,7 +118,7 @@ def test_proposal_from_extracted_hypothesis_is_a_text_record(
     assert "volatility" in proposal.required_groups
     assert "spread" in proposal.required_columns
 
-    stored = store.create(proposal)
+    stored = store.create(proposal, index=index)
     assert stored == store.get(proposal.proposal_id)
     assert stored.to_dict()["status"] == "proposed"
 
@@ -196,7 +220,7 @@ def test_only_proposed_records_can_be_created(index: KnowledgeIndex, tmp_path: P
     )
 
     with pytest.raises(RoutingError) as excinfo:
-        store.create(forged)
+        store.create(forged, index=index)
     assert excinfo.value.code == "bad_status"
 
 
@@ -206,11 +230,15 @@ def test_candidate_link_is_one_way_and_one_time(index: KnowledgeIndex, tmp_path:
     proposal = _proposal(hypothesis, index, store)
 
     with pytest.raises(RoutingError) as excinfo:
-        store.link_candidate(proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc")
+        store.link_candidate(
+            proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+        )
     assert excinfo.value.code == "not_approved"
 
     store.approve(proposal.proposal_id, "approved for a bounded run", "owner")
-    converted = store.link_candidate(proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc")
+    converted = store.link_candidate(
+        proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+    )
 
     assert converted.status == "converted"
     assert converted.converted_candidate_hash == "a" * 64
@@ -219,7 +247,9 @@ def test_candidate_link_is_one_way_and_one_time(index: KnowledgeIndex, tmp_path:
     assert converted.approval.actor == "owner"
 
     with pytest.raises(RoutingError) as excinfo:
-        store.link_candidate(proposal.proposal_id, "b" * 64, "validation:XAUUSD:M15:def")
+        store.link_candidate(
+            proposal.proposal_id, "b" * 64, "validation:XAUUSD:M15:def", actor="owner"
+        )
     assert excinfo.value.code == "already_converted"
 
     with pytest.raises(RoutingError) as excinfo:
@@ -238,7 +268,9 @@ def test_queue_returns_only_approved_proposals(index: KnowledgeIndex, tmp_path: 
     store.approve(approved.proposal_id, "ready", "owner")
     store.reject(rejected.proposal_id, "not useful", "owner")
     store.approve(converted.proposal_id, "ready", "owner")
-    store.link_candidate(converted.proposal_id, "c" * 64, "validation:XAUUSD:M15:ccc")
+    store.link_candidate(
+        converted.proposal_id, "c" * 64, "validation:XAUUSD:M15:ccc", actor="owner"
+    )
 
     queue = proposals_for_queue(store, limit=10)
 
@@ -276,8 +308,8 @@ def test_proposal_id_is_deterministic_and_survives_reopen(
     assert first.proposal_id == second.proposal_id
     assert first.to_dict()["proposal_id"] == second.to_dict()["proposal_id"]
 
-    stored = store.create(first)
-    assert store.create(second).proposal_id == stored.proposal_id
+    stored = store.create(first, index=index)
+    assert store.create(second, index=index).proposal_id == stored.proposal_id
     approved = store.approve(stored.proposal_id, "reproducible", "owner")
     assert store.schema_version == PROPOSAL_SCHEMA_VERSION
     store.close()
@@ -306,6 +338,237 @@ def test_unknown_and_closed_store_operations_raise(index: KnowledgeIndex, tmp_pa
     store.close()
     with pytest.raises(KnowledgeIndexError, match="closed"):
         store.get(proposal.proposal_id)
+
+
+def test_create_verifies_hypothesis_and_sources_at_persistence(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    store.create(proposal, index=index)
+
+    unknown_doc = _rewrite(
+        proposal,
+        source_refs=(replace(hypothesis.source_refs[0], doc_id="0" * 64),),
+    )
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(unknown_doc, index=index)
+    assert excinfo.value.code == "missing_source"
+
+    missing_section = _rewrite(
+        proposal,
+        source_refs=(replace(hypothesis.source_refs[0], section_ordinal=99),),
+    )
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(missing_section, index=index)
+    assert excinfo.value.code == "missing_source"
+
+    fabricated_quote = _rewrite(
+        proposal,
+        source_refs=(
+            replace(hypothesis.source_refs[0], quote="This sentence is not in the document."),
+        ),
+    )
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(fabricated_quote, index=index)
+    assert excinfo.value.code == "unverified_quote"
+
+    unknown_hypothesis = _rewrite(proposal, hypothesis_id="not-a-stored-hypothesis")
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(unknown_hypothesis, index=index)
+    assert excinfo.value.code == "unknown_hypothesis"
+
+
+def test_create_refuses_a_document_that_is_not_indexed(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    index.connection.execute(
+        "UPDATE documents SET status = 'extraction_failed' WHERE doc_id = ?",
+        (hypothesis.source_refs[0].doc_id,),
+    )
+
+    with pytest.raises(RoutingError) as excinfo:
+        _store(tmp_path).create(proposal, index=index)
+    assert excinfo.value.code == "missing_source"
+
+
+def test_quote_check_normalises_case_and_whitespace(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    reflowed = hypothesis.source_refs[0].quote.upper().replace(" ", "   ")
+
+    stored = store.create(
+        _rewrite(proposal, source_refs=(replace(hypothesis.source_refs[0], quote=reflowed),)),
+        index=index,
+    )
+
+    assert stored.source_refs[0].quote == reflowed
+
+
+def test_decisions_are_append_only_and_keep_an_earlier_approval(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    assert store.decisions(proposal.proposal_id) == []
+
+    store.approve(proposal.proposal_id, "scope is clear", "owner")
+    store.approve(proposal.proposal_id, "already approved", "owner")
+    rejected = store.reject(proposal.proposal_id, "withdrawn after review", "owner")
+
+    assert rejected.status == "rejected"
+    assert rejected.approval is not None
+    assert rejected.approval.reason == "withdrawn after review"
+    log = store.decisions(proposal.proposal_id)
+    assert [(item.from_status, item.to_status, item.actor, item.reason) for item in log] == [
+        ("proposed", "approved", "owner", "scope is clear"),
+        ("approved", "rejected", "owner", "withdrawn after review"),
+    ]
+    assert all(item.at for item in log)
+    assert log[0].to_dict()["to_status"] == "approved"
+
+    with pytest.raises(RoutingError) as excinfo:
+        store.decisions("0" * 64)
+    assert excinfo.value.code == "unknown_proposal"
+
+
+def test_link_candidate_requires_an_actor_and_a_hash(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    store.approve(proposal.proposal_id, "approved for a bounded run", "owner")
+
+    with pytest.raises(ValueError, match="actor"):
+        store.link_candidate(
+            proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="   "
+        )
+    with pytest.raises(RoutingError) as excinfo:
+        store.link_candidate(
+            proposal.proposal_id, "not-a-sha256", "validation:XAUUSD:M15:abc", actor="owner"
+        )
+    assert excinfo.value.code == "invalid_proposal"
+
+    converted = store.link_candidate(
+        proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+    )
+    decision = store.decisions(proposal.proposal_id)[-1]
+    assert converted.status == "converted"
+    assert decision.from_status == "approved"
+    assert decision.to_status == "converted"
+    assert decision.actor == "owner"
+    assert "a" * 64 in decision.reason
+    assert "validation:XAUUSD:M15:abc" in decision.reason
+
+
+def test_rejected_proposal_cannot_be_reproposed(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    store.reject(proposal.proposal_id, "not testable with stored data", "owner")
+
+    again = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    assert again.proposal_id == proposal.proposal_id
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(again, index=index)
+    assert excinfo.value.code == "already_rejected"
+    assert store.get(proposal.proposal_id).status == "rejected"
+
+
+def test_keyword_groups_match_whole_words_only(index: KnowledgeIndex, tmp_path: Path) -> None:
+    document = _document(index, tmp_path)
+    section = index.sections(document.doc_id)[0]
+    hypothesis = create_hypothesis(
+        index,
+        "Many traders buy any dip.",
+        "Nothing measured here.",
+        "many traders buy any dip",
+        "no measurable edge",
+        "XAUUSD",
+        "M15",
+        "Reject when the edge is absent.",
+        source_refs=(SourceRef(document.doc_id, section.ordinal, section.text),),
+    )
+
+    proposal = propose_from_hypothesis(
+        hypothesis,
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="claim",
+    )
+
+    assert "session" not in proposal.required_groups
+    assert set(proposal.required_groups) == {"price", "volatility"}
+
+    session_hypothesis = _hypotheses(index, tmp_path)[3]
+    session_proposal = propose_from_hypothesis(
+        session_hypothesis, symbol="XAUUSD", timeframe="M15", index=index
+    )
+    assert "session" in session_proposal.required_groups
+    assert "structure" in session_proposal.required_groups
+
+
+def test_source_ref_order_does_not_change_the_proposal_id(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    document = _document(index, tmp_path)
+    sections = index.sections(document.doc_id)
+    refs = tuple(SourceRef(document.doc_id, section.ordinal, section.text) for section in sections)
+    hypothesis = create_hypothesis(
+        index,
+        "Citation order does not matter.",
+        "Observed once.",
+        "a condition",
+        "an effect",
+        "XAUUSD",
+        "M15",
+        "Reject it.",
+        source_refs=refs,
+    )
+
+    forward = propose_from_hypothesis(
+        hypothesis, symbol="XAUUSD", timeframe="M15", index=index, hypothesis_kind="claim"
+    )
+    backward = propose_from_hypothesis(
+        replace(hypothesis, source_refs=tuple(reversed(refs))),
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="claim",
+    )
+
+    assert forward.proposal_id == backward.proposal_id
+    assert [ref.section_ordinal for ref in backward.source_refs] == [
+        section.ordinal for section in reversed(sections)
+    ]
+
+
+def test_hypothesis_kind_source_is_recorded(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    classified = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    supplied = propose_from_hypothesis(
+        hypothesis,
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="observation",
+    )
+
+    assert classified.kind_source == "classified"
+    assert supplied.kind_source == "supplied"
+    assert supplied.hypothesis_kind == "observation"
+    assert supplied.to_dict()["kind_source"] == "supplied"
+    assert classified.proposal_id != supplied.proposal_id
+
+    stored = store.create(supplied, index=index)
+    assert stored.kind_source == "supplied"
+    assert store.get(supplied.proposal_id) == stored
 
 
 def test_proposal_groups_match_the_live_feature_registry() -> None:

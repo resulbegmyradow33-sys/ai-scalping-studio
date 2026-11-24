@@ -257,9 +257,18 @@ feature groups, a suggested strategy skeleton **as three text fields**
 governance state.
 
 The proposal id is a lowercase sha256 over the immutable payload (hypothesis,
-citations, scope, kind, data requirement, skeleton text). Status, approval and
-conversion are excluded, so the same scope always has one id while governance
-changes stay auditable. Re-creating the same record returns the stored row.
+citations, scope, kind, data requirement, skeleton text). Source citations are
+sorted before hashing, so the same citations in a different order produce the
+same id; the record still shows them in the order the hypothesis supplied.
+Status, approval and conversion are excluded, so the same scope always has one
+id while governance changes stay auditable. Re-creating the same record returns
+the stored row. A rejected id is terminal: creating it again raises
+`already_rejected`, so a re-test needs a new hypothesis.
+
+`kind_source` (`classified` or `supplied`) is part of the payload and the stored
+row. It says whether `hypothesis_kind` came from the deterministic sentence
+classifier or was passed in explicitly for an imported record; it is hashed, so
+the two provenances cannot share an id.
 
 ### Routing rules
 
@@ -271,6 +280,7 @@ constructor:
 | status `proposed` or `testing` | accepted |
 | status `supported` or `rejected` | `bad_status`; a re-test is a new hypothesis |
 | no source refs, or a citation that does not resolve to an `indexed` section | `missing_source` |
+| a quote that is not a normalised substring of the cited section text | `unverified_quote` |
 | symbol/timeframe outside the project registry | `unknown_scope` |
 | statement not classifiable as `claim`/`observation` | `unsupported_kind` |
 | a valid scope | `ExperimentProposal(status="proposed")` |
@@ -281,42 +291,63 @@ compare the chosen scope with `market_scope`/`timeframe_scope`; that mismatch
 remains visible in the two records.
 
 `RoutingError.code` is one of: `missing_source`, `bad_status`, `unknown_scope`,
-`already_converted`, `not_approved`, `unknown_proposal`, `unsupported_kind`,
-`invalid_proposal`. The first five are the routing contract; the last three
-cover an unknown id, an unclassifiable sentence and a payload that does not
-match its own canonical id.
+`already_converted`, `already_rejected`, `not_approved`, `unknown_proposal`,
+`unknown_hypothesis`, `unsupported_kind`, `unverified_quote`,
+`invalid_proposal`. The first six are governance moves; `unknown_hypothesis`
+and `invalid_proposal` cover provenance and payload integrity, and
+`unverified_quote` means a citation does not literally occur in its section.
 
 Required data is recorded rather than fetched. `required_columns` is the bar
 schema an experiment needs (OHLC, spread for costs, volume); `required_groups`
-starts as `price` + `volatility` and adds groups whose keywords appear in the
-statement by a fixed keyword map. This is a planning hint, not a dataset
-request and not a feature computation.
+starts as `price` + `volatility` and adds groups whose keywords appear as whole
+words in the statement. Matching is anchored on word boundaries (with an
+optional plural), so `ny` matches `NY` but not `any`, and `sweep` still matches
+`sweeps`. This is a planning hint, not a dataset request and not a feature
+computation.
 
 ### Store and approval
 
 `ProposalStore(path)` follows the same SQLite conventions as the knowledge
 index: WAL, `busy_timeout`, foreign keys, `synchronous = NORMAL`,
-`BEGIN IMMEDIATE` writes and a versioned `schema_version` table. The store
-keeps proposals and their source refs in two tables (`ON DELETE CASCADE`).
+`BEGIN IMMEDIATE` writes and a versioned `schema_version` table. Schema version
+2 adds `kind_source` and the decision log by additive migration. The store keeps
+proposals, their source refs and the append-only decision log.
 
-`create()` accepts only `status="proposed"` records with no approval and no
-conversion. Approval is a separate, audited call; a hand-built approved record
-cannot bypass the gate.
+`create(proposal, *, index)` is the persistence boundary. It re-checks
+provenance against the knowledge index even when the record came from
+`propose_from_hypothesis`: the `hypothesis_id` must exist, every cited document
+must be `indexed`, every section must exist, and every quote must be a
+normalised (case-folded, whitespace-collapsed) substring of that section's text.
+It accepts only `status="proposed"` records with no approval and no conversion.
+Approval is a separate, audited call; a hand-built approved record cannot
+bypass the gate. A rejected proposal id stays rejected: re-creating it raises
+`already_rejected`.
+
+`proposal_decisions(proposal_id, from_status, to_status, actor, reason, at)` is
+append-only and is written in the same `BEGIN IMMEDIATE` transaction as the
+status update. Rejecting an approved proposal adds a second row
+(`approved -> rejected`) instead of erasing the approval. `decisions(proposal_id)`
+returns the log oldest first, and the current `status` always equals the last
+row's `to_status`.
 
 | Status | Entered by | Approval fields | In queue |
 |---|---|---|---|
-| `proposed` | `create()` | empty | no |
+| `proposed` | `create(proposal, index=...)` | empty | no |
 | `approved` | `approve(reason, actor)` | actor, reason, timestamp | yes |
 | `rejected` | `reject(reason, actor)` | actor, reason, timestamp | no |
-| `converted` | `link_candidate(hash, dataset_id)` | preserved from approval | no |
+| `converted` | `link_candidate(hash, dataset_id, actor=...)` | preserved from approval | no |
 
-- `approve` and `reject` require a non-empty reason and actor; the decision is
-  stored in `approval`. Re-approving an approved proposal is an idempotent
-  no-op (after argument validation). An approved but not-yet-converted
-  proposal may still be rejected. Rejected and converted proposals cannot be
-  approved, because that would rewrite history.
-- `link_candidate` is allowed once, only from `approved`. A second call is
-  `already_converted`; a call before approval is `not_approved`.
+- `approve` and `reject` require a non-empty reason and actor; the latest
+  decision is mirrored into `approval` and appended to `proposal_decisions`.
+  Re-approving an approved proposal is an idempotent no-op (after argument
+  validation). An approved but not-yet-converted proposal may still be
+  rejected, and both decisions remain in the log. Rejected and converted
+  proposals cannot be approved, because that would rewrite history.
+- `link_candidate(hash, dataset_id, *, actor)` is allowed once, only from
+  `approved`. It requires a sha256 hex candidate hash and a non-empty actor, and
+  appends `approved -> converted` with the hash, dataset id and actor. A bad
+  hash is `invalid_proposal`; a second call is `already_converted`; a call
+  before approval is `not_approved`.
 - Nothing auto-approves. `proposals_for_queue(store, limit)` returns approved
   proposals oldest first and never changes a status.
 
@@ -338,7 +369,7 @@ with KnowledgeIndex("runs/knowledge.sqlite3") as index, ProposalStore(
     draft = propose_from_hypothesis(
         hypothesis, symbol="XAUUSD", timeframe="M15", index=index
     )
-    proposals.create(draft)                       # status="proposed"
+    proposals.create(draft, index=index)          # status="proposed"
     proposals.approve(draft.proposal_id, "scope and data are clear", "owner")
     ready = proposals_for_queue(proposals, 10)    # approved only
 ```
@@ -387,10 +418,13 @@ failure records, hypothesis round trips with citations, status transitions and
 experiment links.
 
 `backend/tests/test_hypothesis_routing.py` covers proposal creation from an
-extracted hypothesis, missing/unresolvable sources, refusal of supported and
-rejected hypotheses, unknown symbol/timeframe/kind, approve/reject audit,
-one-time candidate linking, queue filtering, deterministic ids, reopen
-persistence and the absence of strategy/order/network imports.
+extracted hypothesis, missing/unresolvable sources, persistence-boundary
+provenance checks (unknown hypothesis, unindexed document, missing section,
+fabricated quote, normalised quote match), refusal of supported and rejected
+hypotheses, unknown symbol/timeframe/kind, approve/reject audit including
+approve→reject history, one-time candidate linking with a required hash and
+actor, queue filtering, deterministic order-independent ids, `kind_source`
+recording, reopen persistence and the absence of strategy/order/network imports.
 
 Run:
 
@@ -423,7 +457,12 @@ uv run mypy src
 - The queue function only reads approved rows. Wiring it into the orchestrator,
   building a dataset or compiling a DSL candidate from the skeleton is outside
   this slice.
-- Proposal ids are deterministic, so a rejected proposal cannot be re-proposed
-  under the same hypothesis and scope; a re-test requires a new hypothesis.
+- Proposal ids are deterministic, so a rejected payload cannot be re-proposed
+  under the same hypothesis and scope: `create()` raises `already_rejected`. A
+  re-test requires a new hypothesis and therefore a new id.
+- The decision log is append-only and unbounded; there is no pruning or
+  archival policy yet. It records governance moves, not experiment evidence.
+- Quote verification is a normalised substring test. It catches fabricated or
+  paraphrased citations but cannot detect a real quote used out of context.
 - Keyword-based `required_groups` is a planning hint and can over- or
   under-select feature groups. It never changes an experiment's actual data.
