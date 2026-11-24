@@ -17,14 +17,16 @@ import argparse
 import copy
 import json
 import math
+import signal
 import socket
 import sys
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Final, NoReturn
+from typing import TYPE_CHECKING, Any, Final, NoReturn
 
 import numpy as np
 import polars as pl
@@ -58,6 +60,9 @@ from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
 from scalping.registry.gate import GateCriteria
 from scalping.serialize import metrics_payload
+
+if TYPE_CHECKING:  # pragma: no cover - import for annotations only
+    from scalping.orchestrator.daemon import OrchestratorDaemon
 
 __all__ = ["main"]
 
@@ -900,6 +905,89 @@ def _cmd_serve(args: argparse.Namespace) -> None:
         listener.close()
 
 
+# --- orchestrator daemon ----------------------------------------------------
+def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
+    """Run one tick (``--once``) or a supervised loop (``--forever``)."""
+    from scalping.orchestrator.core import Orchestrator
+    from scalping.orchestrator.daemon import DaemonConfig, OrchestratorDaemon
+    from scalping.orchestrator.handlers import (
+        HEAVY_HANDLER_KINDS,
+        KIND_DATASET_BUILD,
+        KIND_DISCOVERY_RUN,
+        KIND_PAPER_ADVANCE,
+        KIND_PAPER_ANALYSE,
+        HandlerContext,
+        register_default_handlers,
+    )
+    from scalping.orchestrator.store import JobStore
+
+    research_kinds = tuple(
+        sorted(
+            {
+                KIND_DATASET_BUILD,
+                KIND_DISCOVERY_RUN,
+                KIND_PAPER_ADVANCE,
+                KIND_PAPER_ANALYSE,
+            }
+        )
+    )
+    config = DaemonConfig(
+        poll_seconds=args.poll_seconds,
+        guard_profile=args.profile,
+        scan_triggers=not args.no_scan,
+        max_jobs_per_tick=args.max_jobs_per_tick,
+        stop_grace_seconds=args.stop_grace_seconds,
+        heavy_kinds=tuple(sorted(HEAVY_HANDLER_KINDS)),
+        research_kinds=research_kinds,
+    )
+    store = JobStore(Path(args.db))
+    try:
+        registry = Orchestrator(store)
+        register_default_handlers(
+            registry,
+            HandlerContext(
+                data_root=Path(args.root),
+                runs_root=Path(args.runs_root),
+                archive_root=Path(args.archive_root),
+            ),
+        )
+        daemon = OrchestratorDaemon(store, registry, config)
+        if args.once:
+            result = daemon.tick()
+            _print_json({"status": daemon.status().to_dict(), "tick": result.to_dict()})
+            return
+        _run_daemon_forever(daemon)
+    finally:
+        store.close()
+
+
+def _run_daemon_forever(daemon: OrchestratorDaemon) -> None:
+    """Start the daemon and block until SIGINT/SIGTERM; always stop it."""
+    stop = threading.Event()
+
+    def _request_stop(signum: int, frame: object) -> None:
+        stop.set()
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    try:
+        for sig in previous:
+            signal.signal(sig, _request_stop)
+        daemon.start()
+        _print_json({"status": "started", "daemon": daemon.status().to_dict()})
+        try:
+            while not stop.wait(1.0):
+                pass
+        except KeyboardInterrupt:  # pragma: no cover - signal handler normally wins
+            pass
+    finally:
+        try:
+            daemon.stop()
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+    _print_json({"status": "stopped", "daemon": daemon.status().to_dict()})
+
+
 # --- parser --------------------------------------------------------------------
 def _build_parser() -> argparse.ArgumentParser:
     parser = _Parser(prog="scalping.cli", description="Data ingestion, backtests and the API.")
@@ -1230,6 +1318,42 @@ def _build_parser() -> argparse.ArgumentParser:
         help="tick-flow side store; enables the promoted flow-momentum card",
     )
     serve.set_defaults(handler=_cmd_serve)
+
+    orchestrator = commands.add_parser(
+        "orchestrator", help="run the persistent autonomous job queue"
+    )
+    orchestrator_commands = orchestrator.add_subparsers(dest="orchestrator_command", required=True)
+    run = orchestrator_commands.add_parser(
+        "run", help="scan triggers and drain due jobs once or until a signal"
+    )
+    mode = run.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--once", action="store_true", help="run one tick, print it and exit")
+    mode.add_argument(
+        "--forever", action="store_true", help="loop until SIGINT/SIGTERM, then stop cleanly"
+    )
+    run.add_argument(
+        "--profile",
+        choices=("m2_8gb", "exploratory", "none"),
+        default="m2_8gb",
+        help="measured resource guard profile; 'none' is tests/dev only",
+    )
+    run.add_argument("--poll-seconds", type=float, default=5.0)
+    run.add_argument("--max-jobs-per-tick", type=int, default=10)
+    run.add_argument("--stop-grace-seconds", type=float, default=5.0)
+    run.add_argument(
+        "--no-scan", action="store_true", help="do not call trigger sources on this run"
+    )
+    run.add_argument(
+        "--db", default="runs/orchestrator.sqlite3", help="SQLite job queue (created when missing)"
+    )
+    run.add_argument("--root", default=str(DEFAULT_ROOT), help="Parquet bar store")
+    run.add_argument("--runs-root", default="runs", help="dataset and discovery run products")
+    run.add_argument(
+        "--archive-root",
+        default=str(DEFAULT_ROOT),
+        help="durable evidence root (paper ledger and knowledge index)",
+    )
+    run.set_defaults(handler=_cmd_orchestrator_run)
 
     return parser
 
