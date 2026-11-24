@@ -177,7 +177,7 @@ policy:
 | `min_bootstrap_confidence` | `0.95` | the aggregate interval must be at least 95% |
 | `min_bootstrap_samples` | `500` | fewer draws are not a usable interval |
 | `max_stress_degradation` | `2.0` | a stressed fold keeps at least half the base expectancy, stays profitable and keeps PF > 1 |
-| `require_locked_oos` | **`True`** | **nothing promotes until the holdout slice attaches a valid `LockedOOSEvidence` section** |
+| `require_locked_oos` | **`True`** | **nothing promotes until `scalping.discovery.holdout.attach_holdout` attaches a valid frozen `LockedOOSEvidence` section** |
 | `max_selection_fold_share` | `0.4` | at most 40% of folds may overlap the validation/selection window; `0` disables the check |
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
@@ -341,12 +341,22 @@ stress profitability/degradation) to the locked result. A subclass overriding
 `to_dict` cannot inject one because the policy requires
 `type(evidence) is CandidateEvidence`.
 
+The section's own `checksum` is the canonical `locked_oos_checksum(section)`
+(hash of the section without `checksum`/`created_at`), while
+`evidence_checksum` is the pre-attachment evidence bundle's checksum.
+`attach_holdout` refuses a section that violates the frozen contract: no trades,
+`test_rows != test_end_row - test_start_row`, a test range that does not equal
+`splits.test_start_row/end_row`, a range that starts before
+`splits.validation_end_row`, or timestamps that are not ordered after the last
+validation fold.
+
 ### What acceptance means
 
 Acceptance is **policy compliance**, not proof of an edge. The bundle contains
 historical simulation evidence; a policy pass says the measured sample, stability,
 cost stress, interval, complexity and search exposure cleared the checks this
-project chose. None of that predicts future profitability. The identity includes
+project chose. None of that predicts future profitability, and none of it
+replaces the separate one-shot locked final OOS evaluation. The identity includes
 the dataset checksum and the execution-settings digest, so a bundle built with
 different costs cannot be promoted as if it were the same experiment, and the
 selection-fold cap limits — but does not remove — the fact that the search saw the
@@ -355,7 +365,12 @@ validation slice.
 The locked final OOS section is now mandatory for the production policy. Until
 the holdout slice attaches it, every `PROMOTION_V1` decision rejects with
 `missing_locked_oos`, so **no evidence promotion can happen**. That is the
-intended fail-closed state; do not relax it to make a test pass.
+intended fail-closed state; do not relax it to make a test pass. To spend the
+holdout without weakening production, the eligibility decision comes from a
+named non-production policy with `require_locked_oos=False`; `unlock` records
+`PROMOTION_V1` as the target policy (it must be in `PRODUCTION_POLICIES`), and
+after `attach_holdout` the final promotion re-evaluates the bundle with
+`PROMOTION_V1` (`require_locked_oos=True`).
 
 Two structural limits are worth stating. The bundle records its fold/CI
 `EvidencePolicy` but not the promotion policy id/version, so the decision,
@@ -429,7 +444,9 @@ anything by themselves.
 - Champion-vs-candidate metric comparison inside the *model* gate; the strategy
   counterpart is the discovery promotion policy (previous section).
 - A locked final OOS section produced inside this module. The holdout slice
-  attaches it; until then `require_locked_oos=True` rejects every promotion.
+  (`scalping.discovery.holdout`) attaches it; until then `require_locked_oos=True`
+  rejects every promotion. The holdout protocol is not yet wired into
+  orchestration and has not been spent on real data.
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels
