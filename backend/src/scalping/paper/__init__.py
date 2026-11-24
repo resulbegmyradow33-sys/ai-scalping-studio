@@ -17,6 +17,14 @@ scope.
 from __future__ import annotations
 
 from scalping.paper.autonomous import AutonomousPaperRunner, AutonomousSummary
+from scalping.paper.continuous import (
+    AdvanceSummary,
+    ContinuousPaperRunner,
+    OutcomeBatch,
+    OutcomeRow,
+    matured_outcomes,
+    outcome_fingerprint,
+)
 from scalping.paper.ledger import (
     SCHEMA_VERSION,
     DuplicateError,
@@ -45,14 +53,18 @@ __all__ = [
     "ACTION_NAMES",
     "SCHEMA_VERSION",
     "AdapterDisabled",
+    "AdvanceSummary",
     "AutonomousPaperRunner",
     "AutonomousSummary",
+    "ContinuousPaperRunner",
     "DuplicateError",
     "EquityPoint",
     "FillRecord",
     "LedgerError",
     "Mt5DemoAdapter",
     "OrderRecord",
+    "OutcomeBatch",
+    "OutcomeRow",
     "PaperLedger",
     "PaperRunResult",
     "PaperSession",
@@ -62,4 +74,6 @@ __all__ = [
     "SessionRecord",
     "SignalRecord",
     "TradeRecord",
+    "matured_outcomes",
+    "outcome_fingerprint",
 ]
