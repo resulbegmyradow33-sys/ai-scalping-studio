@@ -28,6 +28,17 @@ The job's ``dedupe_key`` is ``paper.outcomes:{fingerprint}`` as a second layer:
 a crash between enqueue and ``seen`` re-emits the same trigger on the next scan
 and the store returns the existing job instead of a duplicate.
 
+Coverage and backlog
+--------------------
+Sessions are ordered by last trade activity (``MAX(trades.exit_ts)``, falling
+back to the session start), not by session start, so a long-running session that
+keeps closing trades is never starved by newer, quiet sessions. The scan also
+carries a rotation offset, so a ledger larger than ``max_sessions`` is covered
+over successive scans instead of always reading the same newest window. Sessions
+deferred by the cap or by the per-scan proposal limit are recorded with
+:data:`REASON_TRUNCATED`; they are delayed, not forgotten. ``since`` bounds the
+window for a large historical ledger, and ``max_proposals`` caps a first scan.
+
 What this slice does not do
 ---------------------------
 No scheduler, no market clock, no background thread. ``scan`` is a call. The
@@ -41,38 +52,52 @@ import json
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Protocol
 
 from scalping.orchestrator.core import Handler, HandlerResult, JobContext
 from scalping.orchestrator.store import Job, JobStore
 from scalping.orchestrator.triggers import Trigger
-from scalping.paper.continuous import OutcomeError, matured_outcomes, outcome_fingerprint
+from scalping.paper.continuous import (
+    OutcomeBatch,
+    OutcomeError,
+    matured_outcomes,
+    outcome_fingerprint,
+)
 from scalping.paper.ledger import LedgerError, PaperLedger, SessionRecord
 
 __all__ = [
     "EVENT_NOT_QUEUED",
     "EVENT_RECEIVED",
+    "EVENT_TRUNCATED",
     "KIND_PAPER_OUTCOMES",
+    "MAX_SCAN_PROPOSALS_LIMIT",
+    "MAX_SCAN_SESSIONS_LIMIT",
     "PAPER_OUTCOME_FIELDS",
+    "PAPER_OUTCOME_REQUIRED_FIELDS",
     "REASON_EMPTY_BATCH",
     "REASON_LEDGER_UNAVAILABLE",
     "REASON_NO_DATASET_ID",
     "REASON_NO_LEDGER",
     "REASON_NO_STRATEGY_HASH",
     "REASON_OUTCOME_ERROR",
+    "REASON_TRUNCATED",
     "PaperOutcomeTriggerSource",
     "make_paper_outcome_handler",
     "register_paper_outcome_handler",
 ]
 
-#: The one kind this module produces and handles.
+#: The one kind this module produces and handles. A caller cannot swap it: the
+#: payload contract, the cursor key and the registered handler all assume this
+#: name, so an arbitrary kind would enqueue jobs nothing can run.
 KIND_PAPER_OUTCOMES: Final[str] = "paper.outcomes"
 
 #: Events written by the source and the handler; documented in
 #: ``docs/orchestrator.md`` so the audit page can filter on them.
 EVENT_NOT_QUEUED: Final[str] = "paper.outcome_not_queued"
 EVENT_RECEIVED: Final[str] = "paper.outcome_received"
+EVENT_TRUNCATED: Final[str] = "paper.outcome_truncated"
 
 #: Why a session produced no trigger. A reason is recorded once per session and
 #: rewritten only when it changes, so a periodic scan does not flood the log.
@@ -82,10 +107,14 @@ REASON_NO_DATASET_ID: Final[str] = "no_dataset_id"
 REASON_OUTCOME_ERROR: Final[str] = "outcome_error"
 REASON_NO_LEDGER: Final[str] = "no_ledger"
 REASON_LEDGER_UNAVAILABLE: Final[str] = "ledger_unavailable"
+#: The session was not read this scan because ``max_sessions`` or
+#: ``max_proposals`` was reached. The rotation cursor resumes at it next scan.
+REASON_TRUNCATED: Final[str] = "truncated"
 
-#: Every payload field the handler accepts. Keep this in sync with the trigger
-#: payload and with ``docs/orchestrator.md``; unknown fields are rejected.
-PAPER_OUTCOME_FIELDS: Final[frozenset[str]] = frozenset(
+#: Fields every payload must carry; the producer writes them, the handler
+#: requires them. Kept separate from the optional provenance pair so an old
+#: queued job still validates after an upgrade.
+PAPER_OUTCOME_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "session_id",
         "fingerprint",
@@ -97,11 +126,32 @@ PAPER_OUTCOME_FIELDS: Final[frozenset[str]] = frozenset(
     }
 )
 
+#: Every payload field the handler accepts. Keep this in sync with the trigger
+#: payload and with ``docs/orchestrator.md``; unknown fields are rejected.
+PAPER_OUTCOME_FIELDS: Final[frozenset[str]] = PAPER_OUTCOME_REQUIRED_FIELDS | {
+    "source",
+    "synthetic",
+}
+
 #: Upper bound on sessions read per scan. A larger ledger is truncated, not
-#: read for minutes on the target machine.
+#: read for minutes on the target machine. The rotation cursor visits the rest.
 MAX_SCAN_SESSIONS: Final[int] = 1_000
+#: Refuse a configuration above this: a scan is a synchronous call and a caller
+#: asking for more than this is misconfiguring the trigger, not optimizing it.
+MAX_SCAN_SESSIONS_LIMIT: Final[int] = 10_000
+#: Upper bound on triggers emitted per scan, so a first scan over a large
+#: historical ledger cannot propose an unbounded research backlog at once.
+MAX_SCAN_PROPOSALS: Final[int] = 100
+MAX_SCAN_PROPOSALS_LIMIT: Final[int] = 1_000
+#: How many deferred session ids get their own ``truncated`` audit line; the
+#: summary event always records the exact totals.
+TRUNCATION_NOTE_LIMIT: Final[int] = 25
+#: One retry by default: a transient handler failure must not silently consume
+#: the only trigger for a matured batch.
+DEFAULT_MAX_RETRIES: Final[int] = 1
 _PAGE_SIZE: Final[int] = 200
-_CURSOR_VERSION: Final[int] = 1
+_CURSOR_VERSION: Final[int] = 3
+
 
 #: A policy hook, not an action. ``True`` means "propose discovery", not "run".
 PaperOutcomePolicy = Callable[[Mapping[str, Any]], bool]
@@ -120,6 +170,16 @@ class _Cursor:
 
     fingerprints: dict[str, str] = field(default_factory=dict)
     not_queued: dict[str, str] = field(default_factory=dict)
+    #: Where the next scan resumes in the activity-ordered session list; keeps a
+    #: ledger larger than ``max_sessions`` fully covered across scans.
+    offset: int = 0
+    #: Fingerprints emitted but not acknowledged yet (fingerprint -> session id).
+    #: Persisted and retried at the start of the next scan, so a partial
+    #: acknowledgement does not wait for the rotation to wrap.
+    pending_ack: dict[str, str] = field(default_factory=dict)
+    #: Fingerprints emitted by the scan that has not been acknowledged yet. Not
+    #: persisted beyond ``pending_ack``: ``seen`` decides which survive.
+    new_fingerprints: set[str] = field(default_factory=set)
 
 
 class PaperOutcomeTriggerSource:
@@ -127,8 +187,15 @@ class PaperOutcomeTriggerSource:
 
     ``ledger_path`` is read with a read-only connection, so a scan never
     migrates the schema, never creates the file and never blocks the session
-    writer beyond a normal WAL read. Sessions are read newest first, capped at
-    ``max_sessions``.
+    writer beyond a normal WAL read. Sessions are ordered by last trade activity
+    (``MAX(trades.exit_ts)``, or the start when no trade has closed) and read up
+    to ``max_sessions`` per scan, starting at a persisted rotation offset so a
+    larger ledger is covered over successive scans.
+
+    ``since`` optionally bounds the window by session start, which is the way to
+    keep a first scan over a long ledger cheap; ``max_proposals`` caps how many
+    triggers one scan may emit. Deferred sessions are recorded with
+    :data:`REASON_TRUNCATED` and one ``paper.outcome_truncated`` summary event.
 
     The cursor document is stored in the job store under
     ``trigger.paper.outcomes:<absolute ledger path>``. It survives a restart of
@@ -148,22 +215,40 @@ class PaperOutcomeTriggerSource:
         store: JobStore,
         kind: str = KIND_PAPER_OUTCOMES,
         priority: int = 0,
-        max_retries: int = 0,
+        max_retries: int = DEFAULT_MAX_RETRIES,
         max_sessions: int = MAX_SCAN_SESSIONS,
+        max_proposals: int = MAX_SCAN_PROPOSALS,
+        since: str | datetime | None = None,
         name: str | None = None,
     ) -> None:
         self.ledger_path = Path(ledger_path)
-        if not str(kind).strip():
-            raise ValueError("kind must not be empty")
+        if str(kind) != KIND_PAPER_OUTCOMES:
+            raise ValueError(
+                f"kind must be {KIND_PAPER_OUTCOMES!r}; {kind!r} has no registered handler"
+            )
         if isinstance(max_sessions, bool) or not isinstance(max_sessions, int):
             raise TypeError("max_sessions must be an int")
         if max_sessions < 1:
             raise ValueError("max_sessions must be >= 1")
-        self.kind = str(kind)
+        if max_sessions > MAX_SCAN_SESSIONS_LIMIT:
+            raise ValueError(f"max_sessions must be <= {MAX_SCAN_SESSIONS_LIMIT}")
+        if isinstance(max_proposals, bool) or not isinstance(max_proposals, int):
+            raise TypeError("max_proposals must be an int")
+        if max_proposals < 1:
+            raise ValueError("max_proposals must be >= 1")
+        if max_proposals > MAX_SCAN_PROPOSALS_LIMIT:
+            raise ValueError(f"max_proposals must be <= {MAX_SCAN_PROPOSALS_LIMIT}")
+        if isinstance(max_retries, bool) or not isinstance(max_retries, int):
+            raise TypeError("max_retries must be an int")
+        if max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+        self.kind = KIND_PAPER_OUTCOMES
         self.store = store
         self.priority = int(priority)
-        self.max_retries = int(max_retries)
+        self.max_retries = max_retries
         self.max_sessions = max_sessions
+        self.max_proposals = max_proposals
+        self.since = _coerce_since(since)
         self.name = name or f"paper.outcomes:{self.ledger_path}"
         self.cursor_key = f"trigger.paper.outcomes:{self.ledger_path.resolve()}"
         self._pending: _Cursor | None = None
@@ -173,6 +258,7 @@ class PaperOutcomeTriggerSource:
     def scan(self) -> list[Trigger]:
         """Read the ledger and return triggers not yet recorded in the cursor."""
         cursor = self._load_cursor()
+        cursor.new_fingerprints = set()
         # The cursor is persisted only by ``seen``; a crash or an exception
         # before acknowledgement costs a re-read, never a lost job.
         self._pending = cursor
@@ -191,25 +277,67 @@ class PaperOutcomeTriggerSource:
             if not ledger.has_schema():
                 self._note(cursor, "", REASON_LEDGER_UNAVAILABLE, "ledger has no sessions table")
                 return triggers
-            for record in self._sessions(ledger):
-                self._process(ledger, record, cursor, triggers)
+            total = self._session_count(ledger)
+            if total < 1:
+                return triggers
+            # Unacknowledged triggers go first: a partial acknowledgement must
+            # not wait for the rotation to wrap. Bounded by max_proposals, and
+            # it does not consume the rotation budget.
+            for fingerprint in list(cursor.pending_ack):
+                if len(triggers) >= self.max_proposals:
+                    break
+                session_id = cursor.pending_ack.pop(fingerprint)
+                self._process(ledger, session_id, cursor, triggers)
+            start = cursor.offset % total
+            visited = 0
+            for session_id in self._sessions(ledger, total, start, self.max_sessions):
+                if len(triggers) >= self.max_proposals:
+                    break
+                self._process(ledger, session_id, cursor, triggers)
+                visited += 1
+            cursor.offset = (start + visited) % total
+            self._record_deferred(cursor, ledger, total, visited)
         finally:
             ledger.close()
         return triggers
 
     def seen(self, triggers: Sequence[Trigger]) -> None:
-        """Persist the fingerprint and refusal sets computed by the last scan.
+        """Persist the fingerprints the caller acknowledged, not the whole scan.
 
-        The triggers are not required to save the cursor; the argument keeps the
-        protocol uniform and lets a future source acknowledge per trigger.
+        ``scan_once`` passes every trigger it enqueued. A caller that
+        acknowledges only a subset leaves the rest in the cursor's
+        ``pending_ack`` set, and the next scan re-emits them before it resumes
+        the rotation. They do not wait for the offset to wrap. The job
+        ``dedupe_key`` still prevents a second job for a trigger that was in
+        fact enqueued. Refusal reasons carry no work and are persisted whole.
         """
         pending = self._pending
         if pending is None:
             return
+        acknowledged = set()
+        for trigger in triggers:
+            fingerprint = _fingerprint_of(trigger)
+            if isinstance(fingerprint, str):
+                acknowledged.add(fingerprint)
+        # A late acknowledgement (a trigger kept from an earlier scan) still
+        # promotes its fingerprint from pending to durable.
+        for fingerprint in acknowledged:
+            session_id = pending.pending_ack.pop(fingerprint, None)
+            if session_id is not None:
+                pending.fingerprints[fingerprint] = session_id
+        for fingerprint in list(pending.new_fingerprints):
+            if fingerprint in acknowledged:
+                pending.pending_ack.pop(fingerprint, None)
+                continue
+            session_id = pending.fingerprints.pop(fingerprint, None)
+            if session_id is not None:
+                pending.pending_ack[fingerprint] = session_id
         document = {
             "version": _CURSOR_VERSION,
             "fingerprints": dict(sorted(pending.fingerprints.items())),
             "not_queued": dict(sorted(pending.not_queued.items())),
+            "pending_ack": dict(sorted(pending.pending_ack.items())),
+            "offset": pending.offset,
         }
         self.store.set_state(
             self.cursor_key,
@@ -222,14 +350,17 @@ class PaperOutcomeTriggerSource:
     def _process(
         self,
         ledger: PaperLedger,
-        record: SessionRecord,
+        session_id: str,
         cursor: _Cursor,
         triggers: list[Trigger],
     ) -> None:
-        session_id = record.session_id
         try:
+            record = ledger.session(session_id)
+            if record is None:
+                raise OutcomeError(f"session {session_id!r} disappeared during the scan")
             batch = matured_outcomes(ledger, session_id)
-        except OutcomeError as exc:
+            source, synthetic = _provenance(record)
+        except (OutcomeError, LedgerError, ValueError) as exc:
             self._note(cursor, session_id, REASON_OUTCOME_ERROR, str(exc))
             return
 
@@ -255,8 +386,13 @@ class PaperOutcomeTriggerSource:
             )
             return
 
-        fingerprint = outcome_fingerprint(batch)
+        fingerprint = self._fingerprint(batch, session_id, cursor)
+        if fingerprint is None:
+            return
         if fingerprint in cursor.fingerprints:
+            # Already proposed: any `truncated` note from an earlier scan is
+            # stale, not a refusal, and must not survive as one.
+            cursor.not_queued.pop(session_id, None)
             return
 
         payload = {
@@ -267,6 +403,8 @@ class PaperOutcomeTriggerSource:
             "r_total": math.fsum(row.r_multiple for row in batch.rows),
             "strategy_hash": strategy_hash,
             "dataset_id": dataset_id,
+            "source": source,
+            "synthetic": synthetic,
         }
         triggers.append(
             Trigger(
@@ -278,23 +416,116 @@ class PaperOutcomeTriggerSource:
             )
         )
         cursor.fingerprints[fingerprint] = session_id
+        cursor.new_fingerprints.add(fingerprint)
         cursor.not_queued.pop(session_id, None)
 
-    def _sessions(self, ledger: PaperLedger) -> Iterator[SessionRecord]:
-        offset = 0
+    def _fingerprint(
+        self,
+        batch: OutcomeBatch,
+        session_id: str,
+        cursor: _Cursor,
+    ) -> str | None:
+        """Hash the batch; a non-finite value is a refused session, not a crash."""
+        try:
+            return outcome_fingerprint(batch)
+        except (TypeError, ValueError) as exc:
+            self._note(cursor, session_id, REASON_OUTCOME_ERROR, str(exc))
+            return None
+
+    def _session_count(self, ledger: PaperLedger) -> int:
+        sql = "SELECT COUNT(*) FROM sessions"
+        params: list[object] = []
+        if self.since is not None:
+            sql += " WHERE started_at >= ?"
+            params.append(_since_stamp(self.since))
+        row = ledger.connection.execute(sql, params).fetchone()
+        return 0 if row is None else int(row[0])
+
+    def _page_ids(
+        self,
+        ledger: PaperLedger,
+        limit: int,
+        offset: int,
+    ) -> list[str]:
+        """One page of session ids ordered by latest trade activity."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if self.since is not None:
+            clauses.append("s.started_at >= ?")
+            params.append(_since_stamp(self.since))
+        where = "" if not clauses else " WHERE " + " AND ".join(clauses)
+        params.extend([limit, offset])
+        rows = ledger.connection.execute(
+            """
+            SELECT s.session_id AS session_id
+            FROM sessions AS s
+            LEFT JOIN trades AS t ON t.session_id = s.session_id
+            """
+            + where
+            + """
+            GROUP BY s.session_id
+            ORDER BY COALESCE(MAX(t.exit_ts), s.started_at) DESC, s.session_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            params,
+        ).fetchall()
+        return [str(row["session_id"]) for row in rows]
+
+    def _sessions(
+        self,
+        ledger: PaperLedger,
+        total: int,
+        start: int,
+        limit: int,
+    ) -> Iterator[str]:
+        """Session ids in activity order, wrapping from the rotation offset."""
+        wanted = min(limit, total)
         read = 0
-        while read < self.max_sessions:
-            page, total = ledger.session_page(limit=_PAGE_SIZE, offset=offset)
+        offset = start % total
+        while read < wanted:
+            take = min(_PAGE_SIZE, wanted - read, total - offset)
+            page = self._page_ids(ledger, take, offset)
             if not page:
                 return
-            for record in page:
-                if read >= self.max_sessions:
-                    return
-                read += 1
-                yield record
-            offset += len(page)
-            if offset >= total:
-                return
+            yield from page
+            read += len(page)
+            offset = (offset + len(page)) % total
+
+    def _record_deferred(
+        self,
+        cursor: _Cursor,
+        ledger: PaperLedger,
+        total: int,
+        visited: int,
+    ) -> None:
+        """Audit the sessions this scan did not reach; they are never dropped."""
+        deferred = total - visited
+        if deferred <= 0:
+            return
+        detail = (
+            f"{deferred} session(s) deferred this scan; the rotation cursor resumes"
+            f" at offset {cursor.offset}"
+        )
+        proposed = set(cursor.fingerprints.values())
+        for session_id in self._page_ids(
+            ledger, min(deferred, TRUNCATION_NOTE_LIMIT), cursor.offset
+        ):
+            if session_id in proposed:
+                # Its trigger already exists; being outside this scan's window
+                # is not an actionable refusal and must not be logged as one.
+                continue
+            self._note(cursor, session_id, REASON_TRUNCATED, detail)
+        self.store.append_event(
+            EVENT_TRUNCATED,
+            detail=_json(
+                {
+                    "deferred": deferred,
+                    "scanned": visited,
+                    "total": total,
+                    "resume_offset": cursor.offset,
+                }
+            ),
+        )
 
     def _note(self, cursor: _Cursor, session_id: str, reason: str, detail: str) -> None:
         """Record a refusal once per session until its reason changes."""
@@ -324,9 +555,13 @@ class PaperOutcomeTriggerSource:
             return _Cursor()
         fingerprints = parsed.get("fingerprints")
         not_queued = parsed.get("not_queued")
+        pending_ack = parsed.get("pending_ack")
+        offset = parsed.get("offset")
         return _Cursor(
             fingerprints=_text_map(fingerprints),
             not_queued=_text_map(not_queued),
+            offset=0 if isinstance(offset, bool) or not isinstance(offset, int) else max(offset, 0),
+            pending_ack=_text_map(pending_ack),
         )
 
 
@@ -366,6 +601,8 @@ def make_paper_outcome_handler(
                     "session_id": request["session_id"],
                     "fingerprint": request["fingerprint"],
                     "trades": request["trades"],
+                    "source": request["source"],
+                    "synthetic": request["synthetic"],
                 }
             ),
         )
@@ -393,6 +630,8 @@ def make_paper_outcome_handler(
                 "r_total": request["r_total"],
                 "strategy_hash": request["strategy_hash"],
                 "dataset_id": request["dataset_id"],
+                "source": request["source"],
+                "synthetic": request["synthetic"],
             }
         )
 
@@ -422,7 +661,7 @@ def _validated(payload: Mapping[str, Any]) -> dict[str, Any]:
     unknown = set(payload) - PAPER_OUTCOME_FIELDS
     if unknown:
         raise _PayloadError(f"unknown payload fields: {sorted(unknown)}")
-    missing = PAPER_OUTCOME_FIELDS - set(payload)
+    missing = PAPER_OUTCOME_REQUIRED_FIELDS - set(payload)
     if missing:
         raise _PayloadError(f"missing payload fields: {sorted(missing)}")
 
@@ -434,6 +673,9 @@ def _validated(payload: Mapping[str, Any]) -> dict[str, Any]:
         "r_total": _number(payload["r_total"], "r_total"),
         "strategy_hash": _text(payload["strategy_hash"], "strategy_hash"),
         "dataset_id": _text(payload["dataset_id"], "dataset_id"),
+        # Absent on a job queued before provenance was added: unknown, not real.
+        "source": _optional_text(payload.get("source"), "source"),
+        "synthetic": _optional_bool(payload.get("synthetic"), "synthetic"),
     }
 
 
@@ -451,6 +693,22 @@ def _count(value: object, name: str) -> int:
     return value
 
 
+def _optional_text(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise _PayloadError(f"{name} must be a non-empty string or null")
+    return value
+
+
+def _optional_bool(value: object, name: str) -> bool | None:
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise _PayloadError(f"{name} must be a bool or null")
+    return value
+
+
 def _number(value: object, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise _PayloadError(f"{name} must be a number")
@@ -458,6 +716,79 @@ def _number(value: object, name: str) -> float:
     if not math.isfinite(number):
         raise _PayloadError(f"{name} must be finite")
     return number
+
+
+def _coerce_since(value: str | datetime | None) -> datetime | None:
+    """Normalise the optional window bound; ``None`` means the whole ledger."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        moment = value
+    elif isinstance(value, str):
+        try:
+            moment = datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"since is not an ISO-8601 timestamp: {value!r}") from exc
+    else:
+        raise TypeError(
+            f"since must be a datetime, an ISO-8601 string or None, got {type(value).__name__}"
+        )
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ValueError("since must be timezone-aware")
+    return moment.astimezone(UTC)
+
+
+def _since_stamp(moment: datetime) -> str:
+    return moment.astimezone(UTC).isoformat()
+
+
+def _provenance(record: SessionRecord) -> tuple[str | None, bool | None]:
+    """Read the stored data source and synthetic flag, if the session has any.
+
+    ``None`` means unknown, never "real data": a session that predates the
+    provenance fields must not be presented as non-synthetic evidence. The
+    values are read from explicit ``source``/``synthetic`` keys only; the
+    runner's ``origin`` field describes the process, not the data.
+    """
+    config = record.config
+    source = _nested_value(
+        config,
+        ("source", ("provenance", "source"), ("data", "source"), ("extra", "source")),
+    )
+    synthetic = _nested_value(
+        config,
+        (
+            "synthetic",
+            ("provenance", "synthetic"),
+            ("data", "synthetic"),
+            ("extra", "synthetic"),
+        ),
+    )
+    return (
+        source if isinstance(source, str) and source.strip() else None,
+        synthetic if isinstance(synthetic, bool) else None,
+    )
+
+
+def _nested_value(config: Mapping[str, Any], paths: Sequence[str | tuple[str, ...]]) -> object:
+    for path in paths:
+        keys = (path,) if isinstance(path, str) else path
+        current: object = config
+        for key in keys:
+            if not isinstance(current, Mapping) or key not in current:
+                current = None
+                break
+            current = current[key]
+        if current is not None:
+            return current
+    return None
+
+
+def _fingerprint_of(trigger: Trigger) -> object:
+    payload = trigger.payload
+    if not isinstance(payload, Mapping):
+        return None
+    return payload.get("fingerprint")
 
 
 def _text_map(value: object) -> dict[str, str]:

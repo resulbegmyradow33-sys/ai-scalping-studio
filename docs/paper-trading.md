@@ -359,8 +359,11 @@ fields, so identical outcomes hash identically regardless of read order. The
 orchestrator can store the last fingerprint and skip a research trigger when the
 same matured set is analysed again; any newly closed trade changes the hash.
 `PaperOutcomeTriggerSource` in `scalping.orchestrator.paper_triggers` does
-exactly that; its contract, refusal reasons and proposal-only handler are in
-`docs/orchestrator.md`.
+exactly that; its contract, scan order, coverage cursor, refusal reasons, `since`
+window, provenance fields and proposal-only handler are in
+`docs/orchestrator.md`. The trigger payload carries the session's stored
+`source` and `synthetic` when the config records them, and `null` (unknown) when
+it does not — a missing provenance is never presented as real data.
 
 ### Honest limits
 
