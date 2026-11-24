@@ -28,6 +28,7 @@ process, not an operating-system service.
 | `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
 | `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
 | `backend/tests/test_orchestrator_daemon.py` | Tick order, dedupe, controls, guard defer, isolation, start/stop, CLI |
+| `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
 ## What is not in this slice
 
@@ -751,7 +752,7 @@ uv run ruff check src tests scripts
 uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
   tests/test_orchestrator_handlers.py tests/test_orchestrator_resources.py \
-  tests/test_orchestrator_daemon.py -q
+  tests/test_orchestrator_daemon.py tests/test_orchestrator_integration.py -q
 uv run pytest
 ```
 
@@ -805,4 +806,63 @@ between jobs; `:memory:` is rejected by `start()` and stays single-threaded for
 JSON-safe; the CLI `--once` exits 2 on a tick error but 0 on a job failure;
 `--forever` reports a dead worker with exit 1; and `--watch-dir` enqueues a
 document once and dedupes the second pass.
+
+### Integration coverage (Phase 18)
+
+`tests/test_orchestrator_integration.py` runs the real store, loop, handlers,
+trigger sources and daemon together on `tmp_path` roots and one day of seeded
+synthetic M1. It asserts what the per-seam tests cannot: that the seams agree
+with each other.
+
+Proven by that file:
+
+- **Dependency chain.** One `Orchestrator` runs `knowledge.ingest` and then
+  `dataset.build`; the child is not claimable before the parent succeeds, both
+  results are stored (document checksum and index rows, dataset manifest on
+  disk) and the event log names every transition in order.
+- **Failure isolation with a budget.** A `discovery.run` handler that raises
+  spends its one retry, leaves a light `paper.advance` job free to succeed in
+  the same drain, then fails terminally; its dependent `paper.analyse` is
+  `skipped` with the failed dependency named, and no third attempt exists an
+  hour later.
+- **Trigger → proposal.** `PaperOutcomeTriggerSource` + `scan_once` enqueue one
+  `paper.outcomes` job from a matured ledger batch; the cursor dedupes after a
+  store restart, the store dedupe key dedupes after the cursor is lost, and the
+  handler records a proposal with `queued: false` / `executed: false`, creating
+  no discovery or paper job and no archive.
+- **Daemon tick.** One tick recovers a `running` row (once per instance), scans,
+  and drains both the recovered paper job and the scanned outcome job; pause and
+  safe mode refuse claims with their reason in `claim_refused`; a measured guard
+  backed by a fake starved probe defers a job (`defer_count = 1`,
+  `attempts = 0`, `resource_refused` and `deferred` events, 60 s delay).
+- **Restart.** A reopen keeps queued rows, `recover_interrupted` requeues the
+  running row with its spent attempt intact, a deduplicated enqueue returns the
+  succeeded job, and each handler runs exactly once.
+- **Boundary.** No module in the flow imports a holdout or real-money module
+  (static import scan plus a `sys.modules` diff around a live run). During a
+  real, bounded discovery run the only slice built is
+  `[validation.start, validation.end)`, every scored frame lies inside it, the
+  recorded dataset id starts with `validation:` and trips no production
+  holdout token.
+
+Not proven by it:
+
+- **`paper.advance` still uses the slice runner.** The handler calls
+  `AutonomousPaperRunner` (`paper/autonomous.py`), not
+  `ContinuousPaperRunner` (`paper/continuous.py`). The queue path is proven for
+  the slice runner only; continuous cadence, gap and resume semantics are not
+  reachable from `paper.advance` yet.
+- **`tick(now=...)` does not reach crash recovery.** `Orchestrator.start()` has
+  no `now` parameter, so `recover_interrupted` stamps a requeued row with the
+  wall clock. The integration test therefore drives the daemon with the wall
+  clock; a purely simulated clock would leave the recovered job scheduled in the
+  future. Production calls `start()` with `now=None`, so this is a test-seam
+  limitation, not a runtime defect.
+- **A proposal is still not executed.** The paper-outcome handler records
+  `queue_discovery`; nothing turns that proposal into a queued discovery job.
+- **Synthetic inputs only.** One day of seeded M1 proves wiring, not market
+  behaviour, data quality or edge. No real bar, ledger or document is read.
+- **One process.** Nothing here exercises a second daemon, a lease, or two
+  processes over one database; the ownership limit above still stands.
+
 
