@@ -2,6 +2,15 @@
 
 What changed and why. Link the issue or phase.
 
+## Resul authorization and scope
+
+- Resul-assigned task / issue / PR / direct instruction:
+- Exact authorized scope:
+- Acceptance criteria confirmed with Resul:
+- [ ] This work was explicitly assigned by Resul.
+- [ ] No unapproved architecture, product-goal, dependency or scope change was made.
+- [ ] Any scope expansion was approved by Resul before implementation.
+
 ## Master objective alignment
 
 - Master-prompt section(s):
@@ -50,7 +59,7 @@ cd frontend && npm test
 - [ ] No real-money execution path enabled.
 - [ ] No hard-coded strategy menu or owner-authored entry/exit recipe was added to the core learner.
 - [ ] Missing OOS/cost/regime/provenance evidence fails closed; no validation-only champion promotion.
-- [ ] Root AGENTS.md and canonical master prompt were followed.
+- [ ] Root `AGENTS.md` and canonical master prompt were followed.
 - [ ] Claimed results are reproducible from the stated commit and dataset.
 
 ## Risk and rollback
