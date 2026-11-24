@@ -42,6 +42,7 @@ from scalping.discovery.evidence import (
 )
 from scalping.discovery.holdout import (
     HOLDOUT_SCHEMA_VERSION,
+    LEDGER_SCHEMA_VERSION,
     AccessEntry,
     HoldoutConfig,
     HoldoutError,
@@ -92,6 +93,7 @@ __all__ = [
     "DECISIONS",
     "DEFAULT_SCOPE",
     "HOLDOUT_SCHEMA_VERSION",
+    "LEDGER_SCHEMA_VERSION",
     "MANUAL_OVERRIDE_POLICY_ID",
     "PROMOTION_MODES",
     "PROMOTION_V1",

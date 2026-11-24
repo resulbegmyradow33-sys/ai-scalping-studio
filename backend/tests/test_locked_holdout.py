@@ -31,6 +31,7 @@ from scalping.discovery.evidence import (
     verify_evidence,
 )
 from scalping.discovery.holdout import (
+    LEDGER_SCHEMA_VERSION,
     HoldoutConfig,
     HoldoutError,
     HoldoutLedger,
@@ -251,6 +252,7 @@ def test_seal_spend_once_and_reuse_refused(
     spec = holdout_spec(bundle)
 
     with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
+        assert ledger.schema_version == LEDGER_SCHEMA_VERSION
         sealed = ledger.seal(spec, actor="tester", reason="final split registered")
         assert sealed.status == "sealed"
         assert sealed.spec_hash == SPEC_HASH

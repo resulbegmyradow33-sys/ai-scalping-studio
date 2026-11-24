@@ -84,6 +84,7 @@ from scalping.strategy.dsl import DslValidationError, StrategySpec
 
 __all__ = [
     "HOLDOUT_SCHEMA_VERSION",
+    "LEDGER_SCHEMA_VERSION",
     "AccessEntry",
     "HoldoutConfig",
     "HoldoutError",
@@ -101,6 +102,10 @@ __all__ = [
 #: Layout version of :meth:`LockedHoldoutResult.to_dict`; version 2 records the
 #: sealed decision's policy digest alongside the id/version.
 HOLDOUT_SCHEMA_VERSION: Final[int] = 2
+
+#: SQLite layout version of the holdout ledger. The first release already has
+#: every column, so there is one migration and it is not the result layout.
+LEDGER_SCHEMA_VERSION: Final[int] = 1
 
 _WAL_ATTEMPTS: Final[int] = 5
 _WAL_BACKOFF_SECONDS: Final[float] = 0.05
@@ -699,21 +704,21 @@ class HoldoutLedger:
     def init_schema(self) -> int:
         """Create missing tables or apply pending migrations; idempotent."""
         current = self._read_schema_version()
-        if current > HOLDOUT_SCHEMA_VERSION:
+        if current > LEDGER_SCHEMA_VERSION:
             raise HoldoutError(
                 "holdout_schema_too_new",
-                f"ledger schema {current} is newer than supported {HOLDOUT_SCHEMA_VERSION}",
+                f"ledger schema {current} is newer than supported {LEDGER_SCHEMA_VERSION}",
             )
-        if current == HOLDOUT_SCHEMA_VERSION:
+        if current == LEDGER_SCHEMA_VERSION:
             return current
         with self._transaction() as tx:
             tx.execute(_SCHEMA_VERSION_DDL)
             row = tx.execute("SELECT MAX(version) FROM schema_version").fetchone()
             current = 0 if row is None or row[0] is None else int(row[0])
-            if current > HOLDOUT_SCHEMA_VERSION:
+            if current > LEDGER_SCHEMA_VERSION:
                 raise HoldoutError(
                     "holdout_schema_too_new",
-                    f"ledger schema {current} is newer than supported {HOLDOUT_SCHEMA_VERSION}",
+                    f"ledger schema {current} is newer than supported {LEDGER_SCHEMA_VERSION}",
                 )
             for version in sorted(_MIGRATIONS):
                 if version <= current:
