@@ -341,24 +341,20 @@ class Simulator:
     def action_masks(self) -> np.ndarray:
         """Boolean availability of HOLD, BUY, SELL and CLOSE at this bar.
 
-        The mask mirrors the loop's own rejections:
+        The mask mirrors the loop's own rejections and is a pure read: it never
+        steps, marks or mutates the account, and twice in a row returns the same
+        vector.
 
-        * flat: HOLD, BUY and SELL are available; CLOSE would be rejected with
-          ``"no_position"``;
-        * long or short: HOLD and CLOSE are available; a second entry would be
-          rejected with ``"max_positions"``;
-        * flat under an active flow gate whose imbalance does not clear its
-          threshold: BUY and SELL are masked (``"no_flow"``), HOLD remains;
-        * done, or a frame with no usable bars: only HOLD is left, because
-          ``step`` ignores every action once the episode is over.
+        * done, or a frame with no usable bars: only HOLD;
+        * position open: HOLD and CLOSE (a second entry would be rejected);
+        * flat: HOLD plus BUY/SELL only when :meth:`_entry_reason` finds no block
+          — session hours, daily/weekly loss, drawdown, kill switches,
+          consecutive-loss pause, spread limit, flow/signal gate, missing ATR or
+          a lot below the contract minimum;
+        * flat while every entry is blocked: HOLD only.
 
-        This is a pure read of the current state: it neither steps, marks nor
-        mutates the account, and calling it twice returns the same mask. Gates
-        that depend on the account rather than the position — daily loss,
-        session hours, the signal gate, a missing ATR or a lot below the
-        contract minimum — are not reflected, so the mask may allow an action
-        that ``step`` then blocks (``info["blocked"]``). It never hides an
-        action the loop would accept.
+        The mask never hides an action the loop would accept; if it allows BUY
+        or SELL, ``step`` executes that entry.
         """
         mask = np.zeros(N_ACTIONS, dtype=bool)
         mask[_HOLD] = True
@@ -366,10 +362,45 @@ class Simulator:
             return mask
         if self.broker.position is not None:
             mask[_CLOSE] = True
-        elif not self._flow_gate_blocked():
-            mask[_BUY] = True
-            mask[_SELL] = True
+            return mask
+        mask[_BUY] = self._entry_reason(_BUY) is None
+        mask[_SELL] = self._entry_reason(_SELL) is None
         return mask
+
+    def _entry_reason(self, action: int) -> str | None:
+        """The reason an entry is blocked right now, or ``None`` when it may open.
+
+        Shared by :meth:`action_masks` and :meth:`_apply` so the mask and the
+        accounting loop cannot disagree. Read-only: it sizes the order to check
+        the minimum lot but opens nothing.
+        """
+        if action not in (_BUY, _SELL):
+            raise ValueError(f"entry action must be BUY or SELL, got {action!r}")
+        if self._done or self._no_bars:
+            return "no_bars"
+        bar = self._bar(self._i)
+        if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
+            return "session_closed"
+        account = self._account()
+        allowed, reason = self.risk.allow_new_extended(account, bar.ts)
+        if not allowed:
+            return reason or "risk_blocked"
+        if self.broker.position is not None:  # only reachable with max_positions > 1
+            return "position_open"
+        gate_reason = self._gate_reason(action)
+        if gate_reason is not None:
+            return gate_reason
+        atr = self._atr(self._i)
+        if atr <= 0:
+            return "no_atr"
+        side = Side.LONG if action == _BUY else Side.SHORT
+        slippage = self.settings.costs.slippage_atr_frac * atr
+        entry = bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
+        sl, _tp = self.risk.sl_tp(entry, side, atr)
+        sizing = self.risk.size(account.equity, entry, sl)
+        if sizing.lot <= 0:
+            return sizing.reason or "lot_too_small"
+        return None
 
     # --- episode -----------------------------------------------------------
 
@@ -618,45 +649,28 @@ class Simulator:
         opened: Position | None = None
 
         if action in (_BUY, _SELL):
-            if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
-                blocked = "session_closed"
-            else:
+            blocked = self._entry_reason(action)
+            if blocked is None:
                 account = self._account()
-                allowed, reason = self.risk.allow_new_extended(account, bar.ts)
-                if not allowed:
-                    blocked = reason
-                elif self.broker.position is not None:  # only reachable with max_positions > 1
-                    blocked = "position_open"
-                elif (gate_reason := self._gate_reason(action)) is not None:
-                    blocked = gate_reason
-                else:
-                    atr = self._atr(self._i)
-                    if atr <= 0:
-                        blocked = "no_atr"
-                    else:
-                        side = Side.LONG if action == _BUY else Side.SHORT
-                        slippage = self.settings.costs.slippage_atr_frac * atr
-                        entry = (
-                            bar.ask_close + slippage
-                            if side is Side.LONG
-                            else bar.bid_close - slippage
-                        )
-                        sl, tp = self.risk.sl_tp(entry, side, atr)
-                        sizing = self.risk.size(account.equity, entry, sl)
-                        if sizing.lot <= 0:
-                            blocked = sizing.reason or "lot_too_small"
-                        else:
-                            self.broker.open(
-                                side,
-                                sizing.lot,
-                                bar.ts,
-                                bar.bid_close,
-                                bar.ask_close,
-                                sl,
-                                tp,
-                                self.strategy,
-                            )
-                            opened = self.broker.position
+                atr = self._atr(self._i)
+                side = Side.LONG if action == _BUY else Side.SHORT
+                slippage = self.settings.costs.slippage_atr_frac * atr
+                entry = (
+                    bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
+                )
+                sl, tp = self.risk.sl_tp(entry, side, atr)
+                sizing = self.risk.size(account.equity, entry, sl)
+                self.broker.open(
+                    side,
+                    sizing.lot,
+                    bar.ts,
+                    bar.bid_close,
+                    bar.ask_close,
+                    sl,
+                    tp,
+                    self.strategy,
+                )
+                opened = self.broker.position
         elif action == _CLOSE:
             if self.broker.position is None:
                 blocked = "no_position"

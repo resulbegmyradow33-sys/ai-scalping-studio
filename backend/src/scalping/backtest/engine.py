@@ -37,6 +37,7 @@ import polars as pl
 from scalping.backtest.metrics import Metrics, compute
 from scalping.config import Settings
 from scalping.data.registry import session_for
+from scalping.env.masks import masked_action
 from scalping.env.simulator import WINDOW, ArmSelector, Simulator
 from scalping.features.build import FeatureFrame
 from scalping.types import Trade
@@ -79,6 +80,7 @@ def run_id(
     *,
     policy_name: str = "",
     session: str = "",
+    mask_actions: bool = False,
 ) -> str:
     """First 12 hex chars of the run's sha256; identical inputs give identical ids.
 
@@ -93,6 +95,7 @@ def run_id(
         "data_hash": str(data_hash),
         "policy": str(policy_name),
         "session": str(session),
+        "mask_actions": bool(mask_actions),
     }
     return hashlib.sha256(_canonical(payload)).hexdigest()[:12]
 
@@ -147,6 +150,7 @@ def run_backtest(
     flow_thr: np.ndarray | None = None,
     flow_obs: bool = False,
     symbol: str | None = None,
+    mask_actions: bool = False,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -160,7 +164,10 @@ def run_backtest(
     receives the observation width it expects. ``symbol`` enables the
     registry's weekly session: entries outside the window are blocked with
     reason ``"session_closed"``. Without it the simulator stays session-free,
-    matching older callers and custom frames.
+    matching older callers and custom frames. ``mask_actions`` maps every action
+    the simulator's mask forbids to HOLD before stepping, so an evaluation
+    rollout records what the loop would execute instead of rejected orders; the
+    flag is part of the run id.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -186,7 +193,10 @@ def run_backtest(
     equity: list[float] = []
     trades: list[Trade] = []
     while True:
-        result = sim.step(int(policy(obs)))
+        action = int(policy(obs))
+        if mask_actions:
+            action = masked_action(action, sim.action_masks())
+        result = sim.step(action)
         obs = result.obs
         equity.append(float(result.info["equity"]))
         trade = result.info["trade"]
@@ -198,10 +208,17 @@ def run_backtest(
     values = np.asarray(equity, dtype=np.float64)
     digest = data_hash(features)
     session_label = "" if session is None else session.label
-    config_hash = run_id(settings, _SEED, digest, session=session_label)
+    config_hash = run_id(
+        settings, _SEED, digest, session=session_label, mask_actions=mask_actions
+    )
     return BacktestResult(
         run_id=run_id(
-            settings, _SEED, digest, policy_name=identity, session=session_label
+            settings,
+            _SEED,
+            digest,
+            policy_name=identity,
+            session=session_label,
+            mask_actions=mask_actions,
         ),
         metrics=compute(
             trades,

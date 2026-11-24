@@ -123,8 +123,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Behavior-cloning warm start.
 - [x] VecNormalize, random starts, checkpoints, pause/resume.
 - [x] Rule, hold and random baselines.
-- [ ] PARTIAL: flow-gate mask + `masked_action` landed (#76); risk/account gates are
-      not in the mask and nothing wires the mask into training or eval yet.
+- [ ] PARTIAL: mask now covers flow/signal, session, daily/weekly loss, drawdown,
+      kill switches, consecutive losses, spread, ATR and lot-size gates, and
+      `run_backtest(mask_actions=True)` / `backtest --mask-actions` enforce it in
+      evaluation. Training still uses plain PPO (no MaskablePPO dependency).
 - [ ] REDUCE position action.
 - [ ] SAC evaluation.
 - [ ] TD3 evaluation.

@@ -649,7 +649,14 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         raise CliError("backtest requires --out (or use 'backtest montecarlo'/'sensitivity')")
     settings, features = _backtest_inputs(args)
     policy, label = _select_policy(args.policy)
-    result = run_backtest(policy, features, settings, policy_name=label, symbol=args.symbol)
+    result = run_backtest(
+        policy,
+        features,
+        settings,
+        policy_name=label,
+        symbol=args.symbol,
+        mask_actions=args.mask_actions,
+    )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1016,6 +1023,11 @@ def _build_parser() -> argparse.ArgumentParser:
     backtest.add_argument("--root", default=str(DEFAULT_ROOT))
     backtest.add_argument("--out", default=None, help="path of the JSON report")
     backtest.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    backtest.add_argument(
+        "--mask-actions",
+        action="store_true",
+        help="map actions the simulator mask forbids to HOLD",
+    )
     backtest.set_defaults(handler=_cmd_backtest)
 
     backtest_commands = backtest.add_subparsers(dest="backtest_command", required=False)

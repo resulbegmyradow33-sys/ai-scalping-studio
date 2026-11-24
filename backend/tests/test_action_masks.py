@@ -273,3 +273,98 @@ def test_masked_action_rejects_malformed_input():
 
 def test_hold_constant_matches_the_action_order():
     assert HOLD == HOLD_ == 0
+
+
+def test_daily_loss_blocks_entries_in_the_mask_and_the_loop():
+    sim = Simulator(flat_frame(), Settings())
+    sim.reset(seed=1)
+    sim.day_start_equity = 10_000.0
+    sim.balance = 9_000.0  # 10% loss, beyond the 3% daily limit
+
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    result = sim.step(BUY)
+    assert result.info["blocked"] == "daily_loss_limit"
+    assert result.info["position"] is None
+
+
+def test_missing_atr_blocks_entries_in_the_mask():
+    sim = Simulator(flat_frame(atr_value=0.0), Settings())
+    sim.reset(seed=1)
+
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    assert sim.step(BUY).info["blocked"] == "no_atr"
+
+
+def test_lot_below_contract_minimum_is_masked_out():
+    from scalping.config import ContractSpec
+
+    settings = Settings(contract=ContractSpec(min_lot=10.0))
+    sim = Simulator(flat_frame(), settings)
+    sim.reset(seed=1)
+
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    assert sim.step(BUY).info["blocked"] == "lot_too_small"
+
+
+def test_session_close_is_reflected_in_the_mask():
+    from scalping.data.registry import session_for
+
+    frame = flat_frame()
+    weekend = np.datetime64("2026-01-03T00:00", "us")  # Saturday
+    frame = FeatureFrame(
+        X=frame.X,
+        ts=(weekend + np.arange(frame.ts.size)).astype("datetime64[m]").astype("datetime64[us]"),
+        ohlc=frame.ohlc,
+        spread=frame.spread,
+        atr=frame.atr,
+        valid_from=frame.valid_from,
+        columns=frame.columns,
+    )
+    sim = Simulator(frame, Settings(), session=session_for("XAUUSD"))
+    sim.reset(seed=1)
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    assert sim.step(BUY).info["blocked"] == "session_closed"
+
+
+def test_mask_never_hides_an_action_the_loop_accepts():
+    for action in (HOLD_, BUY, SELL, CLOSE):
+        sim = Simulator(flat_frame(), Settings())
+        sim.reset(seed=1)
+        allowed = bool(sim.action_masks()[action])
+        result = sim.step(action)
+        if allowed:
+            assert result.info["blocked"] is None
+        else:
+            assert result.info["blocked"] is not None
+
+
+def test_mask_never_allows_a_rejected_entry():
+    blocked = Simulator(flat_frame(atr_value=0.0), Settings())
+    blocked.reset(seed=1)
+    mask = blocked.action_masks()
+    assert not mask[BUY] and not mask[SELL]
+
+    for action in (BUY, SELL, CLOSE):
+        if not mask[action]:
+            assert blocked.step(action).info["blocked"] is not None
+
+
+def test_masked_evaluation_is_part_of_the_run_identity():
+    from scalping.backtest.engine import data_hash, run_backtest, run_id
+
+    frame = flat_frame()
+
+    def always_buy(_obs: np.ndarray) -> int:
+        return BUY
+
+    plain = run_backtest(always_buy, frame, Settings(), policy_name="always_buy")
+    masked = run_backtest(
+        always_buy, frame, Settings(), policy_name="always_buy", mask_actions=True
+    )
+
+    assert plain.run_id != masked.run_id
+    np.testing.assert_array_equal(plain.equity, masked.equity)
+    assert len(plain.trades) == len(masked.trades)
+    assert run_id(Settings(), 0, data_hash(frame)) != run_id(
+        Settings(), 0, data_hash(frame), mask_actions=True
+    )
