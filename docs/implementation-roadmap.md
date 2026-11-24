@@ -39,12 +39,12 @@ loop is connected.
 
 ### Immediate PR triage
 
-- #107: rebase after #106 merged; review deterministic classification as
+- #107: rebase onto current main; review deterministic classification as
   heuristic triage, not semantic understanding.
-- #109: keep open until it is rebased and its validation-only promotion limits
-  are addressed by the mandatory OOS/walk-forward gate.
-- #105: optional benchmark; rebase before merge, but do not let it displace the
-  autonomous evidence/handler work.
+- #109: merged champion-history/provider/rollback foundation; upgrade its
+  validation-only promotion limits with mandatory OOS/walk-forward evidence.
+- #105: merged optional benchmark; do not let further model-zoo work displace
+  autonomous evidence and handler integration.
 
 Working rules for every phase:
 
