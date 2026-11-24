@@ -501,6 +501,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         seed=args.seed,
         evaluate_test=args.evaluate_test,
         include_flat=args.include_flat,
+        calibrate=args.calibrate,
     )
     result = train_classifier(
         features,
@@ -519,6 +520,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
             "test": result.split_counts["test"],
             "validation_metrics": result.validation,
             "baseline": result.baseline,
+            "calibration": result.calibration,
             "test_metrics": result.test,
             "model_path": str(model_path),
             "metrics_path": str(metrics_path),
@@ -1316,6 +1318,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-flat",
         action="store_true",
         help="keep exact-zero returns as a third class (usually harmful)",
+    )
+    ml_train.add_argument(
+        "--calibrate",
+        choices=("none", "temperature"),
+        default="none",
+        help="fit temperature scaling on validation rows (never on test)",
     )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
