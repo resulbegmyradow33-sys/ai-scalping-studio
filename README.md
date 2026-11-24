@@ -29,6 +29,7 @@ LinUCB selector are research baselines, not the required autonomous learner.
 - [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
 - [`docs/language-decision.md`](docs/language-decision.md) — why Python/TypeScript stay; when Rust would be justified.
+- [`docs/api-contracts.md`](docs/api-contracts.md) — public API schema, drift guard and how to update the snapshot.
 
 ## Team
 
