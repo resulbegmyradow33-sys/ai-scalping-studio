@@ -8,9 +8,15 @@ spec and the real dataset builder, then check the evidence bundle alone.
 
 from __future__ import annotations
 
+import json
 import math
+import os
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from itertools import pairwise
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -276,6 +282,187 @@ def test_same_inputs_reproduce_the_same_checksum(
     assert first.folds == second.folds
     assert first.aggregate == second.aggregate
     verify(first)
+
+
+_THREAD_PROBE = r"""
+import json
+import os
+from datetime import UTC, datetime, timedelta
+
+import numpy as np
+import polars as pl
+
+from scalping.datasets.builder import build_dataset
+from scalping.discovery.evidence import EvidenceConfig, build_evidence
+from scalping.features.build import build_features
+from scalping.strategy.dsl import (
+    Compare,
+    Const,
+    EntryRule,
+    ExitRule,
+    HoldingLimit,
+    StrategySpec,
+)
+
+rows = 60_000
+start = datetime(2026, 1, 5, tzinfo=UTC)
+rng = np.random.default_rng(145)
+# One dominant up-trend so thousands of trades share a few regime buckets:
+# the bucket sums are large enough for threaded partial-sum order to matter.
+log_ret = 0.00004 + rng.normal(0.0, 0.00012, rows)
+close = 2000.0 * np.exp(np.cumsum(log_ret))
+open_ = np.concatenate([[2000.0], close[:-1]])
+wick = rng.uniform(0.0, 0.00008, rows)
+high = np.maximum(open_, close) * (1.0 + wick)
+low = np.minimum(open_, close) * (1.0 - wick)
+spread = rng.uniform(0.18, 0.24, rows)
+bars = pl.DataFrame(
+    {
+        "ts": [start + timedelta(minutes=index) for index in range(rows)],
+        "open": open_,
+        "high": high,
+        "low": low,
+        "close": close,
+        "bid_close": close,
+        "ask_close": close + spread,
+        "spread": spread,
+        "volume": rng.integers(20, 300, rows),
+    }
+)
+features = build_features(bars)
+bundle = build_dataset(
+    features,
+    symbol="XAUUSD",
+    timeframe="M1",
+    horizon=1,
+    train_fraction=0.6,
+    validation_fraction=0.2,
+    purge_bars=3,
+    embargo_bars=2,
+)
+spec = StrategySpec(
+    entries=(EntryRule("long", Compare(Const(0.0), "<", Const(1.0))),),
+    exits=(ExitRule(Compare(Const(0.0), ">", Const(1.0))),),
+    holding=HoldingLimit(1),
+    max_lookback=5,
+)
+config = EvidenceConfig(
+    code_version="thread-probe",
+    folds=3,
+    min_trades_per_fold=2,
+    bootstrap_samples=200,
+    seed=7,
+    search_budget=50,
+    trial_count=4,
+    regime_coverage_min=0.0,
+)
+evidence = build_evidence(bundle, spec, config, features=features)
+print(
+    json.dumps(
+        {
+            "checksum": evidence.checksum,
+            "total_trades": evidence.aggregate.total_trades,
+            "regimes": [
+                {
+                    "regime": row.regime,
+                    "trades": row.trades,
+                    "net_profit": repr(row.net_profit),
+                    "total_r": repr(row.total_r),
+                    "expectancy_r": repr(row.expectancy_r),
+                }
+                for row in evidence.aggregate.regime_trades
+            ],
+        }
+    )
+)
+"""
+
+
+def _thread_probe(threads: int) -> dict[str, Any]:
+    """Build the same evidence in a fresh interpreter with a pinned pool size."""
+    source = Path(__file__).resolve().parents[1] / "src"
+    env = dict(os.environ)
+    env["POLARS_MAX_THREADS"] = str(threads)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(source), env.get("PYTHONPATH"))))
+    completed = subprocess.run(
+        [sys.executable, "-c", _THREAD_PROBE],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def test_checksum_is_independent_of_the_polars_thread_count() -> None:
+    """Issue #145: one thread and many threads must hash identical evidence.
+
+    The tape is deterministic and produces thousands of trades in a few regime
+    buckets. Before the fix, Polars' threaded ``group_by().sum()`` merged
+    partial sums in a thread-dependent order and the regime sums (and therefore
+    the bundle checksum) moved in the last bits.
+    """
+    single = _thread_probe(1)
+    many = _thread_probe(4)
+
+    assert single["total_trades"] == many["total_trades"] > 1000
+    assert single["regimes"] == many["regimes"]
+    assert single["checksum"] == many["checksum"]
+    assert max(row["trades"] for row in single["regimes"]) > 100
+
+
+def test_regime_rows_ignore_polars_chunk_layout() -> None:
+    """The same rows chunked differently must aggregate to the same numbers."""
+    rng = np.random.default_rng(120)
+    count = 4000
+    regimes = [f"r{int(value)}" for value in rng.integers(0, 4, count)]
+    ts = [datetime(2026, 1, 5, tzinfo=UTC) + timedelta(minutes=index) for index in range(count)]
+    pnl = rng.normal(0.0, 25.0, count)
+    r_multiple = rng.normal(0.0, 1.0, count)
+
+    def chunked(cuts: tuple[int, ...]) -> pl.DataFrame:
+        edges = (0, *cuts, count)
+        parts = [
+            pl.DataFrame(
+                {
+                    "entry_ts": ts[lo:hi],
+                    "r_multiple": r_multiple[lo:hi],
+                    "pnl": pnl[lo:hi],
+                    "regime": regimes[lo:hi],
+                }
+            )
+            for lo, hi in pairwise(edges)
+        ]
+        return pl.concat(parts)
+
+    one_chunk = chunked(())
+    three_chunks = chunked((137, 2901))
+    five_chunks = chunked((101, 999, 2003, 3333))
+
+    first = evidence_module._regime_rows(one_chunk)
+    assert evidence_module._regime_rows(three_chunks) == first
+    assert evidence_module._regime_rows(five_chunks) == first
+    assert [row.regime for row in first] == ["r0", "r1", "r2", "r3"]
+    assert sum(row.trades for row in first) == count
+
+
+def test_pooled_regime_profit_is_an_exactly_rounded_sum() -> None:
+    """A bucket's net profit is ``math.fsum`` of its trades, not a running total."""
+    values = [1e16, 1.0, -1e16, 1.0]
+    frame = pl.DataFrame(
+        {
+            "entry_ts": [datetime(2026, 1, 5, tzinfo=UTC) + timedelta(minutes=i) for i in range(4)],
+            "r_multiple": [1.0, 1.0, 1.0, 1.0],
+            "pnl": values,
+            "regime": ["up_normal"] * 4,
+        }
+    )
+
+    (row,) = evidence_module._regime_rows(frame)
+
+    assert row.net_profit == 2.0
+    assert row.total_r == 4.0
 
 
 def test_tampering_with_a_metric_breaks_the_checksum(

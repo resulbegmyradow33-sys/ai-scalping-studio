@@ -141,6 +141,26 @@ def test_clean_store_is_ok_with_zero_counts_and_provenance(
     }
 
 
+def test_configured_store_without_a_sidecar_warns(tmp_path: Path, client: TestClient) -> None:
+    """A clean slice with no sidecar is a provenance gap, not a data error.
+
+    ``docs/data-pipeline.md`` maps a missing sidecar onto ``warn`` with
+    ``status_rule = provenance_missing`` and leaves ``provenance`` null instead
+    of guessing a source or a synthetic flag.
+    """
+    write_store(tmp_path, bars())
+
+    body = quality(client)
+
+    assert body["configured"] is True
+    assert body["status"] == "warn"
+    assert body["status_rule"] == "provenance_missing"
+    assert body["provenance"] is None
+    assert body["rows"] == 60
+    assert body["duplicates"] == 0
+    assert body["gaps"] == 0
+
+
 def test_missing_store_is_explicit_and_creates_nothing(tmp_path: Path) -> None:
     with TestClient(create_app(data_root=tmp_path)) as client:
         body = quality(client)

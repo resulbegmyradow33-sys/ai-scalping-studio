@@ -9,10 +9,14 @@ import { ApiError, api } from "@/lib/api";
  * form validation, the success line and the error line.
  */
 const statusHook = vi.hoisted(() => ({ useDataStatus: vi.fn() }));
+const qualityHook = vi.hoisted(() => ({ useDataQuality: vi.fn() }));
+const regimeHook = vi.hoisted(() => ({ useTimeframes: vi.fn() }));
 
 vi.mock("@/hooks/use-data-status", () => ({
   useDataStatus: statusHook.useDataStatus,
 }));
+vi.mock("@/hooks/use-data-quality", () => qualityHook);
+vi.mock("@/hooks/use-regime", () => regimeHook);
 
 const { default: DataPage } = await import("./page");
 
@@ -48,6 +52,17 @@ beforeEach(() => {
   mutate.mockReset();
   statusHook.useDataStatus.mockReset();
   statusHook.useDataStatus.mockReturnValue(statusState());
+  qualityHook.useDataQuality.mockReset();
+  qualityHook.useDataQuality.mockReturnValue({
+    data: undefined,
+    error: undefined,
+    isLoading: false,
+  });
+  regimeHook.useTimeframes.mockReset();
+  regimeHook.useTimeframes.mockReturnValue({
+    data: [{ timeframe: "M1", rule: "1m" }],
+    error: undefined,
+  });
 });
 
 afterEach(cleanup);
@@ -343,5 +358,15 @@ describe("DataPage", () => {
 
     expect(screen.queryByTestId("provenance-missing")).not.toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Veri kökeni" })).not.toBeInTheDocument();
+  });
+
+  it("mounts the quality panel with the page's symbol field", () => {
+    statusHook.useDataStatus.mockReturnValue(statusState({ data: SEEDED }));
+
+    render(<DataPage />);
+
+    expect(screen.getByRole("heading", { name: "Veri kalitesi" })).toBeInTheDocument();
+    expect(qualityHook.useDataQuality).toHaveBeenLastCalledWith("XAUUSD", "M1");
+    expect(screen.getByLabelText("Zaman dilimi")).toHaveValue("M1");
   });
 });

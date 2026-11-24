@@ -20,16 +20,19 @@ from scalping.paper.autonomous import AutonomousPaperRunner, AutonomousSummary
 from scalping.paper.continuous import (
     AdvanceSummary,
     ContinuousPaperRunner,
+    GapPolicy,
     OutcomeBatch,
     OutcomeRow,
     matured_outcomes,
     outcome_fingerprint,
 )
 from scalping.paper.ledger import (
+    GAP_POLICIES,
     SCHEMA_VERSION,
     DuplicateError,
     EquityPoint,
     FillRecord,
+    GapRecord,
     LedgerError,
     OrderRecord,
     PaperLedger,
@@ -53,6 +56,7 @@ from scalping.paper.runner import (
 __all__ = [
     "ACTION_CODES",
     "ACTION_NAMES",
+    "GAP_POLICIES",
     "SCHEMA_VERSION",
     "AdapterDisabled",
     "AdvanceSummary",
@@ -62,6 +66,8 @@ __all__ = [
     "DuplicateError",
     "EquityPoint",
     "FillRecord",
+    "GapPolicy",
+    "GapRecord",
     "LedgerError",
     "Mt5DemoAdapter",
     "OrderRecord",

@@ -23,6 +23,11 @@ What it guarantees
   fold below the trade minimum, a missing or no-op stress multiplier, missing
   regime labels, a non-finite number or any identity mismatch raises
   :class:`EvidenceError` with a stable code. No partial bundle is returned.
+* **Thread-count independent.** Regime reductions run in Python with
+  :func:`math.fsum` over rows ordered by ``(regime, entry_ts)`` instead of
+  Polars' threaded ``group_by().sum()``, whose partial-sum order follows the
+  pool size. The checksum therefore does not change between one thread and
+  many; cross-machine BLAS drift is still possible and is not claimed away.
 * **Not a promotion.** A bundle records evidence; it does not select, promote
   or claim profitability. The locked final OOS call and the multiple-testing
   correction are deliberately still missing (see
@@ -71,6 +76,7 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
+from itertools import groupby
 from typing import Any, Final
 
 import numpy as np
@@ -658,42 +664,43 @@ def _per_trade_regimes(
 
 
 def _regime_rows(per_trade: pl.DataFrame) -> tuple[RegimeEvidence, ...]:
-    """One row per regime, sorted by label; ``unknown`` is kept, not hidden."""
+    """One row per regime, sorted by label; ``unknown`` is kept, not hidden.
+
+    The reduction runs in Python over rows ordered by ``(regime, entry_ts)``,
+    using :func:`math.fsum` for every float sum. Polars' threaded
+    ``group_by().sum()`` merges partial sums in an order that follows the thread
+    pool and the frame's chunk layout, so its last bits can move between runs
+    with identical inputs. An exactly rounded sum does not depend on addend
+    order, so the same trades give the same row on one thread or many.
+    """
     if per_trade.is_empty():
         return ()
-    table = (
-        per_trade.group_by("regime")
-        .agg(
-            pl.len().alias("trades"),
-            (pl.col("r_multiple") > 0).sum().alias("wins"),
-            pl.col("pnl").sum().alias("net_profit"),
-            pl.col("r_multiple").mean().alias("expectancy_r"),
-            pl.col("r_multiple").sum().alias("total_r"),
-        )
-        .sort("regime")
-    )
+    ordered = per_trade.sort("regime", "entry_ts", maintain_order=True)
     rows: list[RegimeEvidence] = []
-    for record in table.iter_rows(named=True):
-        trades = int(record["trades"])
-        wins = int(record["wins"])
+    for regime, group in groupby(ordered.iter_rows(named=True), key=lambda row: str(row["regime"])):
+        records = list(group)
+        trades = len(records)
+        wins = sum(1 for record in records if float(record["r_multiple"]) > 0.0)
+        pnls = [float(record["pnl"]) for record in records]
+        r_multiples = [float(record["r_multiple"]) for record in records]
+        net_profit = math.fsum(pnls)
+        total_r = math.fsum(r_multiples)
         rows.append(
             RegimeEvidence(
-                regime=str(record["regime"]),
+                regime=regime,
                 trades=trades,
-                net_profit=_finite(record["net_profit"], where=f"regime {record['regime']} pnl"),
-                win_rate=_finite(wins / trades, where=f"regime {record['regime']} win_rate"),
-                expectancy_r=_finite(
-                    record["expectancy_r"], where=f"regime {record['regime']} expectancy_r"
-                ),
-                total_r=_finite(record["total_r"], where=f"regime {record['regime']} total_r"),
+                net_profit=_finite(net_profit, where=f"regime {regime} pnl"),
+                win_rate=_finite(wins / trades, where=f"regime {regime} win_rate"),
+                expectancy_r=_finite(total_r / trades, where=f"regime {regime} expectancy_r"),
+                total_r=_finite(total_r, where=f"regime {regime} total_r"),
             )
         )
     return tuple(rows)
 
 
 def _pooled_profit_factor(pnls: Sequence[float]) -> float:
-    gross_win = sum(value for value in pnls if value > 0.0)
-    gross_loss = -sum(value for value in pnls if value < 0.0)
+    gross_win = math.fsum(value for value in pnls if value > 0.0)
+    gross_loss = -math.fsum(value for value in pnls if value < 0.0)
     if gross_win <= 0.0 and gross_loss <= 0.0:
         return 0.0
     if gross_loss <= 0.0:
