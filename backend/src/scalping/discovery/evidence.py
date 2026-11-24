@@ -1047,16 +1047,19 @@ def evidence_checksum(evidence: CandidateEvidence) -> str:
 
 
 def locked_oos_checksum(section: LockedOOSEvidence) -> str:
-    """Canonical checksum of one frozen locked-holdout section.
+    """Canonical sha256 of a locked-OOS section, excluding ``checksum``.
 
-    The section's own checksum covers every field except ``checksum`` and the
-    ``created_at`` stamp, mirroring :func:`evidence_checksum`. The promotion
-    policy re-derives it so an edited section is rejected before its metrics are
-    read.
+    ``created_at`` is excluded too, matching the holdout ledger's
+    ``_result_checksum``: the same measured section can be re-serialised with a
+    new creation stamp without becoming a different result. Every other field,
+    including the metrics, intervals, regimes, stress and identity, is covered.
     """
     if type(section) is not LockedOOSEvidence:
         raise TypeError(f"section must be a LockedOOSEvidence, got {type(section).__name__}")
-    return _checksum_payload(asdict(section))
+    payload = asdict(section)
+    payload.pop("checksum", None)
+    payload.pop("created_at", None)
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
 
 
 def _nested(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:

@@ -24,16 +24,12 @@ from typing import Any
 import pytest
 
 from promotion_evidence import evidence_for
+from promotion_support import promote_for_tests, registered_test_policies
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
-from scalping.discovery.promotion import (
-    PRODUCTION_POLICIES,
-    PROMOTION_V1,
-    EvidenceIdentity,
-    _promote_for_tests,
-)
+from scalping.discovery.promotion import PROMOTION_V1, EvidenceIdentity
 from scalping.discovery.protocols import TrialResult
 from scalping.knowledge.index import KnowledgeIndex
 from scalping.orchestrator import JobStore, Orchestrator
@@ -72,11 +68,8 @@ TEST_POLICY = replace(
 
 @pytest.fixture(autouse=True)
 def _register_handler_test_policy():
-    PRODUCTION_POLICIES[TEST_POLICY.digest] = TEST_POLICY
-    try:
+    with registered_test_policies(TEST_POLICY):
         yield
-    finally:
-        PRODUCTION_POLICIES.pop(TEST_POLICY.digest, None)
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -191,7 +184,7 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             settings_digest=SETTINGS_DIGEST,
             expectancy_r=0.5,
         )
-        _promote_for_tests(
+        promote_for_tests(
             archive,
             record.candidate_id,
             evidence,

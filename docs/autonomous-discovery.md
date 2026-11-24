@@ -335,7 +335,7 @@ bundle; it is not a metric comparison:
 ```python
 from scalping.discovery.promotion import (
     PROMOTION_V1,
-    EvidenceIdentity,
+    ExpectedIdentity,
     promote_with_evidence,
 )
 
@@ -346,10 +346,8 @@ champion = promote_with_evidence(
     PROMOTION_V1,                 # named, versioned, fail-closed
     scope="XAUUSD:M5",
     reason="passed promotion-v1 on identical folds",
-    expected_identity=EvidenceIdentity(
-        code_version=current_code_version,
-        dataset_checksum=current_dataset_checksum,
-        settings_digest=current_settings_digest,
+    expected_identity=ExpectedIdentity.current(
+        dataset_checksum=manifest.checksum,
     ),
 )
 ```

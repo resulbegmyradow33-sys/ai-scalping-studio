@@ -46,7 +46,7 @@ from scalping.discovery.holdout import (
 from scalping.discovery.promotion import (
     PRODUCTION_POLICIES,
     PROMOTION_V1,
-    EvidenceIdentity,
+    ExpectedIdentity,
     PromotionDecision,
     evaluate_promotion,
     is_production_policy,
@@ -108,7 +108,9 @@ def profitable_bars(rows: int = ROWS) -> pl.DataFrame:
     prices: list[float] = []
     price = 1000.0
     for index in range(rows):
-        price += -0.4 if index % 7 == 6 else 1.0
+        # Large winners relative to costs keep the 1.5x/2.0x stress reruns well
+        # inside the policy's degradation cap.
+        price += -0.5 if index % 7 == 6 else 3.0
         prices.append(price)
     return pl.DataFrame(
         {
@@ -263,7 +265,7 @@ def holdout_config(
         "timeframe": TIMEFRAME,
         "window": 60,
         "cost_stress": (1.5, 2.0),
-        "bootstrap_samples": 200,
+        "bootstrap_samples": 1000,
         "bootstrap_confidence": 0.95,
         "seed": 7,
         "settings": SETTINGS,
@@ -851,10 +853,10 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     promotion = evaluate_promotion(
         attached,
         PROMOTION_V1,
-        expected_identity=EvidenceIdentity(
-            code_version=CODE,
+        expected_identity=ExpectedIdentity.current(
             dataset_checksum=bundle.manifest.checksum,
-            settings_digest=SETTINGS_HASH,
+            settings=SETTINGS,
+            code_version=CODE,
         ),
     )
     assert promotion.accepted, promotion.codes
