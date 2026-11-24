@@ -49,8 +49,10 @@ process, not an operating-system service.
   slice, and no handler here fits a model.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
-- **No API/UI.** State is queryable through `JobStore`, `Orchestrator.status()`
-  and `OrchestratorDaemon.status()`; exposing it is future work.
+- **No write API/UI.** The only HTTP surface is the read-only autonomy viewer
+  described below; there is no endpoint to enqueue, cancel, pause, promote or
+  start a daemon. State is queryable in-process through `JobStore`,
+  `Orchestrator.status()` and `OrchestratorDaemon.status()`.
 - **One daemon per database.** SQLite `BEGIN IMMEDIATE` makes claims unique, but
   it does not provide ownership: a second daemon's `start()` recovery sees the
   first daemon's `running` rows as interrupted, requeues them and runs them
@@ -190,6 +192,35 @@ exits 0. `--forever` detects a worker thread that died without a stop request,
 prints `{"status": "failed", ...}` and exits 1. A requested stop prints
 `{"status": "stopped", ...}` and exits 0. Other CLI commands keep the single JSON
 line contract; `--forever` prints `started` and then `stopped`/`failed`.
+
+### Read-only status API
+
+`scalping.api.routes_autonomy` mounts under `/api/autonomy`. Every route is a
+`GET`; nothing here enqueues, cancels, pauses, promotes or starts a daemon.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/autonomy/status` | Aggregate paper, orchestrator, champion, discovery and data sections |
+| `GET` | `/api/autonomy/champions` | Champion per scope with `mode`, `policy_id` and `policy_digest` when the payload records them |
+| `GET` | `/api/autonomy/jobs` | Newest jobs first: status, kind, attempts and defer count |
+| `GET` | `/api/autonomy/events` | Newest audit events first |
+
+The database paths are app configuration (`create_app(orchestrator_db=...,
+discovery_archive=...)`), never request fields. Both files default under
+`runs_root` to the CLI locations. Every store is opened with a `mode=ro` URI
+and `PRAGMA query_only = ON`: SQLite cannot create a missing file, cannot write
+through the connection and takes no write lock. A `GET` therefore never runs
+`init_schema`, never changes bytes on disk and keeps working while the daemon
+holds `BEGIN IMMEDIATE`; WAL readers see the last committed snapshot.
+
+A missing store answers `{"configured": false, ...}` and omits its counts. It is
+not reported as zero sessions or zero queued jobs, because those numbers were
+never read. A file that exists but has no schema yet is configured with no
+counts. `/jobs` defaults to 50 and accepts `1..500`; `/events` defaults to 100
+and accepts `1..500`; anything outside is a `422`. The discovery archive is read
+with plain SQL, so a v1 archive without `champions` returns an empty list
+instead of migrating. `runs` in `/status` is the archived trial count and
+`decisions` is the gate-decision count.
 
 ### Honest limits
 
