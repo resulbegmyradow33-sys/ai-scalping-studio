@@ -15,6 +15,7 @@ from scalping.orchestrator import (
     JobContext,
     JobStore,
     OrchestratorDaemon,
+    TickResult,
     Trigger,
 )
 from scalping.orchestrator.store import Job
@@ -128,6 +129,8 @@ def test_config_defaults_and_bounds() -> None:
         DaemonConfig(max_jobs_per_tick=-1)
     with pytest.raises(ValueError, match="stop_grace_seconds"):
         DaemonConfig(stop_grace_seconds=-1.0)
+    with pytest.raises(ValueError, match="stop_grace_seconds"):
+        DaemonConfig(stop_grace_seconds=301)
     with pytest.raises(TypeError, match="heavy_kinds"):
         DaemonConfig(heavy_kinds="dataset.build")  # type: ignore[arg-type]
 
@@ -138,6 +141,8 @@ def test_measured_profile_is_the_default_guard(tmp_path: Path) -> None:
     assert type(daemon.guard).__name__ == "MeasuredResourceGuard"
     status = daemon.status().to_dict()
     assert status["guard"]["profile"] == "m2_8gb"
+    assert status["guard"]["type"] == "MeasuredResourceGuard"
+    assert status["guard"]["unmeasured"] is False
     assert status["guard"]["snapshot"] is None
     json.dumps(status)
 
@@ -146,7 +151,10 @@ def test_none_profile_uses_allow_all_guard(tmp_path: Path) -> None:
     store = _store(tmp_path)
     daemon = _daemon(store, guard_profile="none")
     assert type(daemon.guard).__name__ == "AllowAllGuard"
-    assert daemon.status().to_dict()["guard"]["profile"] == "none"
+    status = daemon.status().to_dict()
+    assert status["guard"]["profile"] == "none"
+    assert status["guard"]["type"] == "AllowAllGuard"
+    assert status["guard"]["unmeasured"] is True
 
 
 # ----------------------------------------------------------------- tick order
@@ -172,7 +180,7 @@ def test_tick_scans_then_drains_and_reports(tmp_path: Path) -> None:
 
     status = daemon.status().to_dict()
     assert status["ticks"] == 1
-    assert status["jobs_processed"] == 1
+    assert status["terminal_jobs"] == 1
     assert status["last_tick_at"] == T0.isoformat(timespec="microseconds")
     assert status["last_error"] is None
     assert status["queue"]["counts"]["succeeded"] == 1
@@ -281,6 +289,37 @@ def test_guard_refusal_defers_with_the_reason_in_the_event_log(tmp_path: Path) -
     assert guard.checked == ["heavy.train"]
 
 
+def test_repeated_refusals_reach_the_deferral_cap_and_fail(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    guard = _RefuseGuard()
+    job, _ = store.enqueue(
+        "heavy.train",
+        dedupe_key="t1",
+        max_deferrals=2,
+        now=T0,
+    )
+    job_id = job.id
+    daemon = _daemon(store, {"heavy.train": _Recorder()}, guard=guard)
+
+    first = daemon.tick(now=T0)
+    second = daemon.tick(now=T0 + timedelta(seconds=60))
+    third = daemon.tick(now=T0 + timedelta(seconds=120))
+
+    assert [item.status for item in first.outcomes] == ["resource_refused"]
+    assert [item.status for item in second.outcomes] == ["resource_refused"]
+    assert [item.status for item in third.outcomes] == ["failed"]
+    job = store.get(job_id)
+    assert job is not None
+    assert job.status == "failed"
+    assert job.defer_count == 2
+    assert job.max_deferrals == 2
+    assert job.error is not None and "deferral cap reached" in job.error
+    events = [event.event for event in store.events(job_id)]
+    assert events.count("defer_exhausted") == 1
+    assert store.stats().deferrals == 2
+    assert daemon.status().queue["deferrals"] == 2
+
+
 # ------------------------------------------------------------ failure isolation
 
 
@@ -316,7 +355,7 @@ def test_heavy_failure_does_not_block_a_later_paper_job(tmp_path: Path) -> None:
     assert calls == ["heavy.train", "paper.advance"]
     done = store.get(paper_id)
     assert done is not None and done.status == "succeeded"
-    assert daemon.status().jobs_processed == 2
+    assert daemon.status().terminal_jobs == 2
     assert daemon.status().last_error is None
 
 
@@ -343,7 +382,10 @@ def test_start_recovers_once_and_is_idempotent(tmp_path: Path) -> None:
 
     recovered = daemon.start()
     assert [job.id for job in recovered] == [job_id]
+    first_ident = daemon.worker_ident
+    assert first_ident is not None
     assert daemon.start() == []
+    assert daemon.worker_ident == first_ident
     assert sleeper_signal.wait(1.0)
     daemon.stop()
     daemon.stop()
@@ -351,35 +393,128 @@ def test_start_recovers_once_and_is_idempotent(tmp_path: Path) -> None:
     started = [event for event in store.events() if event.event == "orchestrator_started"]
     assert len(started) == 1
     assert daemon.is_running is False
+    assert daemon.worker_ident is None
     job = store.get(job_id)
     assert job is not None and job.status == "succeeded"
 
 
-def test_stop_while_idle_returns_promptly_without_raising(tmp_path: Path) -> None:
+def test_stop_during_recovery_is_not_lost(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _store(tmp_path)
-    calls: list[float] = []
-    slept = threading.Event()
-    holder: dict[str, OrchestratorDaemon] = {}
+    job_id = _enqueue(store, "work", "w1", max_retries=1)
+    assert store.claim_next(now=T0) is not None
+
+    entered = threading.Event()
+    release = threading.Event()
+    real_recover = JobStore.recover_interrupted
+
+    def blocking_recover(self: JobStore, *args: object, **kwargs: object) -> object:
+        entered.set()
+        if not release.wait(5.0):
+            raise RuntimeError("test never released recovery")
+        return real_recover(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(JobStore, "recover_interrupted", blocking_recover)
+
+    daemon = OrchestratorDaemon(
+        store,
+        {"work": _Recorder()},
+        DaemonConfig(poll_seconds=1.0, guard_profile="none", stop_grace_seconds=2.0),
+        sleeper=lambda seconds: None,
+    )
+    result: list[list[Job]] = []
+
+    def run_start() -> None:
+        result.append(daemon.start())
+
+    starter = threading.Thread(target=run_start)
+    starter.start()
+    assert entered.wait(5.0)
+
+    # The stop must win even though start() is still inside recovery.
+    daemon.stop()
+    release.set()
+    starter.join(5.0)
+
+    assert not starter.is_alive()
+    assert result == [[]]
+    assert daemon.is_running is False
+    assert daemon.worker_ident is None
+    job = store.get(job_id)
+    assert job is not None and job.status == "queued"
+
+
+def test_stop_joins_the_loop_thread_and_slices_the_poll(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    slices: list[float] = []
+    sleeping = threading.Event()
+    release = threading.Event()
 
     def sleeper(seconds: float) -> None:
-        calls.append(seconds)
-        slept.set()
-        holder["daemon"].stop()  # called from the loop thread: flag only
+        slices.append(seconds)
+        sleeping.set()
+        release.wait(5.0)
 
     daemon = OrchestratorDaemon(
         store,
         {},
-        DaemonConfig(poll_seconds=60.0, guard_profile="none", stop_grace_seconds=2.0),
+        DaemonConfig(poll_seconds=60.0, guard_profile="none", stop_grace_seconds=3.0),
         sleeper=sleeper,
+    )
+
+    daemon.start()
+    assert sleeping.wait(1.0)
+
+    stop_entered = threading.Event()
+
+    def run_stop() -> None:
+        stop_entered.set()
+        daemon.stop()
+
+    stopper = threading.Thread(target=run_stop)
+    stopper.start()
+    assert stop_entered.wait(1.0)
+    stopper.join(0.1)
+    assert stopper.is_alive()  # stop() is joining the still-sleeping loop
+
+    release.set()
+    stopper.join(3.0)
+
+    assert not stopper.is_alive()
+    assert daemon.is_running is False
+    assert slices and all(0.0 < value <= 0.25 for value in slices)
+
+
+def test_stop_between_jobs_ends_the_drain(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    for index in range(3):
+        _enqueue(store, "paper.advance", f"paper:{index}")
+    calls: list[int] = []
+    first_job = threading.Event()
+    holder: dict[str, OrchestratorDaemon] = {}
+
+    def handler(job: Job, context: JobContext) -> HandlerResult:
+        calls.append(job.id)
+        first_job.set()
+        holder["daemon"].stop()  # loop thread: flag only
+        return HandlerResult.success()
+
+    daemon = OrchestratorDaemon(
+        store,
+        {"paper.advance": handler},
+        DaemonConfig(poll_seconds=1.0, guard_profile="none", stop_grace_seconds=2.0),
+        sleeper=lambda seconds: None,
     )
     holder["daemon"] = daemon
 
     daemon.start()
-    assert slept.wait(1.0)
+    assert first_job.wait(2.0)
     daemon.stop()
 
-    assert daemon.is_running is False
-    assert calls and all(0.0 < value <= 0.25 for value in calls)
+    assert calls == [1]
+    done = store.get(1)
+    assert done is not None and done.status == "succeeded"
+    queued = [job for job in store.list_jobs() if job.status == "queued"]
+    assert len(queued) == 2
 
 
 def test_background_loop_rejects_an_in_memory_store(tmp_path: Path) -> None:
@@ -416,6 +551,50 @@ def test_status_is_json_safe_after_a_tick(tmp_path: Path) -> None:
         "last_error",
         "guard",
     }
+
+
+def test_status_reads_from_another_thread(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    _enqueue(store, "note", "n1")
+    daemon = _daemon(store, {"note": _Recorder()})
+    daemon.tick(now=T0)
+
+    payloads: list[dict[str, object]] = []
+    errors: list[BaseException] = []
+
+    def read_status() -> None:
+        try:
+            payloads.append(daemon.status().to_dict())
+        except BaseException as exc:  # noqa: BLE001 - the test reports it below
+            errors.append(exc)
+
+    reader = threading.Thread(target=read_status)
+    reader.start()
+    reader.join(5.0)
+
+    assert errors == []
+    assert payloads[0]["ticks"] == 1
+    assert payloads[0]["queue"]["total"] == 1  # type: ignore[index]
+
+
+def test_status_on_an_in_memory_store_stays_on_its_thread() -> None:
+    store = JobStore(":memory:")
+    daemon = _daemon(store, guard_profile="none")
+    errors: list[BaseException] = []
+
+    def read_status() -> None:
+        try:
+            daemon.status()
+        except BaseException as exc:  # noqa: BLE001 - the test asserts the failure
+            errors.append(exc)
+
+    reader = threading.Thread(target=read_status)
+    reader.start()
+    reader.join(5.0)
+    store.close()
+
+    assert len(errors) == 1
+    assert "same thread" in str(errors[0])
 
 
 # ------------------------------------------------------------------------ CLI
@@ -472,6 +651,157 @@ def test_cli_requires_a_mode(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     assert excinfo.value.code == 2
     assert captured.out == ""
     assert "one of the arguments" in json.loads(captured.err.strip())["error"]
+
+
+def test_cli_once_fails_when_the_tick_reports_an_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from scalping import cli
+    from scalping.orchestrator import daemon as daemon_module
+
+    def failing_tick(self: OrchestratorDaemon, *, now: object = None) -> TickResult:
+        return TickResult(
+            started_at="2026-01-01T00:00:00.000000+00:00",
+            finished_at="2026-01-01T00:00:00.000000+00:00",
+            elapsed_seconds=0.0,
+            scan=None,
+            outcomes=(),
+            error="trigger scan failed: boom",
+        )
+
+    monkeypatch.setattr(daemon_module.OrchestratorDaemon, "tick", failing_tick)
+
+    code = cli.main(
+        [
+            "orchestrator",
+            "run",
+            "--once",
+            "--profile",
+            "none",
+            "--db",
+            str(tmp_path / "orchestrator.sqlite3"),
+            "--root",
+            str(tmp_path / "data"),
+            "--runs-root",
+            str(tmp_path / "runs"),
+            "--archive-root",
+            str(tmp_path / "archive"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert captured.out == ""
+    assert "boom" in json.loads(captured.err.strip())["error"]
+
+
+def test_forever_reports_a_dead_worker_and_exits_nonzero(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from scalping import cli
+
+    class _Status:
+        def to_dict(self) -> dict[str, object]:
+            return {"running": False}
+
+    class _DeadDaemon:
+        def __init__(self) -> None:
+            self.stopped = False
+
+        def start(self) -> None:
+            return None
+
+        @property
+        def is_running(self) -> bool:
+            return False
+
+        def status(self) -> _Status:
+            return _Status()
+
+        def stop(self) -> None:
+            self.stopped = True
+
+    fake = _DeadDaemon()
+    with pytest.raises(cli._ExitCode) as excinfo:
+        cli._run_daemon_forever(fake)  # type: ignore[arg-type]
+
+    captured = capsys.readouterr()
+    lines = [json.loads(line) for line in captured.out.strip().splitlines()]
+
+    assert excinfo.value.code == 1
+    assert [line["status"] for line in lines] == ["started", "failed"]
+    assert lines[1]["detail"] == "worker exited without a stop request"
+    assert fake.stopped is True
+
+
+def test_cli_watch_dir_enqueues_a_document_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scalping import cli
+
+    docs = tmp_path / "documents"
+    docs.mkdir()
+    (docs / "note.md").write_text(
+        "# Gold momentum\n\nA falsifiable note about trend persistence.\n",
+        encoding="utf-8",
+    )
+    common = [
+        "orchestrator",
+        "run",
+        "--once",
+        "--profile",
+        "none",
+        "--db",
+        str(tmp_path / "orchestrator.sqlite3"),
+        "--root",
+        str(tmp_path / "data"),
+        "--runs-root",
+        str(tmp_path / "runs"),
+        "--archive-root",
+        str(tmp_path / "archive"),
+        "--watch-dir",
+        str(docs),
+        "--watch-kind",
+        "knowledge.ingest",
+    ]
+
+    assert cli.main(common) == 0
+    first = json.loads(capsys.readouterr().out.strip())
+    assert len(first["tick"]["scan"]["queued"]) == 1
+    assert first["tick"]["scan"]["queued"][0]["kind"] == "knowledge.ingest"
+    assert [item["job"]["kind"] for item in first["tick"]["outcomes"]] == ["knowledge.ingest"]
+
+    assert cli.main(common) == 0
+    second = json.loads(capsys.readouterr().out.strip())
+    assert second["tick"]["scan"]["queued"] == []
+    assert second["tick"]["outcomes"] == []
+
+
+def test_cli_rejects_no_scan_with_a_watch_dir(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from scalping import cli
+
+    docs = tmp_path / "documents"
+    docs.mkdir()
+    code = cli.main(
+        [
+            "orchestrator",
+            "run",
+            "--once",
+            "--profile",
+            "none",
+            "--no-scan",
+            "--watch-dir",
+            str(docs),
+            "--db",
+            str(tmp_path / "orchestrator.sqlite3"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "--no-scan" in json.loads(captured.err.strip())["error"]
 
 
 def test_cli_once_uses_the_registered_production_handlers(

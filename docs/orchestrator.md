@@ -51,9 +51,11 @@ process, not an operating-system service.
   for an experiment history and will eventually need an archive step.
 - **No API/UI.** State is queryable through `JobStore`, `Orchestrator.status()`
   and `OrchestratorDaemon.status()`; exposing it is future work.
-- **One writer at a time.** One connection per thread, mirroring the registry and
-  the Mac mini's "one heavy job" rule. Two processes are safe through
-  `BEGIN IMMEDIATE`, not fast.
+- **One daemon per database.** SQLite `BEGIN IMMEDIATE` makes claims unique, but
+  it does not provide ownership: a second daemon's `start()` recovery sees the
+  first daemon's `running` rows as interrupted, requeues them and runs them
+  twice. Run one daemon per database; an ownership/lease protocol is future
+  work.
 
 ## Daemon and scheduler (P3 slice 2)
 
@@ -72,25 +74,30 @@ no second registration table.
 | `guard_profile` | `m2_8gb` | `m2_8gb` and `exploratory` build `MeasuredResourceGuard` with the matching profile; `none` installs `AllowAllGuard` for tests/dev only. |
 | `scan_triggers` | `True` | Call `scan_once` before the drain. With no sources the scan is skipped entirely. |
 | `max_jobs_per_tick` | `10` | Cap passed to `run_until_idle`; `0` scans and enqueues but claims nothing. |
-| `stop_grace_seconds` | `5.0` | How long `stop()` joins the loop before returning. |
+| `stop_grace_seconds` | `5.0` | How long `stop()` joins the loop before returning; bounded to 0–300. |
 | `heavy_kinds` | `()` | Passed to the core's one-heavy-job rule. The CLI passes `HEAVY_HANDLER_KINDS`. |
 | `research_kinds` | `()` | Kinds the persisted `disable research` control excludes. The CLI passes dataset, discovery, paper advance and paper analyse. |
 
-An explicit `guard=` argument overrides the profile; the status snapshot still
-reports the configured `guard_profile`, so the two should agree. `none` is
-documented as a test/development profile and must not be used for an unattended
-run.
+An explicit `guard=` argument overrides the profile; status reports both the
+configured `guard_profile` and the actual guard `type`, plus
+`unmeasured: true` when `AllowAllGuard` is in use. `none` is documented as a
+test/development profile and must not be used for an unattended run.
 
 ### Tick order
 
-1. **Crash recovery, once.** The first `start()` or `tick()` calls
-   `store.recover_interrupted()` through the caller-thread orchestrator. The flag
-   is per daemon instance; a second `start()` never repeats it.
+1. **Crash recovery, once.** The first `tick()` runs
+   `store.recover_interrupted()` on the caller's connection. `start()` runs it on
+   the worker thread's own connection, before the first tick, and blocks until it
+   finishes. The flag is per daemon instance; a second `start()` never repeats
+   it.
 2. **Scan triggers.** `scan_once(orchestrator, triggers)` asks each source, goes
    through idempotent `enqueue`, acknowledges each source and writes one
    `trigger_scan` event. Dedupe is the trigger's `dedupe_key`, so two ticks that
-   see the same content produce one job.
-3. **Drain.** `run_until_idle(max_jobs_per_tick)` claims and runs due work.
+   see the same content produce one job. The daemon passes its stop flag as
+   `should_stop` to the drain, so a stop requested between jobs does not start
+   the remaining ones.
+3. **Drain.** `run_until_idle(max_jobs_per_tick, should_stop=...)` claims and
+   runs due work.
 
 Scanning and enqueueing remain allowed while the queue is paused, in safe mode
 or with research disabled. Only claims are refused, with the core's existing
@@ -112,25 +119,42 @@ A refusal writes `resource_refused` with the measured reason and calls
 The reason is in the event log, the job row's `error` and the next status
 snapshot's guard block.
 
+Deferrals are bounded: each job carries `defer_count` and `max_deferrals`
+(default 1440 = 24 h at 60 s). A successful defer increments the count; the
+refusal that would exceed the cap writes `defer_exhausted`, leaves the job
+`failed` with a reason naming the cap and leaves the claimed attempt spent. That
+makes a permanently starved job visible instead of queued forever. `JobStats`
+reports the summed `deferrals`.
+
 ### Start, stop and status
 
 `start()` is idempotent: while the thread is alive a second call returns `[]`.
-It runs recovery once, then starts a named daemon thread. The loop opens its own
-`JobStore` connection to the same file because SQLite connections are
-thread-bound; WAL lets `status()` keep reading on the caller's connection.
-`:memory:` stores are rejected by `start()` for the same reason — use `tick()`.
+It clears the stop flag *before* recovery (under the lifecycle lock), starts a
+named daemon thread and waits for that thread's recovery to finish. If `stop()`
+arrived during recovery, `start()` returns `[]` and leaves no running thread.
+Recovery exceptions are re-raised by `start()`.
 
-`stop()` sets the flag and joins for at most `stop_grace_seconds`; it never
-raises, and calling it twice or before `start()` is safe. The wait between ticks
-is sliced at 0.25 s so a 60 s poll does not delay shutdown by a minute. A handler
-already running cannot be interrupted from another thread; the loop stops after
-that `tick()` returns. Stop does not cancel the running job.
+The loop opens its own `JobStore` connection because SQLite connections are
+thread-bound; recovery and every tick use that connection. WAL lets `status()`
+read while the worker writes. `tick()` still uses the connection that created
+`store` and must be called on that thread; `start()` and `status()` do not.
+`:memory:` stores cannot cross threads, so only their creating thread may call
+`status()`, and `start()` rejects them — use `tick()`.
 
-`tick(now=...)` is synchronous, works without `start()`, and is what `--once`
-uses. `status()` returns a JSON-safe `DaemonStatus`: `running`, `paused`,
-`safe_mode`, `disabled_research`, queue counts from `JobStats`, tick count,
-processed jobs, last tick time and duration, last error, recovered-job count, and
-the guard profile with its last snapshot (never a fresh probe).
+`stop()` sets the flag before reading the thread reference and does not take the
+lifecycle lock while reading it, so a stop can win while `start()` is blocked in
+recovery. It joins for at most `stop_grace_seconds`; it never raises, and calling
+it twice or before `start()` is safe. The wait between ticks is sliced at 0.25 s
+so a 60 s poll does not delay shutdown by a minute. A handler already running
+cannot be interrupted from another thread; the loop stops after that `tick()`
+returns. Stop does not cancel the running job.
+
+`status()` returns a JSON-safe `DaemonStatus` from a short-lived
+`query_only` connection for a file-backed store: `running`, `worker_ident`,
+`paused`, `safe_mode`, `disabled_research`, queue counts from `JobStats` (with
+`deferrals`), tick count, **terminal** job count, last tick time and duration,
+last error, recovered-job count, and the guard profile/type/unmeasured flag with
+its last snapshot (never a fresh probe).
 
 ### CLI
 
@@ -141,22 +165,38 @@ uv run scalping.cli orchestrator run --once --profile m2_8gb
 # supervised loop; SIGINT/SIGTERM stop it and print a final snapshot
 uv run scalping.cli orchestrator run --forever --poll-seconds 5
 
-# tests/dev only: no measured guard
+# watch a directory: each new/changed file enqueues knowledge.ingest
+uv run scalping.cli orchestrator run --forever --watch-dir docs/research
+
+# tests/dev only: no measured guard, status says unmeasured
 uv run scalping.cli orchestrator run --once --profile none
 ```
 
 `--db` defaults to `runs/orchestrator.sqlite3`; `--root`, `--runs-root` and
 `--archive-root` feed the existing `HandlerContext` (`--root data`,
 `--runs-root runs`, `--archive-root data`, with the paper ledger at
-`<archive-root>/paper.sqlite`, matching the API default). `--forever` prints a
-`started` line and a `stopped` line; every other CLI command keeps the single
-JSON line contract.
+`<archive-root>/paper.sqlite`, matching the API default).
+
+There is no trigger by default: without `--watch-dir` the daemon scans nothing
+and the queue is filled by another process. `--watch-dir` binds one
+`FileTriggerSource`; `--watch-kind` defaults to `knowledge.ingest` and the CLI
+adapts the file payload to that handler's `document_path`. `--no-scan` is
+meaningful only in that default mode; combining it with `--watch-dir` is a CLI
+error.
+
+`--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
+store error). A job-level handler failure is a recorded job outcome and still
+exits 0. `--forever` detects a worker thread that died without a stop request,
+prints `{"status": "failed", ...}` and exits 1. A requested stop prints
+`{"status": "stopped", ...}` and exits 0. Other CLI commands keep the single JSON
+line contract; `--forever` prints `started` and then `stopped`/`failed`.
 
 ### Honest limits
 
-- Single process. A second daemon on the same database is safe through
-  `BEGIN IMMEDIATE`, but nothing coordinates two loops beyond that; one is the
-  intended deployment.
+- **One daemon per database.** `BEGIN IMMEDIATE` keeps claims unique, but there
+  is no ownership or lease. A second daemon's recovery treats the first's
+  `running` rows as interrupted, requeues them and can run them twice. Start two
+  only for an experiment you can reconcile; a lease is a future slice.
 - No OS service, no process supervision, no restart-on-crash. A supervisor or
   the operator restarts it, and recovery handles the interrupted rows.
 - Paper jobs are driven by the queue, not by a market clock; the daemon cannot
@@ -165,6 +205,8 @@ JSON line contract.
   next allocation and, on macOS, cannot see memory held by other processes.
 - Trigger sources are scanned sequentially in the calling thread; a slow hash of
   a large document delays that tick.
+- `status()` opens a connection per call. It is cheap for an operator poll, not
+  intended as a high-frequency metrics endpoint.
 
 
 ## Job lifecycle
@@ -276,9 +318,14 @@ handlers.
 After a claim and before the handler, `guard.can_start(kind)` gets a veto. A
 refusal does not fail the job and does not spend an attempt: the job is
 deferred after `guard_retry_seconds` (60 by default), `attempts` is decremented
-back, and the guard's reason is stored in `jobs.error` with `resource_refused`
-and `deferred` events. Waiting for RAM cannot exhaust a job's retry budget,
-which a retry-based refusal would. The refusal is visible, not a silent drop.
+back, `defer_count` is incremented, and the guard's reason is stored in
+`jobs.error` with `resource_refused` and `deferred` events. Waiting for RAM
+cannot exhaust a job's retry budget, which a retry-based refusal would. The
+refusal is visible, not a silent drop.
+
+A deferral is not unlimited: `max_deferrals` (default 1440) caps the wait. The
+refusal past the cap is terminal — `failed`, `defer_exhausted` event, the reason
+names the cap — so a permanently starved job cannot sit queued for weeks.
 
 ## Measured resource guard (P6 slice one)
 
@@ -419,7 +466,8 @@ so a reader can parse the reason and a human can still read it.
 | `succeeded` | store | Result document stored |
 | `failed` | store | Terminal failure with the error |
 | `retry` | store | Requeued with delay and reason |
-| `deferred` | store | Guard refusal; delay recorded, attempt refunded |
+| `deferred` | store | Guard refusal; delay and `defer_count` recorded, attempt refunded |
+| `defer_exhausted` | store | Deferral cap reached; job failed with the reason |
 | `cancelled` | store | Cancelled with previous status and reason |
 | `skipped` | store | Dependency reason stored |
 | `interrupted` / `requeued` | store | Restart recovery |
@@ -623,8 +671,10 @@ gating, dependency order, dependency failure to `skipped` (including a cascade),
 retry backoff bounds and exhaustion, permanent failures, cancel while queued and
 while running, pause/resume/safe-mode/disable-research (including persistence
 across a reopen), crash recovery with and without attempts left, one heavy job,
-guard refusal without spending an attempt, event-log completeness, and
-file-trigger dedupe across a store restart. The handler tests cover a real
+guard refusal without spending an attempt, the deferral cap turning a starved
+job terminal, the v1→v2 deferral migration, event-log completeness,
+`run_until_idle(should_stop=...)`, and file-trigger dedupe across a store
+restart. The handler tests cover a real
 ingest/index/extract round trip, checksum idempotency, dataset manifest
 reproducibility, an unknown symbol refusal, a real bounded discovery run that
 records no promotion, a no-champion NO TRADE that writes nothing, a governed
@@ -642,13 +692,18 @@ and a failed block without masking it; a bounded sample ring; JSON-safe
 payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
 job with the measured reason in its event log.
 
-The daemon tests cover: config bounds and profile selection; tick scans before it
-drains; trigger dedupe across ticks; pause and safe mode still scan and enqueue
-but claim nothing; disabled research leaves research queued while ingestion
-runs; a guard refusal defers without spending an attempt and records its reason;
-a raised heavy handler does not stop a later paper job on the next tick;
-recovery happens once and `start()` is idempotent; `stop()` is repeatable and
-returns promptly while idle (a fake sleeper, no real sleep); `:memory:` is
-rejected by `start()`; the status snapshot is JSON-safe; and the CLI `--once`
-prints one JSON line and reaches the registered production handlers.
+The daemon tests cover: config bounds and profile/type selection; tick scans
+before it drains; trigger dedupe across ticks; pause and safe mode still scan and
+enqueue but claim nothing; disabled research leaves research queued while
+ingestion runs; a guard refusal defers without spending an attempt and records
+its reason; the deferral cap fails the job after the configured refusals; a
+raised heavy handler does not stop a later paper job on the next tick; recovery
+happens once, `start()` is idempotent and keeps one worker thread; a stop during
+blocked recovery is not lost and leaves no thread; `stop()` joins the loop from
+the caller thread and slices a 60 s poll into ≤0.25 s waits; the drain stops
+between jobs; `:memory:` is rejected by `start()` and stays single-threaded for
+`status()`; `status()` is readable from another thread for a file store and is
+JSON-safe; the CLI `--once` exits 2 on a tick error but 0 on a job failure;
+`--forever` reports a dead worker with exit 1; and `--watch-dir` enqueues a
+document once and dedupes the second pass.
 

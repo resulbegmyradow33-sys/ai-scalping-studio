@@ -58,6 +58,7 @@ from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
+from scalping.orchestrator.triggers import FileTriggerSource, Trigger, TriggerSource
 from scalping.registry.gate import GateCriteria
 from scalping.serialize import metrics_payload
 
@@ -906,6 +907,46 @@ def _cmd_serve(args: argparse.Namespace) -> None:
 
 
 # --- orchestrator daemon ----------------------------------------------------
+class _WatchSource:
+    """Adapt ``FileTriggerSource`` payloads for the pipeline handlers.
+
+    ``FileTriggerSource`` describes a file (``path``, size, hash); a pipeline
+    handler expects its own payload. For ``knowledge.ingest`` the only required
+    field is ``document_path``, so the adapter maps one to the other and keeps
+    the file's content hash as the dedupe key. Any other kind receives the raw
+    file payload, and its handler must accept that shape.
+    """
+
+    def __init__(self, source: FileTriggerSource, kind: str) -> None:
+        self._source = source
+        self.kind = kind
+        self.name = source.name
+
+    def scan(self) -> list[Trigger]:
+        triggers = self._source.scan()
+        adapted: list[Trigger] = []
+        for trigger in triggers:
+            payload = (
+                {"document_path": str(Path(str(trigger.payload.get("path", ""))).resolve())}
+                if self.kind == "knowledge.ingest"
+                else dict(trigger.payload)
+            )
+            adapted.append(
+                Trigger(
+                    kind=trigger.kind,
+                    dedupe_key=trigger.dedupe_key,
+                    payload=payload,
+                    priority=trigger.priority,
+                    max_retries=trigger.max_retries,
+                    depends_on=trigger.depends_on,
+                )
+            )
+        return adapted
+
+    def seen(self, triggers: Sequence[Trigger]) -> None:
+        self._source.seen(triggers)
+
+
 def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     """Run one tick (``--once``) or a supervised loop (``--forever``)."""
     from scalping.orchestrator.core import Orchestrator
@@ -921,6 +962,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     )
     from scalping.orchestrator.store import JobStore
 
+    if args.no_scan and args.watch_dir:
+        raise CliError("--no-scan and --watch-dir cannot be combined")
     research_kinds = tuple(
         sorted(
             {
@@ -942,6 +985,17 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     )
     store = JobStore(Path(args.db))
     try:
+        triggers: tuple[TriggerSource, ...] = ()
+        if args.watch_dir:
+            try:
+                source = FileTriggerSource(
+                    Path(args.watch_dir),
+                    kind=args.watch_kind,
+                    store=store,
+                )
+            except NotADirectoryError as exc:
+                raise CliError(str(exc)) from exc
+            triggers = (_WatchSource(source, args.watch_kind),)
         registry = Orchestrator(store)
         register_default_handlers(
             registry,
@@ -951,9 +1005,11 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 archive_root=Path(args.archive_root),
             ),
         )
-        daemon = OrchestratorDaemon(store, registry, config)
+        daemon = OrchestratorDaemon(store, registry, config, triggers=triggers)
         if args.once:
             result = daemon.tick()
+            if result.error is not None:
+                raise CliError(result.error)
             _print_json({"status": daemon.status().to_dict(), "tick": result.to_dict()})
             return
         _run_daemon_forever(daemon)
@@ -962,8 +1018,9 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
 
 
 def _run_daemon_forever(daemon: OrchestratorDaemon) -> None:
-    """Start the daemon and block until SIGINT/SIGTERM; always stop it."""
+    """Start the daemon and block until SIGINT/SIGTERM or a dead worker."""
     stop = threading.Event()
+    failed = False
 
     def _request_stop(signum: int, frame: object) -> None:
         stop.set()
@@ -975,16 +1032,29 @@ def _run_daemon_forever(daemon: OrchestratorDaemon) -> None:
         daemon.start()
         _print_json({"status": "started", "daemon": daemon.status().to_dict()})
         try:
-            while not stop.wait(1.0):
-                pass
+            while not stop.is_set():
+                if not daemon.is_running:
+                    stop.set()
+                    failed = True
+                    break
+                stop.wait(1.0)
         except KeyboardInterrupt:  # pragma: no cover - signal handler normally wins
-            pass
+            stop.set()
     finally:
         try:
             daemon.stop()
         finally:
             for sig, handler in previous.items():
                 signal.signal(sig, handler)
+    if failed:
+        _print_json(
+            {
+                "status": "failed",
+                "detail": "worker exited without a stop request",
+                "daemon": daemon.status().to_dict(),
+            }
+        )
+        raise _ExitCode(1)
     _print_json({"status": "stopped", "daemon": daemon.status().to_dict()})
 
 
@@ -1342,6 +1412,16 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--stop-grace-seconds", type=float, default=5.0)
     run.add_argument(
         "--no-scan", action="store_true", help="do not call trigger sources on this run"
+    )
+    run.add_argument(
+        "--watch-dir",
+        default=None,
+        help="watch this directory with FileTriggerSource (no watcher unless given)",
+    )
+    run.add_argument(
+        "--watch-kind",
+        default="knowledge.ingest",
+        help="job kind a watched file enqueues (default knowledge.ingest)",
     )
     run.add_argument(
         "--db", default="runs/orchestrator.sqlite3", help="SQLite job queue (created when missing)"

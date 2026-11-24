@@ -43,6 +43,7 @@ from scalping.orchestrator.resources import (
 )
 from scalping.orchestrator.store import (
     BLOCKED_DEPENDENCY_STATUSES,
+    DEFAULT_MAX_DEFERRALS,
     JOB_STATUSES,
     SCHEMA_VERSION,
     TERMINAL_STATUSES,
@@ -67,6 +68,7 @@ from scalping.orchestrator.triggers import (
 __all__ = [
     "BLOCKED_DEPENDENCY_STATUSES",
     "CONTROL_EVENTS",
+    "DEFAULT_MAX_DEFERRALS",
     "EXPLORATORY_PROFILE",
     "GUARD_PROFILES",
     "JOB_STATUSES",

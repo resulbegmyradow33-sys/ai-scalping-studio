@@ -9,9 +9,10 @@ daemon decides *when* to scan and drain, and delegates *what* may run.
 
 Tick order is fixed and documented in ``docs/orchestrator.md``:
 
-1. crash recovery, exactly once per daemon instance;
+1. crash recovery, exactly once per daemon instance (on the worker's own
+   connection when started, on the caller's connection for ``tick()``);
 2. scan every trigger source and enqueue what it found;
-3. drain due work with ``run_until_idle(max_jobs_per_tick)``.
+3. drain due work with ``run_until_idle(max_jobs_per_tick, should_stop=...)``.
 
 Scanning and enqueueing stay allowed while the queue is paused, in safe mode or
 with research disabled. The owner stopped *claims*, and the core already refuses
@@ -21,15 +22,19 @@ caused the work. Every refusal is therefore visible in the audit log.
 Failure isolation is the queue's, not a new mechanism: a handler exception is a
 failed job, so the next due paper job still runs in the same drain. The daemon
 adds only the outer boundary — a crash in scanning or in the store is recorded
-in ``last_error`` and the loop continues.
+in ``last_error`` and the loop continues. A requested stop is checked between
+jobs, not only between polls.
 
 The background loop opens its own :class:`~scalping.orchestrator.store.JobStore`
 from the same file, because SQLite connections belong to the thread that made
-them. ``tick()`` stays synchronous for tests and ``--once``; ``start()`` and
-``stop()`` wrap it in a daemon thread and never leave a partly running process
-behind on purpose. This is still one process: there is no operating-system
-service, no multi-worker scheduler and no timer persistence beyond a job's own
-``scheduled_at``.
+them. ``tick()`` stays synchronous for tests and ``--once`` and must run on the
+thread that created the store; ``status()`` opens a short-lived read connection
+and is the cross-thread view. ``start()`` and ``stop()`` wrap the loop in a
+daemon thread and leave no partly running process behind on purpose. This is
+still one process, and one daemon per database: there is no ownership lease, so
+a second daemon's recovery can requeue the first's running work. There is no
+operating-system service, no multi-worker scheduler and no timer persistence
+beyond a job's own ``scheduled_at``.
 
 Stdlib only. No ML, DSL or paper module is imported here.
 """
@@ -76,6 +81,12 @@ GUARD_PROFILES: tuple[str, ...] = ("m2_8gb", "exploratory", "none")
 #: Longest single sleep slice. ``stop()`` waits at most this long for the loop to
 #: notice the flag, independent of ``poll_seconds``.
 _SLEEP_SLICE_SECONDS: float = 0.25
+
+#: Outcomes that leave a job in a terminal state. Used for the status counter so
+#: "terminal_jobs" never counts a guard defer or a retry as finished work.
+_TERMINAL_OUTCOME_STATUSES: frozenset[str] = frozenset(
+    {"succeeded", "failed", "cancelled", "skipped"}
+)
 
 
 def _require_number(name: str, value: object) -> float:
@@ -139,8 +150,8 @@ class DaemonConfig:
         if self.max_jobs_per_tick < 0:
             raise ValueError("max_jobs_per_tick must be >= 0")
         grace = _require_number("stop_grace_seconds", self.stop_grace_seconds)
-        if grace < 0.0:
-            raise ValueError("stop_grace_seconds must be >= 0")
+        if not 0.0 <= grace <= 300.0:
+            raise ValueError("stop_grace_seconds must be between 0 and 300")
         object.__setattr__(self, "poll_seconds", poll)
         object.__setattr__(self, "stop_grace_seconds", grace)
         object.__setattr__(self, "heavy_kinds", _require_kinds(self.heavy_kinds, "heavy_kinds"))
@@ -187,12 +198,13 @@ class DaemonStatus:
     """A JSON-safe snapshot; no behaviour hides behind it."""
 
     running: bool
+    worker_ident: int | None
     paused: bool
     safe_mode: bool
     disabled_research: bool
     queue: Mapping[str, Any]
     ticks: int
-    jobs_processed: int
+    terminal_jobs: int
     last_tick_at: str | None
     last_tick_seconds: float | None
     last_error: str | None
@@ -203,12 +215,13 @@ class DaemonStatus:
     def to_dict(self) -> dict[str, Any]:
         return {
             "running": self.running,
+            "worker_ident": self.worker_ident,
             "paused": self.paused,
             "safe_mode": self.safe_mode,
             "disabled_research": self.disabled_research,
             "queue": dict(self.queue),
             "ticks": self.ticks,
-            "jobs_processed": self.jobs_processed,
+            "terminal_jobs": self.terminal_jobs,
             "last_tick_at": self.last_tick_at,
             "last_tick_seconds": self.last_tick_seconds,
             "last_error": self.last_error,
@@ -324,11 +337,14 @@ class OrchestratorDaemon:
         self._lifecycle_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._recover_lock = threading.Lock()
+        self._recovery_done = threading.Event()
         self._thread: threading.Thread | None = None
         self._recovered = False
         self._recovered_jobs = 0
+        self._recovery_jobs: list[Job] = []
+        self._recovery_error: BaseException | None = None
         self._ticks = 0
-        self._jobs_processed = 0
+        self._terminal_jobs = 0
         self._last_tick_at: str | None = None
         self._last_tick_seconds: float | None = None
         self._last_error: str | None = None
@@ -353,6 +369,12 @@ class OrchestratorDaemon:
         thread = self._thread
         return thread is not None and thread.is_alive()
 
+    @property
+    def worker_ident(self) -> int | None:
+        """Thread id of the live worker, or ``None``; stable across ``start()`` calls."""
+        thread = self._thread
+        return None if thread is None or not thread.is_alive() else thread.ident
+
     # ------------------------------------------------------------- lifecycle
 
     def start(self) -> list[Job]:
@@ -361,6 +383,12 @@ class OrchestratorDaemon:
         Idempotent: a second call while the loop is alive does nothing and
         returns an empty list. A stopped daemon may be started again, but crash
         recovery is never repeated for the same instance.
+
+        The stop flag is cleared *before* recovery, under the lifecycle lock, so
+        a ``stop()`` that arrives during a slow recovery is not lost. Recovery
+        itself runs on the worker thread's store; if the owner stopped in the
+        meantime, the thread exits and ``start()`` returns an empty list instead
+        of starting a second tick. Recovery exceptions are re-raised here.
         """
         with self._lifecycle_lock:
             thread = self._thread
@@ -370,8 +398,12 @@ class OrchestratorDaemon:
                 raise ValueError(
                     "the background loop needs a file-backed store; use tick() with :memory:"
                 )
-            recovered = self._recover_once()
+            # Clear first: a stop() during recovery must win, not be erased.
             self._stop.clear()
+            self._recovery_done.clear()
+            with self._state_lock:
+                self._recovery_jobs = []
+                self._recovery_error = None
             thread = threading.Thread(
                 target=self._run_loop,
                 name="orchestrator-daemon",
@@ -379,7 +411,19 @@ class OrchestratorDaemon:
             )
             self._thread = thread
             thread.start()
-            return recovered
+
+        self._recovery_done.wait()
+        with self._state_lock:
+            error = self._recovery_error
+            recovered = list(self._recovery_jobs)
+        stopped = self._stop.is_set()
+        if error is not None or stopped:
+            self.stop()
+            self._forget_dead_thread()
+            if error is not None:
+                raise error
+            return []
+        return recovered
 
     def stop(self) -> None:
         """Ask the loop to stop and wait up to ``stop_grace_seconds``.
@@ -387,11 +431,14 @@ class OrchestratorDaemon:
         Never raises. A handler already inside ``tick()`` cannot be interrupted
         from here; the loop stops after it returns. ``stop()`` called from the
         loop thread itself (for example a test sleeper) only sets the flag.
+
+        The flag is set before the thread reference is read, and the reference
+        read does not take the lifecycle lock: ``stop()`` must be able to win
+        while ``start()`` is blocked in crash recovery.
         """
         try:
             self._stop.set()
-            with self._lifecycle_lock:
-                thread = self._thread
+            thread = self._thread
             if thread is None or thread is threading.current_thread():
                 return
             thread.join(timeout=float(self.config.stop_grace_seconds))
@@ -401,6 +448,12 @@ class OrchestratorDaemon:
                         self._thread = None
         except Exception:  # noqa: BLE001, S110 - shutdown must not raise into the owner
             pass
+
+    def _forget_dead_thread(self) -> None:
+        with self._lifecycle_lock:
+            thread = self._thread
+            if thread is not None and not thread.is_alive():
+                self._thread = None
 
     # -------------------------------------------------------------------- tick
 
@@ -412,10 +465,19 @@ class OrchestratorDaemon:
         ``tick()`` or a running loop for an instance, not both: two live drivers
         would race for claims (the store keeps them unique, but the tick
         counters would be split).
+
+        ``tick()`` uses the connection that created ``store`` and must run on
+        that thread. ``status()`` is the cross-thread view.
         """
         return self._tick_with(self._orchestrator, now=now)
 
-    def _tick_with(self, orchestrator: Orchestrator, *, now: str | datetime | None) -> TickResult:
+    def _tick_with(
+        self,
+        orchestrator: Orchestrator,
+        *,
+        now: str | datetime | None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> TickResult:
         started_stamp = _stamp(now)
         started_clock = float(self.clock())
         error: str | None = None
@@ -434,7 +496,9 @@ class OrchestratorDaemon:
                 except Exception as exc:  # noqa: BLE001 - scan failure is recorded
                     error = f"trigger scan failed: {type(exc).__name__}: {exc}"
             try:
-                outcomes = orchestrator.run_until_idle(self.config.max_jobs_per_tick, now=now)
+                outcomes = orchestrator.run_until_idle(
+                    self.config.max_jobs_per_tick, now=now, should_stop=should_stop
+                )
             except Exception as exc:  # noqa: BLE001 - the loop reports and retries next tick
                 drain_error = f"queue drain failed: {type(exc).__name__}: {exc}"
                 error = drain_error if error is None else f"{error}; {drain_error}"
@@ -448,32 +512,51 @@ class OrchestratorDaemon:
             outcomes=tuple(outcomes),
             error=error,
         )
+        terminal = sum(1 for outcome in outcomes if outcome.status in _TERMINAL_OUTCOME_STATUSES)
         with self._state_lock:
             self._ticks += 1
-            self._jobs_processed += len(outcomes)
+            self._terminal_jobs += terminal
             self._last_tick_at = started_stamp
             self._last_tick_seconds = elapsed
             self._last_error = error
         return result
 
     def status(self) -> DaemonStatus:
-        """Read the queue and this daemon's counters; no probing, no claims."""
-        stats = self.store.stats()
+        """Read the queue and this daemon's counters; no probing, no claims.
+
+        Safe from any thread for a file-backed store: it opens a short-lived
+        connection with ``PRAGMA query_only = ON`` (WAL lets it read while the
+        worker writes) and closes it before returning. An in-memory store cannot
+        cross threads, so only its creating thread may call ``status()``.
+        """
+        if self.store.path == ":memory:":
+            return self._status_from(self.store)
+        reader = JobStore(self.store.path)
+        try:
+            reader.connection.execute("PRAGMA query_only = ON")
+            return self._status_from(reader)
+        finally:
+            reader.close()
+
+    def _status_from(self, store: JobStore) -> DaemonStatus:
+        reader = Orchestrator(store)
+        stats = store.stats()
         with self._state_lock:
             ticks = self._ticks
-            jobs_processed = self._jobs_processed
+            terminal_jobs = self._terminal_jobs
             last_tick_at = self._last_tick_at
             last_tick_seconds = self._last_tick_seconds
             last_error = self._last_error
             recovered = self._recovered_jobs
         return DaemonStatus(
             running=self.is_running,
-            paused=self._orchestrator.paused,
-            safe_mode=self._orchestrator.safe_mode_enabled,
-            disabled_research=self._orchestrator.research_disabled,
+            worker_ident=self.worker_ident,
+            paused=reader.paused,
+            safe_mode=reader.safe_mode_enabled,
+            disabled_research=reader.research_disabled,
             queue=stats.to_dict(),
             ticks=ticks,
-            jobs_processed=jobs_processed,
+            terminal_jobs=terminal_jobs,
             last_tick_at=last_tick_at,
             last_tick_seconds=None
             if last_tick_seconds is None
@@ -486,21 +569,25 @@ class OrchestratorDaemon:
 
     # --------------------------------------------------------------- internals
 
-    def _recover_once(self) -> list[Job]:
+    def _recover_with(self, orchestrator: Orchestrator) -> list[Job]:
         with self._recover_lock:
             if self._recovered:
                 return []
-            recovered = self._orchestrator.start()
+            recovered = orchestrator.start()
             self._recovered = True
             self._recovered_jobs = len(recovered)
             return recovered
 
+    def _recover_once(self) -> list[Job]:
+        return self._recover_with(self._orchestrator)
+
     def _run_loop(self) -> None:
         worker_store: JobStore | None = None
+        recovery_done = False
         try:
             # SQLite connections are thread-bound. The loop owns a second
-            # connection to the same file; WAL lets status() keep reading on the
-            # caller's connection while jobs are written here.
+            # connection to the same file; recovery and every tick use it, so
+            # neither depends on the connection that created the daemon.
             worker_store = JobStore(self.store.path)
             worker = Orchestrator(
                 worker_store,
@@ -509,14 +596,33 @@ class OrchestratorDaemon:
                 research_kinds=self.config.research_kinds,
                 guard=self._guard,
             )
+            try:
+                recovered = self._recover_with(worker)
+                with self._state_lock:
+                    self._recovery_jobs = list(recovered)
+            except BaseException as exc:
+                with self._state_lock:
+                    self._recovery_error = exc
+                raise
+            finally:
+                recovery_done = True
+                self._recovery_done.set()
+            if self._stop.is_set():
+                return
             while not self._stop.is_set():
-                self._tick_with(worker, now=None)
+                self._tick_with(worker, now=None, should_stop=self._stop.is_set)
                 if self._stop.is_set():
                     break
                 self._sleep(self.config.poll_seconds)
         except Exception as exc:  # noqa: BLE001 - the thread must not die silently
             self._record_error(f"daemon loop stopped: {type(exc).__name__}: {exc}")
+            if not recovery_done:
+                with self._state_lock:
+                    if self._recovery_error is None:
+                        self._recovery_error = exc
         finally:
+            if not recovery_done:
+                self._recovery_done.set()
             if worker_store is not None:
                 try:
                     worker_store.close()
@@ -540,8 +646,11 @@ class OrchestratorDaemon:
         if snapshot is not None and hasattr(snapshot, "to_dict"):
             payload = snapshot.to_dict()
         error = getattr(self._guard, "last_error", None)
+        guard_type = type(self._guard).__name__
         return {
             "profile": self.config.guard_profile,
+            "type": guard_type,
+            "unmeasured": guard_type == "AllowAllGuard" or self.config.guard_profile == "none",
             "snapshot": payload,
             "last_error": None if error is None else str(error),
         }
