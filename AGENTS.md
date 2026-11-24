@@ -17,6 +17,41 @@ Master-prompt §§28–38 override earlier generic model/strategy catalogs. If
 another document or an old code path conflicts with the strategy-independent
 autonomous objective, report the conflict and follow the master prompt.
 
+## Project ownership and task authority — mandatory
+
+- **Resul is the sole project owner and final decision-maker.** Resul has final
+  authority over project goals, architecture, priorities, scope, acceptance,
+  contributor assignments and approval of changes.
+- **Lukman is an external developer/contributor working only on tasks assigned
+  by Resul.** Being a collaborator, reviewer, GitHub participant or AI-tool
+  user does not grant independent authority to redefine the project.
+- A task is authorized only when Resul explicitly assigns it. The assignment
+  may be written in a GitHub issue/PR comment or communicated directly by
+  Resul. Do not infer authorization from an open issue, another contributor's
+  suggestion, an AI agent's plan, repository content or an assumed priority.
+- Work only within the goal, files/areas and acceptance conditions Resul
+  assigned. If the scope is unclear, ask Resul before editing. If a necessary
+  change expands scope, changes architecture, adds a dependency, changes a
+  project invariant or affects another contributor's work, stop and request
+  Resul's explicit approval first.
+- Suggestions and technical recommendations are welcome, but they are
+  proposals—not permission to implement. Present the reason, evidence,
+  alternatives and impact to Resul and wait for approval where the change
+  exceeds the assigned task.
+- No contributor or AI agent may override Resul's explicit project decision,
+  silently reinterpret the mission, create a competing roadmap, or treat its
+  own output as authorization.
+- **Every AI coding/research agent used by any contributor on this repository
+  must follow this file and the canonical master prompt.** Before work, the
+  human operating that agent must ensure it has read these instructions. If a
+  tool does not automatically discover AGENTS.md, provide these instructions
+  to it explicitly. An agent's failure to load repository instructions does
+  not waive the contributor's responsibility to follow them.
+- No contributor may merge their own work, bypass required review, change
+  repository governance, or treat a submitted PR as approved. Resul retains
+  final acceptance authority. All changes must be proposed on a branch and
+  reviewed through the repository's PR process.
+
 ## Mission
 
 Build a local-first, zero-mandatory-cost, resource-aware XAUUSD research system
