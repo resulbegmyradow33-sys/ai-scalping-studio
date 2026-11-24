@@ -154,7 +154,9 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             code_version="test",
             seed=0,
         )
-        archive.promote(record.candidate_id, scope=scope, reason="unit test promotion")
+        # Seeding only: the production path is promote_evidence; this test does not
+        # exercise the promotion policy, so the exploratory metric path is used.
+        archive.promote_exploratory(record.candidate_id, scope=scope, reason="unit test promotion")
         champion = archive.champion(scope)
     assert champion is not None and champion.candidate.candidate_id == spec.canonical_hash()
     return spec
