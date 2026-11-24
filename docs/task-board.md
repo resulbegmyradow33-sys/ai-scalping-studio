@@ -290,7 +290,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı ve OCR yok.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
 - [ ] Classify claims, concepts, examples, opinions and empirical observations.
-- [ ] PARTIAL: hypothesis kaydı ve kaynak bağı var; otomatik çıkarım yok.
+- [x] Deterministik hipotez çıkarımı: cümle kalıplarından `proposed` taslak + kaynak bağı (LLM yok).
 - [x] Link each hypothesis to source passages and experiment outcomes.
 - [ ] Route hypotheses to strategy discovery; never treat prose as proven alpha.
 - [ ] Ingest completed backtests, paper logs and broker exports as feedback.
