@@ -25,6 +25,7 @@ from scalping.api.ml_runner import MLRunner
 from scalping.api.routes import router
 from scalping.api.routes_autonomy import router as autonomy_router
 from scalping.api.routes_ml import router as ml_router
+from scalping.api.routes_orchestrator import router as orchestrator_router
 from scalping.api.routes_paper import router as paper_router
 from scalping.api.runner import SimulationRunner
 from scalping.api.train_runner import TrainRunner
@@ -136,6 +137,7 @@ def create_app(
     app.include_router(ml_router)
     app.include_router(paper_router)
     app.include_router(autonomy_router)
+    app.include_router(orchestrator_router)
     return app
 
 
