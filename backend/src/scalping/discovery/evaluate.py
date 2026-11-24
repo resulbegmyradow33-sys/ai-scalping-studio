@@ -78,7 +78,7 @@ from scalping.strategy.dsl import (
 )
 from scalping.types import Side, Trade
 
-__all__ = ["DslEvaluator"]
+__all__ = ["DslEvaluator", "SimulationResult"]
 
 #: Dataset id tokens that name the untouched test/holdout split. Any one of
 #: them makes the id unusable for search, whatever the prefix says.
@@ -106,6 +106,21 @@ class _Run:
 
     metrics: Metrics
     trades: list[Trade]
+    equity: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class SimulationResult:
+    """One simulator pass with the raw rows a caller needs for deeper evidence.
+
+    ``evaluate`` only needs the metrics, but fold-level evidence also needs the
+    closed trades (R multiples, entry timestamps for regime attribution) and the
+    equity path. ``trades`` and ``equity`` are the exact objects the summary was
+    computed from; nothing is re-priced or re-simulated.
+    """
+
+    metrics: Metrics
+    trades: tuple[Trade, ...]
     equity: np.ndarray
 
 
@@ -302,8 +317,8 @@ class DslEvaluator:
 
         spec = self._spec(candidate)
         policy = compile_policy(spec)
-        run = self._simulate(policy, spec)
-        metrics = _metric_dict(run.metrics, bars=int(run.equity.size))
+        base = self._simulate_spec(spec, policy, 1.0)
+        metrics = _metric_dict(base.metrics, bars=int(base.equity.size))
 
         stress: dict[str, dict[str, float]] = {}
         for multiplier in self._stress:
@@ -311,12 +326,7 @@ class DslEvaluator:
             if multiplier == 1.0:
                 row = dict(metrics)
             else:
-                stressed = self._simulate(
-                    policy,
-                    spec,
-                    features=_stressed_features(self._features, multiplier),
-                    settings=_stressed_settings(self._settings, multiplier),
-                )
+                stressed = self._simulate_spec(spec, policy, multiplier)
                 row = _metric_dict(stressed.metrics, bars=int(stressed.equity.size))
             stress[label] = {"net_profit": row["net_profit"]}
             for name, value in row.items():
@@ -327,6 +337,48 @@ class DslEvaluator:
             metrics=metrics,
             accepted=decision.accepted,
             rejections=decision.rejections,
+        )
+
+    def simulate(
+        self,
+        candidate: Candidate,
+        *,
+        multiplier: float = 1.0,
+    ) -> SimulationResult:
+        """Run one pass and return its metrics, closed trades and equity path.
+
+        ``multiplier`` scales spread, slippage and commission exactly like a
+        cost-stress run in :meth:`evaluate`; ``1.0`` is the base run. The frame
+        is never mutated: a stressed pass reads a shallow copy with only
+        ``spread`` scaled. This is the same arithmetic :meth:`evaluate` uses,
+        exposed so a fold-level evidence builder can attribute trades to a
+        regime and bootstrap their R multiples.
+        """
+        spec = self._spec(candidate)
+        return self._simulate_spec(spec, compile_policy(spec), multiplier)
+
+    def _simulate_spec(
+        self,
+        spec: StrategySpec,
+        policy: Policy,
+        multiplier: float,
+    ) -> SimulationResult:
+        """Shared pass used by :meth:`evaluate` and :meth:`simulate`."""
+        if isinstance(multiplier, bool) or not isinstance(multiplier, (int, float)):
+            raise TypeError(f"multiplier must be a number, got {type(multiplier).__name__}")
+        number = float(multiplier)
+        if not math.isfinite(number) or number <= 0.0:
+            raise ValueError(f"multiplier must be finite and > 0, got {multiplier!r}")
+        run = self._simulate(
+            policy,
+            spec,
+            features=_stressed_features(self._features, number),
+            settings=_stressed_settings(self._settings, number),
+        )
+        return SimulationResult(
+            metrics=run.metrics,
+            trades=tuple(run.trades),
+            equity=run.equity,
         )
 
     # --- guards ------------------------------------------------------------
