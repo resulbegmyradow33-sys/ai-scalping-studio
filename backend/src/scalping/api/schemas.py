@@ -38,6 +38,7 @@ __all__ = [
     "BanditWeight",
     "CalibrateRequest",
     "ControlRequest",
+    "DataQualityResponse",
     "DataStatusResponse",
     "DownloadRequest",
     "DownloadResponse",
@@ -225,6 +226,37 @@ class DataStatusResponse(BaseModel):
     last_ts: str | None
     providers: list[str]
     provenance: dict[str, Any] | None = None
+
+
+class DataQualityResponse(BaseModel):
+    """Read-only quality report for one stored slice.
+
+    Violation counts are ``None`` when the check did not run: every count is
+    null for an unconfigured slice, and ``outliers`` is null when the slice is
+    shorter than the robust-z floor or the outlier pass was skipped. A zero
+    therefore means "checked and clean", never "not checked".
+    """
+
+    symbol: str
+    timeframe: str
+    configured: bool
+    status: Literal["ok", "warn", "fail"]
+    status_rule: str
+    status_detail: str
+    rows: int
+    first_ts: str | None
+    last_ts: str | None
+    duplicates: int | None
+    gaps: int | None
+    ohlc_violations: int | None
+    crossed_quotes: int | None
+    negative_spread: int | None
+    negative_volume: int | None
+    outliers: int | None
+    outliers_checked: bool
+    provenance: dict[str, Any] | None
+    thresholds: dict[str, Any]
+    issues: list[dict[str, Any]]
 
 
 class DownloadRequest(BaseModel):

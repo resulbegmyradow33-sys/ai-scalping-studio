@@ -268,6 +268,60 @@ API:
 curl 'http://127.0.0.1:8000/api/data/validate?symbol=XAUUSD&timeframe=H1'
 ```
 
+### Quality report API
+
+`GET /api/data/quality?symbol=&timeframe=` is a read-only view over the same
+validator. It adds no checks; it maps validator issue codes onto one stable
+report for a dashboard or a data gate.
+
+`GET /api/data/quality?symbol=XAUUSD&timeframe=M1&include_outliers=true`
+
+| Field | Source |
+|---|---|
+| `rows`, `first_ts`, `last_ts` | the validated frame |
+| `duplicates` | `duplicate_timestamps` issue count |
+| `gaps` | `time_gaps` issue count |
+| `ohlc_violations` | `ohlc_inconsistent` issue count |
+| `crossed_quotes` | `crossed_quotes` issue count |
+| `negative_spread` | `negative_spread` issue count |
+| `negative_volume` | `negative_volume` issue count |
+| `outliers` | `price_outliers` + `volume_outliers` counts |
+| `provenance` | the `_meta/<symbol>/<timeframe>.json` sidecar, verbatim |
+| `issues` | every validator issue (code, severity, count, detail, ts sample) |
+| `thresholds` | gap and robust-z settings the run actually used |
+
+Status thresholds:
+
+| Status | Rule |
+|---|---|
+| `ok` | no error or warning issue, and a provenance sidecar exists |
+| `warn` | no error, but a warning issue (`time_gaps`, `price_outliers`, `volume_outliers`) or no sidecar (`provenance_missing`) |
+| `fail` | any error-severity issue; `status_rule` names the first one |
+
+`status_rule` is the issue code that decided the status and `status_detail` is
+its validator detail. The thresholds are deliberately the validator's:
+
+- a gap is an adjacent diff wider than `max(10 min, one bar)`, so an H1 slice is
+  not reported as gap-ridden for its normal 60-minute spacing; weekend and
+  holiday closures still count as gaps. `/api/data/validate` keeps the
+  validator's 10-minute default, so the two endpoints can report different gap
+  counts on a higher timeframe; `thresholds` states what this report used;
+- outliers are log-return / `log1p(volume)` values beyond `8` robust sigma
+  (`1.4826 * MAD`, std fallback), computed only when the slice has at least
+  `30` rows.
+
+The report never invents a zero. An unconfigured slice returns `200` with
+`configured: false`, `rows: 0`, null counts, `status: "fail"` and
+`status_rule: "store_empty"`. On a configured slice, `outliers` is null (not
+zero) when the slice is shorter than the robust-z floor or when
+`include_outliers=false` skipped the pass; `outliers_checked` says which.
+Likewise, a registered symbol with no bars is not a 422: only an unregistered
+symbol or timeframe is, because the request itself is then invalid.
+
+The endpoint reads the whole stored slice, like `/api/data/validate`, and never
+writes, repairs or backfills. `include_outliers=false` is the escape hatch for
+a large store; it skips only the O(n) robust-z pass.
+
 ## Provenance
 
 `scalping/data/provenance.py` writes a sidecar:
@@ -392,6 +446,7 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 | `GET /api/timeframes` | supported bar sizes and their resample rules |
 | `GET /api/data/status?symbol&timeframe` | rows, span, providers, provenance |
 | `GET /api/data/validate?symbol&timeframe` | structural report |
+| `GET /api/data/quality?symbol&timeframe&include_outliers` | read-only quality report with status and provenance |
 | `POST /api/data/download` | synthetic/CSV/Dukascopy import; CSV names a file in `<data_root>/imports` |
 
 ## Current limits
@@ -399,7 +454,19 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 - Real providers exist only for XAUUSD/XAGUSD (Dukascopy) and local CSV/JSON.
 - Tick data is aggregated, not queried tick-by-tick from the store.
 - No Level-2 order-book data, so DeepLOB/order-book models remain unavailable.
-- Validation is structural; statistical outliers and cross-source reconciliation
-  are not implemented yet.
+- The quality report is a view over the existing validator: structural checks
+  plus robust-z outliers on log returns and `log1p(volume)`. There is no
+  statistical anomaly model beyond that, no regime-conditioned baseline, and no
+  cross-source reconciliation in the endpoint (the function exists in code but
+  needs a second frame to compare).
+- Quality checks read and sort the whole slice in memory, like
+  `/api/data/validate`. A long M1 history can skip the outlier pass with
+  `include_outliers=false`, but the frame is still loaded; streaming validation
+  is not implemented.
+- Gap detection is session-unaware: a weekend or holiday closure counts as a
+  gap, so a multi-day slice normally reports `warn` even when every bar is well
+  formed.
+- Provenance is a JSON sidecar with a content checksum, not a signature: it
+  detects a changed frame, not who produced it.
 - Dataset versioning/checksums are recorded per dataset, but the Phase 3
   train/validation/test manifests are not built.
