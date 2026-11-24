@@ -3,7 +3,7 @@
 ## Scope
 
 Repository: resulbegmyradow33-sys/ai-scalping-studio  
-Audited ref: main at 22cecdf5e2c6634b59433925b836bda6dea33199  
+Audited code baseline: main at 22cecdf5e2c6634b59433925b836bda6dea33199.\nDocumentation update: main advanced to e90121aa844e0665ac448e3f9986e87631bed56f after #109 and #105 merged on 2026-11-24; current PR state below is refreshed to that point.  
 Default branch: protected main. Repository tree: 397 entries.
 
 This is a source/document/PR/branch/CI audit. It is not a local execution of
@@ -32,8 +32,9 @@ legacy rule path remains the current panel runtime.
 | #106 | Merged to main | Deterministic source-linked hypothesis drafts from text patterns |
 | #108 | Merged to main | Risk/session gates exposed through action masks and enforced in evaluation |
 | #107 | Open; 3 commits behind/diverged | Sentence-classification heuristics; rebase required after #106 merged |
-| #109 | Open; 2 commits behind/diverged | Champion history/provider/rollback; PR explicitly says validation-only, no OOS/walk-forward |
-| #105 | Open; 3 commits behind/diverged | Transformer benchmark/evaluator; useful but non-blocking for autonomy |
+| #109 | Merged to main | Champion history/provider/rollback; the PR explicitly says validation-only metrics and no OOS/walk-forward |
+| #105 | Merged to main | Transformer benchmark/evaluator round-trip; useful research infrastructure, not a trading edge |
+| #107 | Open; still based on pre-#109 main and stacked on #106 | Sentence-classification heuristics; must rebase before merge |
 
 The latest mainline CI/CodeQL/Dependency Review records observed for #108 were
 successful. PR descriptions report targeted tests passing. These prove code
@@ -116,9 +117,10 @@ candidates in exploratory search mode. This must never be a production
 promotion policy. Promotion must require a named, versioned, non-empty policy
 and complete evidence; missing OOS, cost, sample or regime data must reject.
 
-PR #109 adds champion governance and rollback but its own description says
-metrics are validation-only, with no OOS/walk-forward. It is not a production
-trading promotion gate. A metric-only strict comparison is insufficient.
+PR #109 is now merged and adds champion governance and rollback, but its own
+description says metrics are validation-only, with no OOS/walk-forward. It is
+not yet a production trading promotion gate. A metric-only strict comparison
+is insufficient.
 
 ### C. No closed autonomous orchestration — BLOCKING
 
