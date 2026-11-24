@@ -159,7 +159,7 @@ least one cost-stress multiplier above 1, and a selection-fold share in `[0, 1]`
 | `max_complexity` | `40` | structural node cap |
 | `max_trials` | `500` | caps the candidate's trial count and the search budget |
 | `min_improvement_r` | `0.05` | a challenger must improve on the champion by at least this much |
-| `require_locked_oos` | `False` | the bundle has no locked-OOS section yet; `True` rejects everything until it does |
+| `require_locked_oos` | `False` | `True` requires the `locked_oos` section produced by the one-shot holdout protocol; the default policy leaves it off |
 | `max_selection_fold_share` | `0.4` | at most 40% of folds may overlap the validation/selection window; `0` disables the check |
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
@@ -251,8 +251,8 @@ Acceptance is **policy compliance**, not proof of an edge. The bundle contains
 historical simulation evidence; a policy pass says the measured sample, stability,
 cost stress, interval, complexity and search exposure cleared the checks this
 project chose. None of that predicts future profitability, and none of it
-replaces the still-missing locked final OOS evaluation. The identity now includes
-the dataset checksum and the execution-settings digest, so a bundle built with
+replaces the separate one-shot locked final OOS evaluation. The identity now
+includes the dataset checksum and the execution-settings digest, so a bundle built with
 different costs cannot be promoted as if it were the same experiment, and the
 selection-fold cap limits — but does not remove — the fact that the search saw the
 validation slice.
@@ -326,8 +326,10 @@ anything by themselves.
 - Scheduler and job cancellation, one-heavy-job enforcement, RAM budget.
 - Champion-vs-candidate metric comparison inside the *model* gate; the strategy
   counterpart is the discovery promotion policy (previous section).
-- A locked final OOS section in the evidence bundle. `require_locked_oos=True`
-  rejects until it exists; producing it is the next evidence slice.
+- A locked final OOS section is now producible by
+  `scalping.discovery.holdout` (`attach_holdout`), but the protocol is not yet
+  wired into promotion/orchestration and has not been spent on real data. The
+  default policy still leaves `require_locked_oos=False`.
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels

@@ -224,13 +224,117 @@ later extension, not silently assumed.
 | `schema_mismatch` | the bundle schema version is not the current one |
 | `checksum_mismatch` / `missing_section` | a bundle was edited or is incomplete |
 
+## Locked final holdout (one-shot)
+
+`scalping.discovery.holdout` turns the final test split into a spend-once
+resource. The protocol is deliberately separate from search and from the
+promotion policy: search never sees test rows, the policy decides whether a
+candidate deserves a holdout, and this module records the one time that
+decision is acted on.
+
+### Ledger and identity
+
+`HoldoutLedger(path)` is a small SQLite ledger (WAL, foreign keys, schema
+version, `busy_timeout`, `synchronous = NORMAL`, matching the discovery
+archive). Two tables matter:
+
+| Table | Purpose |
+|---|---|
+| `holdouts` | one row per `(dataset_id, dataset_checksum)`, with `status` (`sealed`/`spent`), the sealed `spec_hash`, `symbol`, `timeframe`, `code_version`, `settings_digest`, the unlocking `policy_id`/`policy_version`/`evidence_checksum`, `spent_at`, and the immutable `result_json`/`result_checksum`. |
+| `access_log` | append-only rows with timestamp, action (`seal`/`unlock`/`evaluate`), outcome (`granted`/`refused`), dataset identity, actor, reason and detail. SQLite triggers reject `UPDATE` and `DELETE`, so a refusal cannot be quietly erased. |
+
+A `HoldoutSpec` carries the identity that is sealed. A new independent dataset
+version/checksum is a new key and therefore a new seal. You cannot re-seal a
+spent `(dataset_id, dataset_checksum)` for a different spec: the same data
+build is the same holdout.
+
+### Protocol
+
+1. **Seal.** `ledger.seal(HoldoutSpec(...))` records the identity while the test
+   rows remain untouched. Re-sealing the same identity is idempotent; a
+   conflicting identity for the same dataset build is refused.
+2. **Unlock.** `ledger.unlock(spec, decision=..., policy=...)` requires an
+   accepted `PromotionDecision` from the supplied policy version. The decision's
+   dataset id/checksum, spec hash, code version and settings digest must match
+   the sealed identity. A rejected decision, a mismatched identity or a policy
+   version mismatch leaves the row `sealed`. The transition `sealed -> spent`
+   is one conditional `UPDATE`, so concurrent unlock attempts produce exactly
+   one winner. A second unlock for the same `(dataset_id, dataset_checksum)`
+   raises `HoldoutSpent`, even when it names a different spec.
+3. **Evaluate once.** `evaluate_holdout(features_or_bundle, spec, config,
+   ledger=..., unlock_token=...)` validates the single-use token, claims the one
+   evaluation slot, slices the manifest's final test rows, and runs the existing
+   `DslEvaluator` with the configured costs and stress multipliers. The result
+   records trades, net profit, profit factor, win rate, expectancy in R, total
+   R, max drawdown, per-regime rows, per-stress rows and iid bootstrap intervals.
+   It is written to `holdouts.result_json` in the same transaction that clears
+   the token. Re-running the same token, or the same holdout with any other
+   token, raises `holdout_result_exists`; the result is never recomputed.
+4. **Verify.** `verify_holdout_result(result, evidence)` re-derives the result
+   checksum and checks the dataset id/checksum, spec hash, code version,
+   settings digest, symbol and timeframe against the evidence identity.
+5. **Attach.** `attach_holdout(evidence, result)` returns a **new** immutable
+   `CandidateEvidence` with a `locked_oos` section; the input bundle is not
+   mutated. The section is what `require_locked_oos=True` recognises. Attaching
+   the same result twice is idempotent, and a result unlocked by a different
+   evidence checksum cannot be attached.
+
+Nothing reads the test rows before unlock. A refused unlock never receives a
+feature frame; `evaluate_holdout` validates the token and claims the evaluation
+before slicing. If the process dies after the claim but before the result is
+stored, the holdout stays `spent` with no result. That is the one-shot rule:
+losing an evaluation is safer than silently repeating it.
+
+### Refusal codes
+
+`HoldoutError` carries a stable `code`. `HoldoutSpent` is the specific
+already-spent refusal.
+
+| Code | Meaning |
+|---|---|
+| `holdout_not_sealed` | no sealed row exists for this dataset build |
+| `holdout_conflict` | a different identity is already sealed for the same dataset build |
+| `decision_rejected` | the promotion decision was not accepted |
+| `decision_policy_mismatch` | the decision's policy id/version is not the supplied policy |
+| `decision_identity_mismatch` | the decision's dataset/spec/code/settings identity differs from the seal |
+| `holdout_identity_mismatch` | the requested spec/code/settings differs from the sealed row |
+| `holdout_spent` | the dataset build already consumed its one evaluation |
+| `holdout_invalid_token` | the token is unknown, belongs elsewhere or was already consumed |
+| `holdout_evaluation_in_progress` | another caller claimed the evaluation slot |
+| `holdout_result_exists` | a result is already stored and cannot be recomputed |
+| `holdout_evaluation_failed` | the one simulation failed after the slot was claimed |
+| `non_finite_holdout` | a stored metric, R multiple or CI bound is not finite |
+| `stale_*` / `checksum_mismatch` | verification identity or result checksum differs |
+| `evidence_checksum_mismatch` | the result was unlocked by a different evidence bundle |
+| `locked_oos_conflict` / `locked_oos_mismatch` | the evidence already carries a different holdout section |
+
+### What a new holdout requires
+
+A genuinely new holdout needs a new independent dataset version with a new
+`dataset_checksum` (new data or a separately frozen build), a new `HoldoutSpec`
+seal, its own accepted promotion decision, and its own single evaluation. A new
+candidate on the same dataset build is **not** a new holdout: the spent key
+stays spent forever. This is the point of the ledger, not an inconvenience.
+
+### Honest limits
+
+One holdout result is still one sample. The protocol prevents reuse and records
+who spent it; it does not make the sample large, add a multiple-testing
+correction, or remove selection bias that happened during search. A single
+holdout pass can be unlucky in either direction, one symbol/timeframe is not a
+cross-market validation, and an iid bootstrap interval ignores serial
+dependence. A passing holdout is not a profitability claim and not paper
+trading. Reusing the same data under another name, or "just checking" a variation
+after seeing the result, destroys the property this ledger exists to protect.
+
 ### What is still missing
 
-- **The locked final OOS call.** This slice never reads the test split, so the
-  final holdout is still untouched; evaluating it once is a later, explicit
-  decision that must not be used for tuning. The promotion policy therefore
-  defaults `require_locked_oos=False`; setting it `True` rejects every bundle
-  until a locked-OOS section exists. That rejection is honest, not a bug.
+- **Wire the holdout into the autonomous path.** The protocol, ledger and
+  evidence attachment exist and are tested, but discovery/orchestration do not
+  yet call them, and no real XAUUSD holdout has been spent. The promotion policy
+  still defaults `require_locked_oos=False`; setting it `True` now accepts a
+  bundle only after `attach_holdout` adds the section, but the default is not
+  flipped by this slice.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
   folds may overlap the validation/selection window, but no deflated metric or
