@@ -238,7 +238,8 @@ or handler errors that are outside the status contract.
 `frontend/src/app/autonomy/page.tsx` is the operator view of those three reads
 (`/status`, `/jobs`, `/events`). It is read-only: the refresh button re-runs the
 GETs, and nothing on the page enqueues, cancels, pauses, promotes or starts a
-daemon.
+daemon. `autonomy/layout.tsx` gives the route its own document title
+(“Otonomi — AI Scalping Studio”).
 
 - **Sections.** Paper ledger counts (sessions, open positions, closed trades),
   orchestrator queue and persisted controls (queued/running/failed, paused, safe

@@ -408,6 +408,43 @@ describe("AutonomyPage", () => {
     ).toHaveTextContent("paper dışı");
   });
 
+  it("keeps the refresh control focusable while a read is in flight", async () => {
+    let release: (value: AutonomyStatus) => void = () => {};
+    apiMock.autonomyStatus.mockReturnValueOnce(
+      new Promise<AutonomyStatus>((resolve) => {
+        release = resolve;
+      }),
+    );
+
+    render(<AutonomyPage />);
+
+    const refresh = screen.getByTestId("autonomy-refresh");
+    expect(refresh).not.toBeDisabled();
+    expect(refresh).toHaveAttribute("aria-disabled", "true");
+
+    refresh.focus();
+    fireEvent.click(refresh);
+    // The inflight guard runs instead of disabling the button and dropping focus.
+    expect(apiMock.autonomyStatus).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(refresh);
+
+    release(status());
+    await waitFor(() => expect(refresh).toHaveAttribute("aria-disabled", "false"));
+    expect(screen.getByTestId("autonomy-paper-sessions")).toHaveTextContent("2");
+    expect(apiMock.autonomyStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses readable contrast classes and no text-loss utility", async () => {
+    const { container } = render(<AutonomyPage />);
+
+    await screen.findByTestId("autonomy-paper-sessions");
+
+    // slate-500 was 3.93:1 on the surface; slate-400 is 7.29:1. Badge
+    // backgrounds may keep loss/amber fills, but body text must not.
+    expect(container.querySelectorAll(".text-slate-500")).toHaveLength(0);
+    expect(container.querySelectorAll(".text-loss")).toHaveLength(0);
+  });
+
   it("keeps the status table focused, captioned and live-announced", async () => {
     render(<AutonomyPage />);
 
@@ -415,6 +452,9 @@ describe("AutonomyPage", () => {
 
     const live = screen.getByTestId("autonomy-status-live");
     expect(live).toHaveAttribute("role", "status");
+    // `role="status"` already implies a polite live region; a second attribute
+    // would be redundant and can double-announce in some screen readers.
+    expect(live).not.toHaveAttribute("aria-live");
     expect(live).toHaveTextContent("Otonomi durumu güncellendi");
 
     const region = screen.getByRole("region", { name: /İşler — en yeni önce/ });

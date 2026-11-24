@@ -53,7 +53,7 @@ const JOB_STATUS_TONE: Record<string, string> = {
   queued: "border-slate-700 bg-slate-800/40 text-slate-300",
   running: "border-accent/50 bg-accent/10 text-accent",
   succeeded: "border-profit/50 bg-profit/10 text-profit",
-  failed: "border-loss/50 bg-loss/10 text-loss",
+  failed: "border-loss/50 bg-loss/10 text-rose-300",
   cancelled: "border-slate-700 bg-slate-800/40 text-slate-400",
   skipped: "border-slate-700 bg-slate-800/40 text-slate-400",
 };
@@ -109,7 +109,7 @@ const MODE_STYLE: Record<ModeKind, string> = {
   evidence: "border-profit/50 bg-profit/10 text-profit",
   exploratory: "border-amber-500/50 bg-amber-500/10 text-amber-200",
   manual: "border-slate-600 bg-slate-800/50 text-slate-200",
-  unknown: "border-loss/40 bg-loss/10 text-loss",
+  unknown: "border-loss/40 bg-loss/10 text-rose-300",
 };
 
 function modeKind(mode: string | null | undefined): ModeKind {
@@ -260,7 +260,7 @@ function WindowTable({
           ))}
         </select>
       </div>
-      <p id={`${id}-limit-note`} className="text-right text-xs text-slate-500">
+      <p id={`${id}-limit-note`} className="text-right text-xs text-slate-400">
         {limitNote}
       </p>
     </div>
@@ -288,11 +288,16 @@ export default function AutonomyPage() {
   const [eventsToken, setEventsToken] = useState(0);
   const [eventLimit, setEventLimit] = useState<number>(DEFAULT_WINDOW);
 
+  // Derived before the callback so the inflight guard reads the same value the
+  // button exposes through `aria-disabled`.
+  const refreshing = statusLoading || jobsLoading || eventsLoading;
+
   const refreshAll = useCallback(() => {
+    if (refreshing) return;
     setStatusToken((token) => token + 1);
     setJobsToken((token) => token + 1);
     setEventsToken((token) => token + 1);
-  }, []);
+  }, [refreshing]);
 
   // -- aggregate status -----------------------------------------------------
   useEffect(() => {
@@ -371,7 +376,6 @@ export default function AutonomyPage() {
     };
   }, [eventLimit, eventsToken]);
 
-  const refreshing = statusLoading || jobsLoading || eventsLoading;
   const liveMessage =
     lastReadAt === null ? "" : `Otonomi durumu güncellendi: ${formatTs(lastReadAt)}`;
 
@@ -400,13 +404,13 @@ export default function AutonomyPage() {
             type="button"
             data-testid="autonomy-refresh"
             onClick={refreshAll}
-            disabled={refreshing}
+            aria-disabled={refreshing}
             aria-describedby="autonomy-refresh-note"
-            className={SECONDARY_BUTTON}
+            className={`${SECONDARY_BUTTON} aria-disabled:cursor-not-allowed aria-disabled:opacity-60`}
           >
             {refreshing ? "Yenileniyor…" : "Yenile"}
           </button>
-          <p id="autonomy-refresh-note" className="text-right text-xs text-slate-500">
+          <p id="autonomy-refresh-note" className="text-right text-xs text-slate-400">
             {lastReadAt === null
               ? "Henüz başarılı okuma yok."
               : `Son okuma: ${formatTs(lastReadAt)}`}
@@ -424,12 +428,7 @@ export default function AutonomyPage() {
         ettirmez. Gerçek para yönlendirmesi kapsam dışıdır ve kapalı kalır.
       </p>
 
-      <p
-        className="sr-only"
-        role="status"
-        aria-live="polite"
-        data-testid="autonomy-status-live"
-      >
+      <p className="sr-only" role="status" data-testid="autonomy-status-live">
         {liveMessage}
       </p>
 
@@ -620,43 +619,46 @@ function OrchestratorSection({
         />
         <StatCard
           label="Hata"
-          value={count(orchestrator.failed)}
-          testId="autonomy-orchestrator-failed"
-          tone={
-            typeof orchestrator.failed === "number" && orchestrator.failed > 0
-              ? "loss"
-              : "neutral"
+          value={
+            typeof orchestrator.failed === "number" && orchestrator.failed > 0 ? (
+              <span className="text-rose-300">{count(orchestrator.failed)}</span>
+            ) : (
+              count(orchestrator.failed)
+            )
           }
+          testId="autonomy-orchestrator-failed"
         />
         <StatCard
           label="Duraklatıldı"
           value={flag(orchestrator.paused, "Evet", "Hayır", "bilinmiyor")}
           testId="autonomy-orchestrator-paused"
-          hint={orchestrator.paused === null || orchestrator.paused === undefined ? "state tablosu yok" : undefined}
-        />
+        >
+          {(orchestrator.paused === null || orchestrator.paused === undefined) && (
+            <p className="mt-0.5 text-xs text-slate-400">state tablosu yok</p>
+          )}
+        </StatCard>
         <StatCard
           label="Güvenli mod"
           value={flag(orchestrator.safe_mode, "Etkin", "Kapalı", "bilinmiyor")}
           testId="autonomy-orchestrator-safe-mode"
-          hint={
-            orchestrator.safe_mode === null || orchestrator.safe_mode === undefined
-              ? "state tablosu yok"
-              : undefined
-          }
-        />
+        >
+          {(orchestrator.safe_mode === null || orchestrator.safe_mode === undefined) && (
+            <p className="mt-0.5 text-xs text-slate-400">state tablosu yok</p>
+          )}
+        </StatCard>
         <StatCard
           label="Araştırma"
           value={flag(orchestrator.research_disabled, "Kapalı", "Açık", "bilinmiyor")}
           testId="autonomy-orchestrator-research-disabled"
-          hint={
-            orchestrator.research_disabled === null || orchestrator.research_disabled === undefined
-              ? "state tablosu yok"
-              : undefined
-          }
-        />
+        >
+          {(orchestrator.research_disabled === null ||
+            orchestrator.research_disabled === undefined) && (
+            <p className="mt-0.5 text-xs text-slate-400">state tablosu yok</p>
+          )}
+        </StatCard>
       </div>
 
-      <p className="text-xs text-slate-500" data-testid="autonomy-orchestrator-last-event">
+      <p className="text-xs text-slate-400" data-testid="autonomy-orchestrator-last-event">
         {lastEvent === null
           ? "Henüz denetim olayı yok."
           : `Son olay: ${lastEvent.event} · ${formatTs(lastEvent.ts)}${
@@ -824,7 +826,7 @@ function DataSection({ data }: { data: AutonomyDataStatus | undefined }) {
 
   return (
     <div className="flex flex-col gap-1">
-      <p className="text-xs text-slate-500">
+      <p className="text-xs text-slate-400">
         Ay partition’ı olan semboller — {formatNumber(symbols.length, 0)} adet
       </p>
       <ul
@@ -962,7 +964,7 @@ function JobsSection({
       </WindowTable>
 
       {items.length === 0 && (
-        <p data-testid="autonomy-jobs-empty" className="text-xs text-slate-500">
+        <p data-testid="autonomy-jobs-empty" className="text-xs text-slate-400">
           Bu pencerede iş yok. Kuyruk boş olabilir ya da bu aralıkta iş oluşmamıştır.
         </p>
       )}
@@ -1056,7 +1058,7 @@ function EventsSection({
       </WindowTable>
 
       {items.length === 0 && (
-        <p data-testid="autonomy-events-empty" className="text-xs text-slate-500">
+        <p data-testid="autonomy-events-empty" className="text-xs text-slate-400">
           Bu pencerede denetim olayı yok.
         </p>
       )}
