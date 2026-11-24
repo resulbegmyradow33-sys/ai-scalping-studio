@@ -106,6 +106,7 @@ __all__ = [
     "PROMOTION_V1",
     "EvidenceIdentity",
     "ExpectedIdentity",
+    "is_sealed_decision",
     "ManualOverride",
     "PromotionDecision",
     "PromotionPolicy",
@@ -114,7 +115,6 @@ __all__ = [
     "evaluate_promotion",
     "is_production_policy",
     "is_production_policy_digest",
-    "is_sealed_decision",
     "manual_override",
     "promote_manual_override",
     "promote_with_evidence",
@@ -599,19 +599,15 @@ class PromotionDecision:
 
 
 def is_sealed_decision(decision: object) -> bool:
-    """True only for a :class:`PromotionDecision` signed by ``evaluate_promotion``.
+    """Return True only for a decision whose process-private seal still verifies.
 
-    The constructor already refuses an unsigned decision, but this predicate is
-    the explicit gate a consumer such as the locked holdout uses. It re-verifies
-    the HMAC over the canonical payload, so ``object.__new__`` bypasses and
-    ``dataclasses.replace`` with a changed field are rejected as well.
+    ``PromotionDecision.__post_init__`` already rejects a hand-built record; this
+    helper re-checks a decision that crossed a boundary (unpickle, cache) and is
+    used by the locked-holdout unlock path.
     """
-    if not isinstance(decision, PromotionDecision):
-        return False
-    try:
-        return bool(_verify_decision(decision._content(), getattr(decision, "_seal", "")))
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return False
+    return isinstance(decision, PromotionDecision) and _verify_decision(
+        decision._content(), decision._seal
+    )
 
 
 def _sealed_decision(**kwargs: Any) -> PromotionDecision:
@@ -889,7 +885,7 @@ def _locked_oos(
         rejections=rejections,
         observed=observed,
         prefix="locked_",
-        ci_must_exceed=False,
+        ci_must_exceed=True,
     )
 
 

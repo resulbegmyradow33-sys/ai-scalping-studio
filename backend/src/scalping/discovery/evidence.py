@@ -105,17 +105,11 @@ __all__ = [
     "evidence_checksum",
     "evidence_from_dict",
     "locked_oos_checksum",
-    "per_trade_regimes",
-    "regime_labels",
-    "regime_rows",
     "settings_digest",
-    "slice_frame",
     "verify_evidence",
 ]
 
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
-#: Version 3 adds the optional frozen ``locked_oos`` section produced by
-#: :func:`scalping.discovery.holdout.attach_holdout`.
 EVIDENCE_SCHEMA_VERSION: Final[int] = 3
 
 #: A promotion policy needs at least three folds to say anything about stability.
@@ -516,20 +510,11 @@ class CandidateEvidence:
     checksum: str
     created_at: str
     schema_version: int = EVIDENCE_SCHEMA_VERSION
-    #: Optional frozen locked-final-holdout section. It is omitted from
-    #: :meth:`to_dict` while ``None`` so every bundle built before this section
-    #: existed keeps the same checksum; ``attach_holdout`` returns a new bundle
-    #: with it filled in and the checksum re-derived.
     locked_oos: LockedOOSEvidence | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe nested payload; the checksum is computed over this minus stamps."""
-        payload = asdict(self)
-        if self.locked_oos is None:
-            # Keep the historical payload byte-identical for bundles without a
-            # holdout section. Adding a ``null`` key would change every checksum.
-            payload.pop("locked_oos", None)
-        return payload
+        return asdict(self)
 
 
 # --- small helpers ------------------------------------------------------------
@@ -704,34 +689,6 @@ def _regime_rows(per_trade: pl.DataFrame) -> tuple[RegimeEvidence, ...]:
             )
         )
     return tuple(rows)
-
-
-# --- shared fold helpers ------------------------------------------------------
-#
-# The locked-holdout evaluator needs the same regime attribution and slicing as a
-# walk-forward fold. These public wrappers keep one implementation of the join
-# and one definition of "a regime label at the entry bar" instead of forking the
-# logic into a second module.
-
-
-def slice_frame(features: FeatureFrame, start: int, end: int) -> FeatureFrame:
-    """Copy source rows ``[start, end)`` into a simulatable frame."""
-    return _slice_frame(features, start, end)
-
-
-def regime_labels(frame: FeatureFrame) -> pl.DataFrame:
-    """Causal rule-engine labels for one frame, aligned row for row."""
-    return _regime_labels(frame)
-
-
-def per_trade_regimes(trades: Sequence[Trade], labels: pl.DataFrame) -> pl.DataFrame:
-    """Attach each trade's entry regime, with ``unknown`` for a missing label."""
-    return _per_trade_regimes(trades, labels)
-
-
-def regime_rows(per_trade: pl.DataFrame) -> tuple[RegimeEvidence, ...]:
-    """One regime row per bucket, sorted by label; ``unknown`` is kept."""
-    return _regime_rows(per_trade)
 
 
 def _pooled_profit_factor(pnls: Sequence[float]) -> float:
@@ -1055,7 +1012,9 @@ def locked_oos_checksum(section: LockedOOSEvidence) -> str:
     including the metrics, intervals, regimes, stress and identity, is covered.
     """
     if type(section) is not LockedOOSEvidence:
-        raise TypeError(f"section must be a LockedOOSEvidence, got {type(section).__name__}")
+        raise TypeError(
+            f"section must be a LockedOOSEvidence, got {type(section).__name__}"
+        )
     payload = asdict(section)
     payload.pop("checksum", None)
     payload.pop("created_at", None)
