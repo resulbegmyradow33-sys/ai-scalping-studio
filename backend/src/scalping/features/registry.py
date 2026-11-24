@@ -17,11 +17,22 @@ from scalping.features.build import FEATURE_COLUMNS
 
 __all__ = [
     "DEFAULT_GROUPS",
+    "FEATURE_ALIASES",
     "FEATURE_GROUPS",
+    "canonical_name",
     "columns_for",
     "indices_for",
     "select_matrix",
 ]
+
+#: Documented read-only aliases for canonical columns whose name is easy to
+#: misread. An alias never enters :data:`~scalping.features.build.FEATURE_COLUMNS`,
+#: so column order, the cached registry version and dataset checksums stay
+#: stable. ``ret_3`` is a log return while the other ``ret_*`` columns are
+#: simple returns; ``log_ret_3`` names that without renaming the column.
+FEATURE_ALIASES: Final[dict[str, str]] = {
+    "log_ret_3": "ret_3",
+}
 
 FEATURE_GROUPS: Final[dict[str, tuple[str, ...]]] = {
     "price": (
@@ -102,6 +113,18 @@ FEATURE_GROUPS: Final[dict[str, tuple[str, ...]]] = {
 DEFAULT_GROUPS: Final[tuple[str, ...]] = tuple(FEATURE_GROUPS)
 
 
+def canonical_name(name: str) -> str:
+    """Resolve a documented alias to its canonical ``FEATURE_COLUMNS`` name.
+
+    Canonical names pass through unchanged. Unknown names raise instead of
+    resolving to themselves, so a typo cannot silently become a new feature.
+    """
+    resolved = FEATURE_ALIASES.get(name, name)
+    if resolved not in FEATURE_COLUMNS:
+        raise ValueError(f"unknown feature {name!r}; aliases: {', '.join(sorted(FEATURE_ALIASES))}")
+    return resolved
+
+
 def columns_for(groups: Iterable[str] | None = None) -> tuple[str, ...]:
     """Selected column names in the canonical matrix order.
 
@@ -112,8 +135,7 @@ def columns_for(groups: Iterable[str] | None = None) -> tuple[str, ...]:
     unknown = [name for name in names if name not in FEATURE_GROUPS]
     if unknown:
         raise ValueError(
-            f"unknown feature groups: {', '.join(unknown)}; "
-            f"available: {', '.join(FEATURE_GROUPS)}"
+            f"unknown feature groups: {', '.join(unknown)}; available: {', '.join(FEATURE_GROUPS)}"
         )
     selected = {column for name in names for column in FEATURE_GROUPS[name]}
     return tuple(column for column in FEATURE_COLUMNS if column in selected)
