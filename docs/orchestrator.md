@@ -485,6 +485,95 @@ of the cursor on the next scan.
 one `trigger_scan` event. There is no filesystem watcher; a caller decides how
 often to scan.
 
+### Matured paper outcomes (P5 slice 2)
+
+`PaperOutcomeTriggerSource` closes part of the loop: a paper session's completed
+trades become one research trigger. It reads the ledger with a read-only
+connection, calls `matured_outcomes(ledger, session_id)` for each session
+(newest first, at most `max_sessions`) and emits one trigger per batch whose
+`outcome_fingerprint` the cursor has not recorded.
+
+| Field | Value |
+|---|---|
+| `kind` | `paper.outcomes` |
+| `dedupe_key` | `paper.outcomes:{fingerprint}` |
+| payload | `session_id`, `fingerprint`, `trades`, `pnl`, `r_total`, `strategy_hash`, `dataset_id` |
+
+Only closed trades contribute. `matured_outcomes` counts open positions in
+`open_trades` and never turns them into rows, so an unrealised trade cannot
+start research. A `running` session is eligible: its closed trades are already
+matured, and waiting for session close would delay feedback for no correctness
+gain.
+
+#### Eligibility and refusal reasons
+
+A session emits only when the batch has at least one closed trade, a strategy
+hash and a dataset id. Otherwise the source writes one `paper.outcome_not_queued`
+event with a machine-readable `reason` and a human `detail`. The reason is
+recorded once per session and rewritten only when it changes, so a periodic scan
+does not flood the audit log.
+
+| `reason` | Meaning | Emits? |
+|---|---|---|
+| `empty_batch` | No trade has closed yet; the P&L is not final | No |
+| `no_strategy_hash` | `model_version` and signals carry no attribution | No |
+| `no_dataset_id` | Session config records no dataset id to scope research | No |
+| `outcome_error` | Ambiguous attribution; `matured_outcomes` raised | No |
+| `no_ledger` | The configured ledger path does not exist | No |
+| `ledger_unavailable` | Unreadable file or no sessions table | No |
+
+#### Dedupe
+
+The cursor is one JSON document in the job store's `state` table under
+`trigger.paper.outcomes:<absolute ledger path>`:
+
+```json
+{"version": 1, "fingerprints": {"<sha256>": "<session_id>"},
+ "not_queued": {"<session_id>": "<reason>"}}
+```
+
+`scan()` computes it and `seen()` persists it, matching the file-trigger
+protocol. A crash between enqueue and `seen` re-emits the same trigger on the
+next scan; the job `dedupe_key` makes that a duplicate instead of a second job.
+Deduplication therefore has two independent layers: the durable fingerprint set
+and the store key. Any newly closed trade changes the fingerprint and emits one
+new trigger.
+
+#### Proposal only, no auto-training
+
+`make_paper_outcome_handler(should_queue=None)` and
+`register_paper_outcome_handler(registry)` bind `paper.outcomes`. The handler:
+
+1. validates exactly the seven payload fields (unknown, missing, mistyped or
+   non-finite input is a permanent failure);
+2. logs `paper.outcome_received` for the job;
+3. returns `{"action": "queue_discovery" | "no_action", "reason": ...,
+   "queued": false, "executed": false}` plus the attribution it received.
+
+It imports no discovery, training, simulator or champion module, reads no bars,
+features or holdout split, and cannot enqueue: `JobContext` has no enqueue
+method. `should_queue(payload) -> bool` is the explicit policy hook. Returning
+`True` proposes the next research cycle; it still does not start it. Without a
+callback the proposal is `queue_discovery` with `executed: false`, which is a
+recorded recommendation, not work.
+
+#### Honest limits
+
+- **Single process, no scheduler and no market clock.** `scan()` is a call.
+  Nothing polls the ledger, sleeps or decides that a bar has arrived; a daemon
+  or CLI is future work.
+- **Read cost grows with the ledger.** Each scan reads every session's signals,
+  trades and positions through `matured_outcomes`. The `max_sessions` cap bounds
+  it, and sessions older than the newest `max_sessions` are not reached in this
+  slice.
+- **No backfill.** A session without a dataset id stays refused; the trigger
+  does not modify the ledger to manufacture attribution.
+- **The sets are unbounded.** Fingerprints and quiet refusal reasons accumulate;
+  no pruning or compaction exists yet.
+- **A trigger is not evidence.** It says a paper batch completed, not that the
+  strategy has an edge. The queue step and any later evaluation remain separate
+  reviewed decisions, and the final OOS/holdout split is never touched here.
+
 ## Verification
 
 ```
@@ -520,3 +609,12 @@ real `SystemProbe` on the host; `measure` recording finite wall/CPU/RSS values
 and a failed block without masking it; a bounded sample ring; JSON-safe
 payloads; frozen profiles; and one end-to-end check that `Orchestrator` defers a
 job with the measured reason in its event log.
+
+The paper-outcome trigger tests (`tests/test_paper_outcome_triggers.py`) cover: a
+new fingerprint enqueues one job; the store key dedupes a crash before
+acknowledgement; the cursor dedupes a repeat scan and a store restart; an open
+position is counted but never in the payload; missing strategy hash and dataset
+id are refused with a logged reason that is not repeated; an empty batch and a
+missing ledger are no-ops; the handler returns a proposal and creates no second
+job; the policy callback can decline; and one more closed trade changes the
+fingerprint.
