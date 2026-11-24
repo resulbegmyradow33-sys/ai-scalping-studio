@@ -74,6 +74,12 @@ def _parser() -> argparse.ArgumentParser:
             "0 means the whole real store"
         ),
     )
+    parser.add_argument(
+        "--max-trials",
+        type=int,
+        default=2,
+        help="bounded trials for the discovery smoke stage (default 2, >= 1)",
+    )
     parser.add_argument("--strict", action="store_true", help="abort on the first failed stage")
     return parser
 
@@ -91,7 +97,7 @@ def _stages(args: argparse.Namespace) -> list[Stage]:
     try:
         stages.append(features_build_stage(args.store_root, **common))
         stages.append(dataset_build_stage(args.store_root, **common))
-        stages.append(discovery_smoke_stage(args.store_root, **common))
+        stages.append(discovery_smoke_stage(args.store_root, **common, max_trials=args.max_trials))
         stages.append(evidence_build_stage(args.store_root, **common))
         stages.append(paper_advance_stage(args.store_root, **common))
         if args.suite == "full":
