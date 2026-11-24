@@ -437,6 +437,27 @@ def test_conflicting_provenance_spellings_are_refused() -> None:
     assert session_provenance({"source": "csv", "provenance": {"source": "csv"}}) == ("csv", None)
 
 
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"source": "csv", "synthetic": False},
+        {"provenance": {"source": "csv", "synthetic": False}},
+        {"data": {"source": "csv", "synthetic": False}},
+        {"extra": {"source": "csv", "synthetic": False}},
+        {"extra": {"provenance": {"source": "csv", "synthetic": False}}},
+        {"extra": {"data": {"source": "csv", "synthetic": False}}},
+    ],
+)
+def test_every_documented_provenance_spelling_is_read(config: dict[str, object]) -> None:
+    """``docs/orchestrator.md`` promises all six spellings keep reading.
+
+    A session config written before the canonical ``extra.provenance`` block
+    still has to report its source and flag, so an upgrade does not turn known
+    evidence into unknown.
+    """
+    assert session_provenance(config) == ("csv", False)
+
+
 def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
     with PaperLedger(tmp_path / "paper.db") as book:
         book.open_session("s1", symbol="XAUUSD", timeframe="M1", strategy="s")
