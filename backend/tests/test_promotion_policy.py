@@ -459,6 +459,7 @@ def test_a_locked_section_for_another_bundle_is_rejected() -> None:
         ({"max_drawdown": 0.99}, "max_drawdown"),
         ({"regime_coverage": 0.1}, "min_regime_coverage"),
         ({"expectancy_r_ci95_low": -0.1}, "min_ci_lower_r"),
+        ({"expectancy_r_ci95_low": 0.0}, "min_ci_lower_r"),
         ({"trades": 1}, "insufficient_trades"),
         ({"bootstrap_samples": 1}, "min_bootstrap_samples"),
         ({"bootstrap_confidence": 0.5}, "min_bootstrap_confidence"),
@@ -476,6 +477,21 @@ def test_bad_locked_metrics_or_geometry_are_rejected(
 
     assert decision.accepted is False
     assert code in codes(decision)
+
+
+def test_a_locked_ci_exactly_at_the_floor_is_rejected_but_above_passes() -> None:
+    policy = replace(TEST_POLICY, policy_id="locked-test", require_locked_oos=True)
+    base = make_evidence()
+    section = locked_section(base, policy)
+
+    at_floor = reseal_locked(section, expectancy_r_ci95_low=0.0)
+    decision = evaluate_promotion(locked_bundle(at_floor), policy)
+    assert "min_ci_lower_r" in codes(decision)
+    assert decision.accepted is False
+
+    just_above = reseal_locked(section, expectancy_r_ci95_low=0.01)
+    decision = evaluate_promotion(locked_bundle(just_above), policy)
+    assert decision.accepted is True, decision.codes
 
 
 def test_catastrophic_locked_stress_is_rejected() -> None:

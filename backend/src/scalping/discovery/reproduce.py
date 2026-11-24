@@ -61,9 +61,11 @@ Identity differences are refusals with a stable ``code``, not mismatches:
 ``spec_mismatch`` and friends
     The supplied spec is not the candidate the bundle measured.
 
-A rebuild that succeeds but produces a different evidence checksum returns
-:class:`ReproduceMismatch` with the first differing leaf paths. The original
-file is never rewritten: the CLI's ``--out`` is a separate report path.
+A rebuild that succeeds but produces a different base evidence checksum returns
+:class:`ReproduceMismatch` with the first differing leaf paths. The comparison
+excludes ``created_at`` and ``locked_oos``: reproduction rebuilds the historical
+base bundle and never copies a holdout result. The original file is never
+rewritten: the CLI's ``--out`` is a separate report path.
 
 Limits
 ------
@@ -109,6 +111,10 @@ from scalping.discovery.evidence import (
     settings_digest,
     verify_evidence,
 )
+from scalping.discovery.evidence import (
+    evidence_from_dict as canonical_evidence_from_dict,
+)
+from scalping.discovery.protocols import canonical_json
 from scalping.discovery.run import code_version as current_code_version
 from scalping.features.build import FeatureFrame, build_features
 from scalping.features.registry import columns_for, indices_for
@@ -130,9 +136,6 @@ DATASET_ARTIFACT_DIRNAME: Final[str] = "datasets"
 
 #: Suffix appended to the bundle path to find the sidecar spec when none is given.
 _SPEC_SIDECAR_SUFFIX: Final[str] = ".spec.json"
-
-#: Fields outside the checksum; they cannot make a replay differ.
-_UNCHECKED_FIELDS: Final[frozenset[str]] = frozenset({"checksum", "created_at"})
 
 #: A checksum is a hex digest, and it is used as a directory name.
 _CHECKSUM_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{16,128}")
@@ -157,6 +160,7 @@ _EVIDENCE_KEYS: Final[tuple[str, ...]] = (
     "checksum",
     "created_at",
     "schema_version",
+    "locked_oos",
 )
 _POLICY_KEYS: Final[tuple[str, ...]] = (
     "folds",
@@ -269,9 +273,17 @@ def _mapping(value: object, where: str) -> Mapping[str, Any]:
     return value
 
 
-def _only(data: Mapping[str, Any], keys: Sequence[str], where: str) -> None:
-    extra = sorted(set(data) - set(keys), key=repr)
-    missing = [key for key in keys if key not in data]
+def _only(
+    data: Mapping[str, Any],
+    keys: Sequence[str],
+    where: str,
+    *,
+    optional: Sequence[str] = (),
+) -> None:
+    allowed = set(keys)
+    extra = sorted(set(data) - allowed, key=repr)
+    optional_set = set(optional)
+    missing = [key for key in keys if key not in data and key not in optional_set]
     if extra or missing:
         raise EvidenceError(
             "invalid_payload", f"{where} fields mismatch (unknown={extra}, missing={missing})"
@@ -442,13 +454,20 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
     :func:`~scalping.discovery.evidence.verify_evidence` right after loading.
     """
     data = _mapping(payload, "evidence")
-    _only(data, _EVIDENCE_KEYS, "evidence")
+    _only(data, _EVIDENCE_KEYS, "evidence", optional=("locked_oos",))
     schema = _count(data["schema_version"], "schema_version")
     if schema != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceError(
             "schema_mismatch",
             f"bundle schema {schema} is not the supported {EVIDENCE_SCHEMA_VERSION}",
         )
+    locked = None
+    if data.get("locked_oos") is not None:
+        try:
+            # One owner for the nested locked-OOS shape: the evidence module.
+            locked = canonical_evidence_from_dict(data).locked_oos
+        except EvidenceError as exc:
+            raise EvidenceError("invalid_payload", f"locked_oos: {exc}") from exc
     return CandidateEvidence(
         spec_hash=_text(data["spec_hash"], "spec_hash"),
         spec_version=_count(data["spec_version"], "spec_version"),
@@ -472,6 +491,7 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
         checksum=_text(data["checksum"], "checksum"),
         created_at=_text(data["created_at"], "created_at"),
         schema_version=schema,
+        locked_oos=locked,
     )
 
 
@@ -497,7 +517,8 @@ class ReproduceMismatch:
     ``differences`` holds the first leaf paths that differ (bounded by the
     caller), and ``sections`` is their ordered top-level section list. The
     rebuilt bundle is carried for inspection; it is never written over the
-    original.
+    original. For a stored bundle with ``locked_oos``, ``expected`` and
+    ``reproduced`` are the pre-attach base checksums, not the full checksum.
     """
 
     expected: str
@@ -874,9 +895,28 @@ def _evidence_config(evidence: CandidateEvidence) -> EvidenceConfig:
     )
 
 
-def _identity_body(evidence: CandidateEvidence) -> dict[str, Any]:
-    """``to_dict()`` without ``checksum``/``created_at``, the fields outside identity."""
-    return {key: value for key, value in evidence.to_dict().items() if key not in _UNCHECKED_FIELDS}
+def _identity_body(evidence: CandidateEvidence, *, drop_locked: bool) -> dict[str, Any]:
+    """``to_dict()`` without stamps; optionally without ``locked_oos``.
+
+    A locked bundle is compared on the historical base payload, with the section
+    removed from both sides. An unlocked bundle keeps ``locked_oos=None`` so its
+    comparison value is exactly the stored ``CandidateEvidence.checksum``.
+    """
+    payload = {
+        key: value
+        for key, value in evidence.to_dict().items()
+        if key not in {"checksum", "created_at"}
+    }
+    if drop_locked:
+        payload.pop("locked_oos", None)
+    return payload
+
+
+def _base_checksum(evidence: CandidateEvidence, *, drop_locked: bool) -> str:
+    """sha256 of the comparison body; stamps always excluded."""
+    return hashlib.sha256(
+        canonical_json(_identity_body(evidence, drop_locked=drop_locked)).encode("utf-8")
+    ).hexdigest()
 
 
 def _stamp(created_at: str) -> datetime | None:
@@ -898,9 +938,12 @@ def reproduce_bundle(
 ) -> CandidateEvidence | ReproduceMismatch:
     """Rebuild one stored evidence bundle and compare its checksum.
 
-    Returns the rebuilt :class:`CandidateEvidence` when the checksum is equal,
-    or a :class:`ReproduceMismatch` with the first ``mismatch_limit`` differing
-    leaf paths. Identity refusals (settings, code version, dataset) raise
+    Returns the rebuilt :class:`CandidateEvidence` when the **base** checksum is
+    equal (stamps and ``locked_oos`` excluded), or a :class:`ReproduceMismatch`
+    with the first ``mismatch_limit`` differing leaf paths. A stored
+    ``locked_oos`` is validated as part of the bundle but is not copied into the
+    rebuilt bundle; reproducing it does not produce promotion evidence. Identity
+    refusals (settings, code version, dataset) raise
     :class:`ReproduceError`; an unverifiable bundle raises
     :class:`~scalping.discovery.evidence.EvidenceError`.
 
@@ -1057,12 +1100,15 @@ def reproduce_bundle(
         settings=run_settings,
         created_at=_stamp(evidence.created_at),
     )
-    if rebuilt.checksum == evidence.checksum:
+    drop_locked = evidence.locked_oos is not None
+    expected_base = _base_checksum(evidence, drop_locked=drop_locked)
+    reproduced_base = _base_checksum(rebuilt, drop_locked=drop_locked)
+    if reproduced_base == expected_base:
         return rebuilt
 
     differences = _differences(
-        _identity_body(evidence),
-        _identity_body(rebuilt),
+        _identity_body(evidence, drop_locked=drop_locked),
+        _identity_body(rebuilt, drop_locked=drop_locked),
         limit=mismatch_limit,
     )
     if not differences:
@@ -1071,8 +1117,8 @@ def reproduce_bundle(
         # digest noticing. Say so instead of reporting an empty section list.
         differences = (SectionDifference("checksum", evidence.checksum, rebuilt.checksum),)
     return ReproduceMismatch(
-        expected=evidence.checksum,
-        reproduced=rebuilt.checksum,
+        expected=expected_base,
+        reproduced=reproduced_base,
         differences=differences,
         evidence=rebuilt,
     )

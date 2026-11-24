@@ -872,7 +872,7 @@ def _locked_oos(
         rejections=rejections,
         observed=observed,
         prefix="locked_",
-        ci_must_exceed=False,
+        ci_must_exceed=True,
     )
 
 
