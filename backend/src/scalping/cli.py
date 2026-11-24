@@ -50,6 +50,12 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
+from scalping.discovery.evidence import CandidateEvidence, EvidenceError
+from scalping.discovery.reproduce import (
+    ReproduceError,
+    ReproduceMismatch,
+    reproduce_bundle,
+)
 from scalping.discovery.run import DiscoveryRunConfig, DiscoveryRunError, run_discovery
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
@@ -658,6 +664,80 @@ def _cmd_discovery_run(args: argparse.Namespace) -> None:
         out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
         payload["out"] = str(out)
     _print_json(payload)
+
+
+def _reproduce_payload(outcome: CandidateEvidence | ReproduceMismatch) -> dict[str, Any]:
+    """The one-line contract: reproduced flag, both checksums and mismatches."""
+    if isinstance(outcome, ReproduceMismatch):
+        return {
+            "reproduced": False,
+            "checksum": outcome.reproduced,
+            "expected": outcome.expected,
+            "mismatches": list(outcome.sections),
+        }
+    return {
+        "reproduced": True,
+        "checksum": outcome.checksum,
+        "expected": outcome.checksum,
+        "mismatches": [],
+    }
+
+
+def _write_reproduce_report(path: str | None, payload: dict[str, Any]) -> None:
+    if path is None:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+
+
+def _cmd_discovery_reproduce(args: argparse.Namespace) -> None:
+    """Re-run one stored evidence bundle and report whether its checksum matches.
+
+    Exit codes: 0 when the checksum is reproduced, 1 when the stored identity
+    does not match this environment (settings, code version, data, or the
+    rebuilt evidence), and 2 when the input cannot be read or reproduced at all.
+    The original bundle file is never rewritten; ``--out`` is a separate report.
+    """
+    settings = None
+    if args.settings is not None:
+        try:
+            settings = Settings.load(args.settings)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError(f"cannot read --settings {args.settings}: {exc}") from exc
+
+    try:
+        outcome = reproduce_bundle(
+            Path(args.bundle),
+            store_root=args.store_root,
+            spec=args.spec,
+            settings=settings,
+        )
+    except ReproduceError as exc:
+        if exc.invalid:
+            raise CliError(str(exc)) from exc
+        payload: dict[str, Any] = {
+            "reproduced": False,
+            "checksum": None,
+            "expected": exc.expected,
+            "mismatches": [exc.code],
+            "reason": str(exc),
+        }
+        _write_reproduce_report(args.out, payload)
+        _print_json(payload)
+        raise _ExitCode(1) from exc
+    except EvidenceError as exc:
+        raise CliError(str(exc)) from exc
+
+    payload = _reproduce_payload(outcome)
+    if isinstance(outcome, ReproduceMismatch):
+        report = outcome.to_dict()
+    else:
+        report = {**payload, "evidence": outcome.to_dict()}
+    _write_reproduce_report(args.out, report)
+    _print_json(payload)
+    if isinstance(outcome, ReproduceMismatch):
+        raise _ExitCode(1)
 
 
 # --- backtest ------------------------------------------------------------------
@@ -1377,6 +1457,31 @@ def _build_parser() -> argparse.ArgumentParser:
     d_run.add_argument("--out", default=None, help="optional full JSON report path")
     d_run.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     d_run.set_defaults(handler=_cmd_discovery_run)
+
+    d_reproduce = discovery_commands.add_parser(
+        "reproduce",
+        help="re-run one stored evidence bundle and compare its checksum",
+    )
+    d_reproduce.add_argument("--bundle", required=True, help="evidence JSON written earlier")
+    d_reproduce.add_argument(
+        "--store-root",
+        required=True,
+        help="bar store plus <store-root>/datasets/<checksum>/ artifacts",
+    )
+    d_reproduce.add_argument(
+        "--spec",
+        default=None,
+        help=(
+            "strategy spec JSON; defaults to the sidecar <bundle stem>.spec.json next to the bundle"
+        ),
+    )
+    d_reproduce.add_argument(
+        "--settings",
+        default=None,
+        help="YAML settings; defaults to built-in Settings()",
+    )
+    d_reproduce.add_argument("--out", default=None, help="optional report path")
+    d_reproduce.set_defaults(handler=_cmd_discovery_reproduce)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")
