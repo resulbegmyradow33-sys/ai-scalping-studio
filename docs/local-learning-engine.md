@@ -140,9 +140,9 @@ stress, regimes, bootstrap intervals, trial exposure — and returns a
 `PromotionPolicy` is a frozen dataclass with no usable default. The constructor
 refuses an empty or degenerate policy: a non-empty `policy_id` that is not the
 reserved `manual-override`, `version >= 1`, at least three folds, positive sample
-and complexity/trial caps, a profit factor above 1, fractions in `(0, 1]`, and at
-least one cost-stress multiplier above 1. `PROMOTION_V1` is the documented
-starting policy:
+and complexity/trial caps, a profit factor above 1, fractions in `(0, 1]`, at
+least one cost-stress multiplier above 1, and a selection-fold share in `[0, 1]`.
+`PROMOTION_V1` is the documented starting policy:
 
 | Field | `PROMOTION_V1` | Why |
 |---|---|---|
@@ -160,14 +160,23 @@ starting policy:
 | `max_trials` | `500` | caps the candidate's trial count and the search budget |
 | `min_improvement_r` | `0.05` | a challenger must improve on the champion by at least this much |
 | `require_locked_oos` | `False` | the bundle has no locked-OOS section yet; `True` rejects everything until it does |
+| `max_selection_fold_share` | `0.4` | at most 40% of folds may overlap the validation/selection window; `0` disables the check |
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
-champion_spec_hash=None)` runs the checks in a fixed order and returns
-`accepted`, a tuple of `PromotionRejection(code, message, observed, required)`,
-the policy id/version, the re-derived evidence checksum and the champion
-checksum. A decision is accepted only when the rejection list is empty and the
-checksum re-derives. Any missing, stale, edited or mismatched input is a
-rejection; there is no `force` parameter.
+champion_spec_hash=None)` runs `verify_evidence` against the bundle's own
+identity, then the structural and threshold checks, and returns `accepted`, a
+tuple of `PromotionRejection(code, message, observed, required)`, the policy
+id/version, the re-derived evidence checksum, the dataset checksum, the settings
+digest and the champion checksum. A decision is accepted only when the rejection
+list is empty. Any missing, stale, edited or mismatched input is a rejection;
+there is no `force` parameter.
+
+A **selection fold** is a fold whose test block intersects
+`[splits.validation_start_row, splits.validation_end_row)`. Those folds sit in the
+slice the search selected on, so they are not independent walk-forward evidence.
+`max_selection_fold_share=0.4` requires a clear majority of folds to lie outside
+the selection window: one of three passes, two of four does not. A bundle whose
+share is higher is rejected rather than silently reweighted.
 
 ### Rejection codes
 
@@ -175,30 +184,33 @@ rejection; there is no `force` parameter.
 |---|---|
 | `missing_evidence` / `invalid_evidence` | no bundle, or an object of the wrong type |
 | `checksum_mismatch` | the stored checksum does not re-derive from the payload |
-| `schema_unsupported` | the bundle layout version is not the one the policy reads |
-| `missing_section` | empty identity field, absent aggregate, no evidence policy or bootstrap section |
+| `schema_mismatch` | the bundle layout version is not the one this policy reads |
+| `missing_section` | empty identity field (including `dataset_checksum`/`settings_digest`), absent split boundaries, aggregate, evidence policy or bootstrap section |
 | `inconsistent_evidence` | fold numbering/gaps, aggregate trade or positive-fold counts disagree with the folds |
 | `insufficient_folds` / `insufficient_trades` | below the policy minimum |
 | `min_expectancy_r` / `min_profit_factor` / `max_drawdown` | metric outside the policy |
 | `min_positive_fold_fraction` / `min_regime_coverage` | too few paying folds, or too many unattributed trades |
 | `min_ci_lower_r` | bootstrap lower bound does not exceed the policy floor |
-| `missing_cost_stress` | a required multiplier is absent from a fold's stress rows |
+| `missing_cost_stress` | a required multiplier is absent from a fold's stress rows, or the bundle's policy records no multiplier above 1.0 |
 | `max_complexity` | structural complexity above the cap |
 | `trial_exposure` / `search_exposure` | candidate trials or the recorded search budget exceed `max_trials` |
+| `selection_fold_share` | too many folds overlap the validation/selection window |
 | `missing_locked_oos` | `require_locked_oos=True` and the bundle has no locked-OOS section |
 | `champion_evidence_missing` / `champion_identity_missing` | a champion was named without its bundle or without a spec hash |
+| `incomparable_evidence` | candidate or champion lacks `dataset_checksum`, `settings_digest`, `code_version` or folds, so no same-window comparison is possible |
 | `champion_checksum_mismatch` | the champion bundle was edited |
 | `champion_spec_mismatch` / `champion_same_spec` | the champion bundle is for another spec, or the candidate *is* the champion |
 | `champion_dataset_mismatch` / `champion_dataset_checksum_mismatch` | different dataset id or build |
+| `champion_settings_mismatch` | different execution settings (the digest differs) |
 | `champion_code_version_mismatch` / `champion_scope_mismatch` | different code version, symbol or timeframe |
 | `champion_folds_mismatch` | fold boundaries are not identical, so the comparison is not same-window |
 | `champion_improvement` | expectancy improvement is below `min_improvement_r`, or cannot be measured |
 
 The champion comparison is deliberately strict. Comparing a 3-fold bundle with a
-5-fold champion, or the same folds built from another dataset checksum, is a
-rejection rather than a normalisation problem. The `>= min_improvement_r`
-boundary carries a 1e-9R tolerance only because floats cannot represent
-`0.25 - 0.20` exactly; a tie still fails.
+5-fold champion, the same folds built from another dataset checksum, or a run
+priced with another settings digest is a rejection rather than a normalisation
+problem. The `>= min_improvement_r` boundary carries a 1e-9R tolerance only
+because floats cannot represent `0.25 - 0.20` exactly; a tie still fails.
 
 ### Production promotion path
 
@@ -212,7 +224,8 @@ only production call:
   one transaction through `archive.promote_evidence`;
 - the history row stores **no metric** (`metric`/`value` are NULL) and the
   decision detail records the policy id/version, the evidence checksum, the
-  champion checksum, the candidate spec hash and the dataset id.
+  champion checksum, the candidate spec hash, the dataset id/checksum and the
+  settings digest.
 
 An evidence promotion is therefore distinguishable from an exploratory one by
 inspection: `metric IS NULL` and `detail_json.mode == "evidence"` mark the
@@ -238,7 +251,11 @@ Acceptance is **policy compliance**, not proof of an edge. The bundle contains
 historical simulation evidence; a policy pass says the measured sample, stability,
 cost stress, interval, complexity and search exposure cleared the checks this
 project chose. None of that predicts future profitability, and none of it
-replaces the still-missing locked final OOS evaluation.
+replaces the still-missing locked final OOS evaluation. The identity now includes
+the dataset checksum and the execution-settings digest, so a bundle built with
+different costs cannot be promoted as if it were the same experiment, and the
+selection-fold cap limits — but does not remove — the fact that the search saw the
+validation slice.
 
 Two structural limits are worth stating. The bundle records its fold/CI
 `EvidencePolicy` but not the promotion policy id/version, so the decision and the

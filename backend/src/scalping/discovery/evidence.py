@@ -19,10 +19,10 @@ What it guarantees
   purge/embargo gap immediately before it, and its training window is every row
   from the discovery start up to that gap. Boundaries depend only on row counts
   and configuration, so the same bundle always cuts the same folds.
-* **Fail closed.** Fewer than three folds, a fold below the trade minimum, a
-  missing stress multiplier, missing regime labels, a non-finite number or any
-  identity mismatch raises :class:`EvidenceError` with a stable code. No
-  partial bundle is returned.
+* **Fail closed.** Fewer than three folds, an empty validation/test split, a
+  fold below the trade minimum, a missing or no-op stress multiplier, missing
+  regime labels, a non-finite number or any identity mismatch raises
+  :class:`EvidenceError` with a stable code. No partial bundle is returned.
 * **Not a promotion.** A bundle records evidence; it does not select, promote
   or claim profitability. The locked final OOS call and the multiple-testing
   correction are deliberately still missing (see
@@ -48,7 +48,9 @@ fold's test block.
 
 The candidate is fixed (a DSL policy has no fitted parameters), so the training
 range is recorded for provenance rather than refitted. "Expanding window" means
-every later fold's recorded training history contains the earlier test blocks.
+every later fold's recorded training history contains all earlier test blocks
+except the trailing purge/embargo rows that sit immediately before the new test
+block.
 
 Confidence intervals
 --------------------
@@ -78,7 +80,7 @@ from scalping.backtest.metrics import Metrics
 from scalping.config import Settings
 from scalping.datasets.builder import DatasetBundle
 from scalping.discovery.evaluate import DslEvaluator
-from scalping.discovery.protocols import canonical_json
+from scalping.discovery.protocols import canonical_digest, canonical_json
 from scalping.features.build import FeatureFrame
 from scalping.regime.rules import classify
 from scalping.regime.strategy import UNKNOWN_REGIME
@@ -95,22 +97,26 @@ __all__ = [
     "EvidencePolicy",
     "FoldEvidence",
     "RegimeEvidence",
+    "SplitBoundaries",
     "StressEvidence",
     "bootstrap_ci",
     "build_evidence",
     "evidence_checksum",
+    "settings_digest",
     "verify_evidence",
 ]
 
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
-EVIDENCE_SCHEMA_VERSION: Final[int] = 1
+EVIDENCE_SCHEMA_VERSION: Final[int] = 2
 
 #: A promotion policy needs at least three folds to say anything about stability.
 MIN_EVIDENCE_FOLDS: Final[int] = 3
 
 #: Dataset id tokens that name the untouched test/holdout split. Mirrors the
 #: guard in :mod:`scalping.discovery.evaluate` without importing its private name.
-_HOLDOUT_TOKENS: Final[frozenset[str]] = frozenset({"test", "tests", "holdout", "final", "locked"})
+_HOLDOUT_TOKENS: Final[frozenset[str]] = frozenset(
+    {"test", "tests", "holdout", "final", "locked", "oos", "unseen", "outofsample"}
+)
 
 _TOKEN_SPLIT: Final[re.Pattern[str]] = re.compile(r"[^a-z0-9]+")
 
@@ -323,14 +329,33 @@ class AggregateEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class SplitBoundaries:
+    """Dataset split edges as half-open ``DatasetBundle`` row offsets.
+
+    ``train_start_row`` is the first bundle row, ``validation_end_row`` is where
+    the discovery timeline stops and ``test_start_row`` is the first untouched
+    test row. A promotion policy can therefore tell a selection fold from the
+    locked holdout without re-deriving the manifest mapping.
+    """
+
+    train_start_row: int
+    train_end_row: int
+    validation_start_row: int
+    validation_end_row: int
+    test_start_row: int
+    test_end_row: int
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateEvidence:
     """Immutable evidence bundle for one candidate on one dataset build.
 
     ``checksum`` covers :meth:`to_dict` **without** ``checksum`` and
     ``created_at``, so the same inputs replay the same checksum while the
     creation stamp can differ. Identity fields make a stale bundle detectable:
-    a different dataset, spec or code version must be rejected by
-    :func:`verify_evidence` before any policy reads the numbers.
+    a different dataset, dataset checksum, spec, code version or execution
+    settings must be rejected by :func:`verify_evidence` before any policy reads
+    the numbers.
     """
 
     spec_hash: str
@@ -341,9 +366,11 @@ class CandidateEvidence:
     symbol: str
     timeframe: str
     code_version: str
+    settings_digest: str
     seed: int
     trial_count: int
     search_budget: int
+    splits: SplitBoundaries
     policy: EvidencePolicy
     folds: tuple[FoldEvidence, ...]
     aggregate: AggregateEvidence
@@ -364,6 +391,19 @@ def _names_holdout(dataset_id: str) -> bool:
     tokens = {token for token in _TOKEN_SPLIT.split(lowered) if token}
     tokens |= {token for token in _TOKEN_SPLIT.split(lowered.replace("-", "")) if token}
     return not tokens.isdisjoint(_HOLDOUT_TOKENS)
+
+
+def settings_digest(settings: Settings) -> str:
+    """Canonical sha256 of the contract, risk and cost blocks that price a run.
+
+    Settings are not part of the dataset manifest, so without this digest two
+    bundles built with different costs would share identity and could be
+    compared as if they were the same experiment. The digest uses the same
+    canonical JSON rules as candidate ids (sorted keys, no NaN).
+    """
+    if not isinstance(settings, Settings):
+        raise TypeError(f"settings must be a Settings, got {type(settings).__name__}")
+    return canonical_digest(asdict(settings))
 
 
 def _finite(value: float, *, where: str) -> float:
@@ -717,14 +757,6 @@ def _evaluate_fold(
         fold=fold,
         base=simulation.metrics,
     )
-    expected = {_stress_label(value) for value in config.cost_stress}
-    observed = {_stress_label(row.multiplier) for row in stress}
-    if observed != expected:
-        raise EvidenceError(
-            "missing_cost_stress",
-            f"fold {fold}: stress rows {sorted(observed)} do not cover {sorted(expected)}",
-        )
-
     r_multiples = tuple(
         _finite(trade.r_multiple, where=f"fold {fold} r_multiple") for trade in simulation.trades
     )
@@ -845,14 +877,17 @@ def verify_evidence(
     evidence: CandidateEvidence,
     *,
     dataset_id: str,
+    dataset_checksum: str,
     spec_hash: str,
     code_version: str,
+    settings_digest: str,
 ) -> None:
     """Reject a stale, mismatched or incomplete bundle before it is trusted.
 
-    Checks identity first (dataset, spec, code version), then the required
-    sections, then the checksum. Every failure is a typed :class:`EvidenceError`
-    with a stable code; a caller must not catch and ignore one.
+    Checks identity first (dataset id and checksum, spec, code version, execution
+    settings), then the schema version and required sections, then the checksum.
+    Every failure is a typed :class:`EvidenceError` with a stable code; a caller
+    must not catch and ignore one.
     """
     if not isinstance(evidence, CandidateEvidence):
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
@@ -860,6 +895,12 @@ def verify_evidence(
         raise EvidenceError(
             "stale_dataset",
             f"bundle is for dataset {evidence.dataset_id!r}, not {dataset_id!r}",
+        )
+    if evidence.dataset_checksum != dataset_checksum:
+        raise EvidenceError(
+            "stale_dataset_checksum",
+            f"bundle is for dataset checksum {evidence.dataset_checksum!r}, "
+            f"not {dataset_checksum!r}",
         )
     if evidence.spec_hash != spec_hash:
         raise EvidenceError(
@@ -871,13 +912,25 @@ def verify_evidence(
             "stale_code_version",
             f"bundle was built by {evidence.code_version!r}, not {code_version!r}",
         )
+    if evidence.settings_digest != settings_digest:
+        raise EvidenceError(
+            "stale_settings",
+            f"bundle was built with settings {evidence.settings_digest!r}, not {settings_digest!r}",
+        )
+    if evidence.schema_version != EVIDENCE_SCHEMA_VERSION:
+        raise EvidenceError(
+            "schema_mismatch",
+            f"bundle schema {evidence.schema_version} is not {EVIDENCE_SCHEMA_VERSION}",
+        )
 
     for name, value in (
         ("dataset_id", evidence.dataset_id),
+        ("dataset_checksum", evidence.dataset_checksum),
         ("spec_hash", evidence.spec_hash),
         ("symbol", evidence.symbol),
         ("timeframe", evidence.timeframe),
         ("code_version", evidence.code_version),
+        ("settings_digest", evidence.settings_digest),
     ):
         if not isinstance(value, str) or not value.strip():
             raise EvidenceError("missing_section", f"identity field {name} is empty")
@@ -935,8 +988,11 @@ def build_evidence(
             "insufficient_folds",
             f"{config.folds} fold(s) requested; promotion evidence needs {MIN_EVIDENCE_FOLDS}",
         )
-    if not config.cost_stress:
-        raise EvidenceError("missing_cost_stress", "no cost-stress multiplier was configured")
+    if not config.cost_stress or not any(value > 1.0 for value in config.cost_stress):
+        raise EvidenceError(
+            "missing_cost_stress",
+            "at least one cost-stress multiplier must be greater than 1.0",
+        )
     if config.trial_count > config.search_budget:
         raise EvidenceError(
             "invalid_trial_context",
@@ -946,6 +1002,16 @@ def build_evidence(
         raise EvidenceError(
             "holdout_dataset",
             f"dataset id {manifest.dataset_id!r} names a test/holdout split",
+        )
+    if manifest.validation.rows <= 0:
+        raise EvidenceError(
+            "fold_geometry",
+            "the manifest has no validation rows; discovery evidence cannot be built",
+        )
+    if manifest.test.rows <= 0:
+        raise EvidenceError(
+            "fold_geometry",
+            "the manifest has no test rows; the holdout must exist even though evidence never reads it",
         )
     if config.symbol != manifest.symbol:
         raise EvidenceError(
@@ -989,14 +1055,30 @@ def build_evidence(
             f"config complexity {config.complexity} does not match spec complexity {complexity}",
         )
 
-    train_start = int(manifest.train.start) - offset
-    discovery_end = int(manifest.validation.end) - offset
-    test_start = int(manifest.test.start) - offset
+    splits = SplitBoundaries(
+        train_start_row=int(manifest.train.start) - offset,
+        train_end_row=int(manifest.train.end) - offset,
+        validation_start_row=int(manifest.validation.start) - offset,
+        validation_end_row=int(manifest.validation.end) - offset,
+        test_start_row=int(manifest.test.start) - offset,
+        test_end_row=int(manifest.test.end) - offset,
+    )
     rows = int(dataset_bundle.split.shape[0])
-    if train_start < 0 or discovery_end > rows or discovery_end <= train_start:
+    train_start = splits.train_start_row
+    discovery_end = splits.validation_end_row
+    test_start = splits.test_start_row
+    if (
+        train_start < 0
+        or splits.train_end_row < train_start
+        or splits.validation_start_row < splits.train_end_row
+        or splits.validation_end_row <= splits.validation_start_row
+        or discovery_end > rows
+        or splits.test_end_row < test_start
+        or splits.test_end_row > rows
+    ):
         raise EvidenceError(
             "fold_geometry",
-            f"discovery range [{train_start}, {discovery_end}) is outside {rows} bundle rows",
+            f"split boundaries {splits} are not ordered inside {rows} bundle rows",
         )
     if test_start < discovery_end:
         raise EvidenceError(
@@ -1015,6 +1097,10 @@ def build_evidence(
 
     timestamps = np.asarray(dataset_bundle.ts)
     settings = Settings() if settings is None else settings
+    try:
+        settings_hash = settings_digest(settings)
+    except (TypeError, ValueError) as exc:
+        raise EvidenceError("invalid_settings", str(exc)) from exc
     fold_rows: list[FoldEvidence] = []
     all_r: list[float] = []
     per_trade_frames: list[pl.DataFrame] = []
@@ -1087,9 +1173,11 @@ def build_evidence(
         symbol=manifest.symbol,
         timeframe=manifest.timeframe,
         code_version=config.code_version,
+        settings_digest=settings_hash,
         seed=config.seed,
         trial_count=config.trial_count,
         search_budget=config.search_budget,
+        splits=splits,
         policy=policy,
         folds=tuple(fold_rows),
         aggregate=aggregate,
@@ -1102,7 +1190,9 @@ def build_evidence(
     verify_evidence(
         bundle_evidence,
         dataset_id=manifest.dataset_id,
+        dataset_checksum=manifest.checksum,
         spec_hash=spec_hash,
         code_version=config.code_version,
+        settings_digest=settings_hash,
     )
     return bundle_evidence

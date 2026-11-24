@@ -17,14 +17,18 @@ import numpy as np
 import polars as pl
 import pytest
 
-from scalping.datasets.builder import DatasetBundle, build_dataset
+from scalping.config import Settings
+from scalping.datasets.builder import DatasetBundle, SplitRange, build_dataset
 from scalping.discovery import evidence as evidence_module
 from scalping.discovery.evaluate import SimulationResult
 from scalping.discovery.evidence import (
     EvidenceConfig,
     EvidenceError,
+    FoldEvidence,
+    RegimeEvidence,
     bootstrap_ci,
     build_evidence,
+    settings_digest,
     verify_evidence,
 )
 from scalping.features.build import FeatureFrame, build_features
@@ -36,6 +40,7 @@ from scalping.strategy.dsl import (
     HoldingLimit,
     StrategySpec,
 )
+from scalping.types import CostConfig
 
 SYMBOL = "XAUUSD"
 TIMEFRAME = "M1"
@@ -118,6 +123,18 @@ def build(
 ) -> Any:
     features, bundle = discovery
     return build_evidence(bundle, long_spec(), config(**overrides), features=features)
+
+
+def verify(evidence: Any, **overrides: Any) -> None:
+    kwargs: dict[str, Any] = {
+        "dataset_id": evidence.dataset_id,
+        "dataset_checksum": evidence.dataset_checksum,
+        "spec_hash": evidence.spec_hash,
+        "code_version": evidence.code_version,
+        "settings_digest": evidence.settings_digest,
+    }
+    kwargs.update(overrides)
+    verify_evidence(evidence, **kwargs)
 
 
 def code_of(exc: pytest.ExceptionInfo[EvidenceError]) -> str:
@@ -248,12 +265,7 @@ def test_same_inputs_reproduce_the_same_checksum(
     assert first.created_at != second.created_at
     assert first.folds == second.folds
     assert first.aggregate == second.aggregate
-    verify_evidence(
-        first,
-        dataset_id=bundle.manifest.dataset_id,
-        spec_hash=long_spec().canonical_hash(),
-        code_version=config().code_version,
-    )
+    verify(first)
 
 
 def test_tampering_with_a_metric_breaks_the_checksum(
@@ -264,12 +276,7 @@ def test_tampering_with_a_metric_breaks_the_checksum(
     object.__setattr__(evidence.folds[0], "net_profit", original + 1.0)
 
     with pytest.raises(EvidenceError) as exc:
-        verify_evidence(
-            evidence,
-            dataset_id=evidence.dataset_id,
-            spec_hash=evidence.spec_hash,
-            code_version=evidence.code_version,
-        )
+        verify(evidence)
 
     assert code_of(exc) == "checksum_mismatch"
 
@@ -292,19 +299,27 @@ def test_identity_exposes_the_trial_context(
     assert evidence.symbol == SYMBOL
     assert evidence.timeframe == TIMEFRAME
     assert evidence.code_version == config().code_version
+    assert evidence.settings_digest == settings_digest(Settings())
     assert evidence.seed == config().seed
     assert evidence.trial_count == config().trial_count
     assert evidence.search_budget == config().search_budget
     assert evidence.policy.folds == config().folds
     assert evidence.policy.cost_stress == config().cost_stress
+    offset = int(features.valid_from)
+    assert evidence.splits.train_start_row == bundle.manifest.train.start - offset
+    assert evidence.splits.validation_end_row == bundle.manifest.validation.end - offset
+    assert evidence.splits.test_start_row == bundle.manifest.test.start - offset
+    assert evidence.splits.test_end_row == bundle.manifest.test.end - offset
 
 
 @pytest.mark.parametrize(
     ("field", "value", "expected"),
     [
         ("dataset_id", "XAUUSD:M1:h1:different", "stale_dataset"),
+        ("dataset_checksum", "0" * 16, "stale_dataset_checksum"),
         ("spec_hash", "0" * 64, "stale_spec"),
         ("code_version", "older-code", "stale_code_version"),
+        ("settings_digest", "0" * 64, "stale_settings"),
     ],
 )
 def test_verify_rejects_a_stale_identity(
@@ -314,15 +329,8 @@ def test_verify_rejects_a_stale_identity(
     expected: str,
 ) -> None:
     evidence = build(discovery)
-    kwargs = {
-        "dataset_id": evidence.dataset_id,
-        "spec_hash": evidence.spec_hash,
-        "code_version": evidence.code_version,
-    }
-    kwargs[field] = value
-
     with pytest.raises(EvidenceError) as exc:
-        verify_evidence(evidence, **kwargs)
+        verify(evidence, **{field: value})
 
     assert code_of(exc) == expected
 
@@ -334,17 +342,83 @@ def test_verify_rejects_a_missing_section(
     object.__setattr__(evidence, "folds", ())
 
     with pytest.raises(EvidenceError) as exc:
-        verify_evidence(
-            evidence,
-            dataset_id=evidence.dataset_id,
-            spec_hash=evidence.spec_hash,
-            code_version=evidence.code_version,
-        )
+        verify(evidence)
 
     assert code_of(exc) == "missing_section"
 
 
+def test_verify_rejects_a_stale_schema(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    evidence = build(discovery)
+    object.__setattr__(evidence, "schema_version", 1)
+
+    with pytest.raises(EvidenceError) as exc:
+        verify(evidence)
+
+    assert code_of(exc) == "schema_mismatch"
+
+
+def test_different_settings_are_a_different_identity(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    features, bundle = discovery
+    base = build_evidence(bundle, long_spec(), config(), features=features)
+    other = build_evidence(
+        bundle,
+        long_spec(),
+        config(),
+        features=features,
+        settings=Settings(costs=CostConfig(spread_floor=0.31)),
+    )
+
+    assert base.settings_digest != other.settings_digest
+    assert base.checksum != other.checksum
+    with pytest.raises(EvidenceError) as exc:
+        verify(base, settings_digest=other.settings_digest)
+
+    assert code_of(exc) == "stale_settings"
+
+
 # --- fail closed --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "span"),
+    [("validation", SplitRange(0, 0)), ("test", SplitRange(0, 0))],
+)
+def test_empty_validation_or_test_split_fails_closed(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+    field: str,
+    span: SplitRange,
+) -> None:
+    features, bundle = discovery
+    broken = replace(bundle, manifest=replace(bundle.manifest, **{field: span}))
+
+    with pytest.raises(EvidenceError) as exc:
+        build_evidence(broken, long_spec(), config(), features=features)
+
+    assert code_of(exc) == "fold_geometry"
+
+
+def test_larger_config_purge_and_embargo_widen_the_fold_gap(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    evidence = build(discovery, purge_bars=10, embargo_bars=7)
+
+    for fold in evidence.folds:
+        assert fold.purge_bars == 10
+        assert fold.embargo_bars == 7
+        assert fold.test_start_row - fold.train_end_row == 17
+
+
+def test_only_a_no_op_stress_is_refused(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    with pytest.raises(EvidenceError) as exc:
+        build(discovery, cost_stress=(1.0,))
+
+    assert code_of(exc) == "missing_cost_stress"
 
 
 def test_too_few_folds_fail_closed(discovery: tuple[FeatureFrame, DatasetBundle]) -> None:
@@ -426,6 +500,35 @@ def test_insufficient_regime_coverage_fails_closed(
     assert code_of(exc) == "regime_coverage_below_minimum"
 
 
+def test_partial_regime_coverage_counts_unknown_trades(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = evidence_module._regime_labels
+
+    def alternating(frame: FeatureFrame) -> pl.DataFrame:
+        labels = original(frame)
+        return labels.with_columns(
+            pl.when(pl.int_range(pl.len()) % 2 == 0)
+            .then(pl.lit(None, dtype=pl.String))
+            .otherwise(pl.col("regime"))
+            .alias("regime")
+        )
+
+    monkeypatch.setattr(evidence_module, "_regime_labels", alternating)
+
+    evidence = build(discovery, regime_coverage_min=0.0)
+    aggregate = evidence.aggregate
+    unknown = next(row for row in aggregate.regime_trades if row.regime == "unknown")
+
+    assert 0.0 < aggregate.regime_coverage < 1.0
+    assert unknown.trades > 0
+    assert sum(row.trades for row in aggregate.regime_trades) == aggregate.total_trades
+    for fold in evidence.folds:
+        fold_unknown = sum(row.trades for row in fold.regimes if row.regime == "unknown")
+        assert fold_unknown > 0
+
+
 # --- stress and regimes -------------------------------------------------------
 
 
@@ -470,6 +573,63 @@ def test_aggregate_reports_consistency_and_bootstrap_cis(
     assert aggregate.max_drawdown == max(fold.max_drawdown for fold in evidence.folds)
 
 
+def test_aggregate_metrics_match_a_hand_computed_sample() -> None:
+    def per_trade() -> pl.DataFrame:
+        return pl.DataFrame(
+            {
+                "entry_ts": [
+                    datetime(2026, 1, 5, tzinfo=UTC) + timedelta(minutes=index)
+                    for index in range(3)
+                ],
+                "r_multiple": [-1.0, 2.0, 3.0],
+                "pnl": [-10.0, 20.0, 30.0],
+                "regime": ["a", "a", "a"],
+            }
+        )
+
+    def fold_row(number: int, net_profit: float, drawdown: float) -> FoldEvidence:
+        return FoldEvidence(
+            fold=number,
+            train_start_row=0,
+            train_end_row=10,
+            test_start_row=15,
+            test_end_row=25,
+            train_rows=10,
+            test_rows=10,
+            train_start_ts="2026-01-05T00:00:00+00:00",
+            train_end_ts="2026-01-05T00:09:00+00:00",
+            test_start_ts="2026-01-05T00:15:00+00:00",
+            test_end_ts="2026-01-05T00:24:00+00:00",
+            purge_bars=5,
+            embargo_bars=0,
+            trades=3,
+            net_profit=net_profit,
+            profit_factor=2.0,
+            win_rate=2 / 3,
+            expectancy_r=4 / 3,
+            max_drawdown=drawdown,
+            regimes=(RegimeEvidence("a", 3, 40.0, 2 / 3, 4 / 3, 4.0),),
+            stress=(),
+        )
+
+    aggregate = evidence_module._aggregate(
+        [fold_row(1, 40.0, 0.2), fold_row(2, -10.0, 0.35)],
+        [-1.0, 2.0, 3.0, -1.0, 2.0, 3.0],
+        [per_trade(), per_trade()],
+        config(),
+    )
+
+    assert aggregate.total_trades == 6
+    assert aggregate.total_r == 8.0
+    assert aggregate.expectancy_r == pytest.approx(8.0 / 6.0)
+    assert aggregate.profit_factor == pytest.approx(100.0 / 20.0)
+    assert aggregate.positive_folds == 1
+    assert aggregate.positive_fold_fraction == 0.5
+    assert aggregate.max_drawdown == 0.35
+    assert aggregate.regime_coverage == 1.0
+    assert aggregate.regime_trades[0].trades == 6
+
+
 # --- bootstrap ----------------------------------------------------------------
 
 
@@ -485,6 +645,21 @@ def test_bootstrap_ci_matches_a_hand_computable_sample() -> None:
     # 2.5%/97.5% percentiles therefore sit on the extreme values.
     assert two_values_mean == (-1.0, 1.0)
     assert two_values_sum == (-2.0, 2.0)
+
+
+def test_bootstrap_interval_is_not_degenerate_on_a_known_sample() -> None:
+    rng = np.random.default_rng(20261124)
+    data = rng.normal(0.0, 1.0, 1000)
+
+    low, high = bootstrap_ci(data, samples=2000, seed=9)
+
+    mean = float(data.mean())
+    standard_error = float(data.std(ddof=0)) / math.sqrt(data.size)
+    expected_low = mean - 1.959964 * standard_error
+    expected_high = mean + 1.959964 * standard_error
+    assert high > low
+    assert abs(low - expected_low) < 0.02
+    assert abs(high - expected_high) < 0.02
 
 
 def test_bootstrap_rejects_bad_input() -> None:

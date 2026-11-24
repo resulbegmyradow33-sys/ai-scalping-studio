@@ -144,7 +144,8 @@ correctly, never that the candidate has an edge.
 
 | Section | Fields |
 |---|---|
-| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `seed`, `trial_count`, `search_budget` |
+| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget` |
+| splits | `SplitBoundaries`: half-open `train`, `validation` and `test` row offsets, so a policy can tell a selection fold from the locked holdout |
 | policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
@@ -152,8 +153,11 @@ correctly, never that the candidate has an edge.
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
 no losses) is rejected rather than clamped: the fold has no loss evidence. The
-identity is part of the checksum, so a stale dataset, spec or code version is
-detectable before a policy reads a metric.
+identity is part of the checksum, so a stale dataset, dataset checksum, spec,
+code version or execution-settings digest is detectable before a policy reads a
+metric. `settings_digest` hashes the contract, risk and cost blocks, because
+settings are not in the dataset manifest and two bundles priced differently must
+not share identity.
 
 ### Fold geometry
 
@@ -199,10 +203,10 @@ later extension, not silently assumed.
 | Code | Trigger |
 |---|---|
 | `insufficient_folds` | fewer than 3 folds, or too few rows to fill the blocks |
-| `fold_geometry` | empty train/test range, overlapping test blocks, test rows inside the timeline |
+| `fold_geometry` | empty train/test/validation range, overlapping test blocks, test rows inside the timeline |
 | `fold_too_small` | a test block is no longer than the observation window |
 | `fold_trades_below_minimum` | a fold closes fewer trades than the policy minimum |
-| `missing_cost_stress` | no multiplier configured, or a fold is missing a configured row |
+| `missing_cost_stress` | no multiplier configured, no multiplier above 1.0, or a fold is missing a configured row |
 | `missing_regime_evidence` | the rule engine returned no labels |
 | `regime_coverage_below_minimum` | too few trades have a regime at entry |
 | `non_finite_evidence` | any stored metric, R multiple or CI bound is not finite |
@@ -211,8 +215,9 @@ later extension, not silently assumed.
 | `complexity_mismatch` | the configured complexity differs from the spec |
 | `invalid_trial_context` | `trial_count` exceeds `search_budget` |
 | `frame_mismatch` | the supplied feature frame is not the bundle's source frame |
-| `invalid_spec` | the DSL spec fails validation |
-| `stale_dataset` / `stale_spec` / `stale_code_version` | verification identity differs |
+| `invalid_spec` / `invalid_settings` | the DSL spec fails validation, or the settings cannot be hashed |
+| `stale_dataset` / `stale_dataset_checksum` / `stale_spec` / `stale_code_version` / `stale_settings` | verification identity differs from the expected data build, spec, code or settings |
+| `schema_mismatch` | the bundle layout version is not the one the verifier reads |
 | `checksum_mismatch` / `missing_section` | a bundle was edited or is incomplete |
 
 ### What is still missing
@@ -223,9 +228,10 @@ later extension, not silently assumed.
   defaults `require_locked_oos=False`; setting it `True` rejects every bundle
   until a locked-OOS section exists. That rejection is honest, not a bug.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
-  and `scalping.discovery.promotion.PROMOTION_V1` caps both, but no deflated
-  metric or false-discovery control is applied here. A policy pass bounds the
-  exposure; it does not undo it.
+  and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
+  folds may overlap the validation/selection window, but no deflated metric or
+  false-discovery control is applied here. A policy pass bounds the exposure; it
+  does not undo it.
 - **Parameter-neighbourhood and cross-symbol stability.** One spec on one
   dataset build is measured; a sensitivity sweep is not.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,

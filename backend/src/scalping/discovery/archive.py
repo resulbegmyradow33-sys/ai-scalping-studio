@@ -1457,6 +1457,8 @@ class DiscoveryArchive:
         policy_version: int,
         evidence_checksum: str,
         dataset_id: str,
+        dataset_checksum: str,
+        settings_digest: str,
         candidate_spec_hash: str,
         champion_checksum: str | None = None,
         detail: Mapping[str, Any] | None = None,
@@ -1473,15 +1475,19 @@ class DiscoveryArchive:
           manual-override id, and ``policy_version`` must be positive.
         * ``evidence_checksum`` must be a sha256 hex digest; the decision that
           carried it is the only reason this promotion exists.
+        * ``dataset_checksum`` and ``settings_digest`` are required digests: a
+          promotion must name the exact data build and execution settings it
+          was measured under.
         * every scope token must appear in ``dataset_id``, the same convention
           trials use, so evidence from another symbol/timeframe cannot promote
           here.
 
         The promotion row stores no metric (``metric``/``value`` are NULL) and
         the decision's ``detail_json`` records the policy id/version, the
-        evidence checksum, the champion checksum and the candidate spec hash.
-        That makes an evidence promotion distinguishable from an exploratory
-        metric-only promotion by inspection, not by convention.
+        evidence checksum, the champion checksum, the dataset id/checksum, the
+        settings digest and the candidate spec hash. That makes an evidence
+        promotion distinguishable from an exploratory metric-only promotion by
+        inspection, not by convention.
 
         This is the archive primitive. Call
         :func:`scalping.discovery.promotion.promote_with_evidence` in production
@@ -1505,6 +1511,8 @@ class DiscoveryArchive:
         if policy_version < 1:
             raise ValueError(f"policy_version must be >= 1, got {policy_version}")
         evidence_checksum = _require_digest(evidence_checksum, "evidence_checksum")
+        dataset_checksum = _require_digest(dataset_checksum, "dataset_checksum")
+        settings_digest = _require_digest(settings_digest, "settings_digest")
         champion_checksum = (
             None
             if champion_checksum is None
@@ -1582,6 +1590,8 @@ class DiscoveryArchive:
                         "champion_checksum": champion_checksum,
                         "candidate_spec_hash": candidate_spec_hash,
                         "dataset_id": dataset_id,
+                        "dataset_checksum": dataset_checksum,
+                        "settings_digest": settings_digest,
                         "previous_candidate_id": previous_id,
                         "promotion_id": int(promotion_id),
                     }

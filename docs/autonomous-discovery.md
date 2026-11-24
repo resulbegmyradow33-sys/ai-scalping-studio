@@ -349,9 +349,10 @@ champion = promote_with_evidence(
 ```
 
 `promote_with_evidence` refuses a rejected decision and writes the policy
-id/version and the evidence checksum into the audit detail. The history row
-stores no metric (`metric`/`value` are NULL); `detail_json.mode` is `"evidence"`.
-The policy, its thresholds and every rejection code are documented in
+id/version, the evidence checksum, the dataset id/checksum and the settings
+digest into the audit detail. The history row stores no metric
+(`metric`/`value` are NULL); `detail_json.mode` is `"evidence"`. The policy, its
+thresholds and every rejection code are documented in
 `docs/local-learning-engine.md`.
 
 The older one-metric path remains for research only:

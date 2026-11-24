@@ -81,11 +81,13 @@ from scalping.discovery.archive import (
     DiscoveryArchive,
 )
 from scalping.discovery.evidence import (
-    EVIDENCE_SCHEMA_VERSION,
     MIN_EVIDENCE_FOLDS,
     CandidateEvidence,
+    EvidenceError,
     EvidencePolicy,
+    SplitBoundaries,
     evidence_checksum,
+    verify_evidence,
 )
 
 __all__ = [
@@ -103,16 +105,6 @@ __all__ = [
 
 #: Version of a manual-override record's own shape, not of a promotion policy.
 MANUAL_OVERRIDE_VERSION: Final[int] = 1
-
-#: Fields whose absence makes a bundle unusable before any threshold is read.
-_REQUIRED_IDENTITY: Final[tuple[str, ...]] = (
-    "spec_hash",
-    "dataset_id",
-    "dataset_checksum",
-    "code_version",
-    "symbol",
-    "timeframe",
-)
 
 #: Fixed labels the policy compares against stored stress multipliers.
 _MULTIPLIER_TOLERANCE: Final[float] = 1e-9
@@ -141,6 +133,13 @@ class PromotionPolicy:
     schema has no locked-OOS section. Setting it ``True`` is honest and makes
     every promotion reject until that section is added; it is not a switch to
     flip casually.
+
+    ``max_selection_fold_share`` caps the fraction of folds whose test block
+    overlaps the dataset's validation window. Those folds were inside the slice
+    the search selected on, so a bundle made mostly of them is closer to
+    in-sample evidence than to walk-forward evidence. ``0`` disables the check
+    explicitly; the default ``0.4`` requires a clear majority of folds to sit
+    outside the selection window (one of three is fine, two of four is not).
     """
 
     policy_id: str
@@ -158,6 +157,7 @@ class PromotionPolicy:
     max_trials: int
     min_improvement_r: float
     require_locked_oos: bool = False
+    max_selection_fold_share: float = 0.4
 
     def __post_init__(self) -> None:
         if not isinstance(self.policy_id, str):
@@ -244,6 +244,16 @@ class PromotionPolicy:
         if not isinstance(self.require_locked_oos, bool):
             raise TypeError("require_locked_oos must be a bool")
 
+        share = self.max_selection_fold_share
+        if isinstance(share, bool) or not isinstance(share, (int, float)):
+            raise TypeError(
+                f"max_selection_fold_share must be a number, got {type(share).__name__}"
+            )
+        if not math.isfinite(float(share)) or not 0.0 <= float(share) <= 1.0:
+            raise ValueError(
+                f"max_selection_fold_share must be in [0, 1] (0 disables it), got {share!r}"
+            )
+
 
 #: The documented starting policy. Values are policy, not statistics: they encode
 #: how much evidence this project demands before a DSL spec may trade.
@@ -262,6 +272,8 @@ class PromotionPolicy:
 #:   to have measured;
 #: * 40 structural nodes and 500 trials — bounded complexity and bounded
 #:   multiple-testing exposure;
+#: * at most 40% of folds inside the validation/selection window — a majority of
+#:   the evidence must sit outside the slice the search chose on;
 #: * +0.05R over the champion — a new champion must improve, not tie.
 PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     policy_id="promotion-v1",
@@ -279,6 +291,7 @@ PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     max_trials=500,
     min_improvement_r=0.05,
     require_locked_oos=False,
+    max_selection_fold_share=0.4,
 )
 
 
@@ -318,6 +331,8 @@ class PromotionDecision:
     candidate_spec_hash: str | None
     champion_spec_hash: str | None
     dataset_id: str | None
+    dataset_checksum: str | None
+    settings_digest: str | None
     code_version: str | None
     observed: Mapping[str, Any] = field(default_factory=dict, compare=False)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
@@ -334,6 +349,10 @@ class PromotionDecision:
             raise ValueError("an accepted decision cannot carry rejections")
         if self.accepted and not self.evidence_checksum:
             raise ValueError("an accepted decision requires an evidence checksum")
+        if self.accepted and not (self.dataset_checksum and self.settings_digest):
+            raise ValueError(
+                "an accepted decision requires a dataset checksum and a settings digest"
+            )
         if self.policy_id == MANUAL_OVERRIDE_POLICY_ID:
             raise ValueError("a promotion decision cannot claim the manual-override policy")
 
@@ -364,6 +383,8 @@ class PromotionDecision:
             "candidate_spec_hash": self.candidate_spec_hash,
             "champion_spec_hash": self.champion_spec_hash,
             "dataset_id": self.dataset_id,
+            "dataset_checksum": self.dataset_checksum,
+            "settings_digest": self.settings_digest,
             "code_version": self.code_version,
             "observed": dict(self.observed),
             "created_at": self.created_at,
@@ -500,6 +521,56 @@ def _fold_boundaries(evidence: CandidateEvidence) -> tuple[tuple[int, int, int, 
     )
 
 
+def _selection_folds(evidence: CandidateEvidence) -> tuple[int, ...]:
+    """Folds whose test block intersects the dataset's validation window.
+
+    The search selects on the validation split, so a fold that overlaps it is
+    selection evidence: useful, but not independent walk-forward evidence.
+    Half-open intersection, so a fold that ends exactly where validation starts
+    is not counted.
+    """
+    splits = evidence.splits
+    return tuple(
+        fold.fold
+        for fold in evidence.folds
+        if fold.test_start_row < splits.validation_end_row
+        and fold.test_end_row > splits.validation_start_row
+    )
+
+
+def _verify(
+    evidence: CandidateEvidence,
+    rejections: list[PromotionRejection],
+    observed: dict[str, Any],
+) -> bool:
+    """Run the evidence module's verifier against the bundle's own identity.
+
+    ``verify_evidence`` is the single owner of checksum, schema, identity and
+    required-section rules, so the policy does not re-implement them and cannot
+    drift from the builder. Passing the bundle's own fields catches an edited
+    payload, an unknown layout and an empty identity; staleness against another
+    dataset or settings is a separate comparison (champion checks).
+    """
+    try:
+        verify_evidence(
+            evidence,
+            dataset_id=evidence.dataset_id,
+            dataset_checksum=evidence.dataset_checksum,
+            spec_hash=evidence.spec_hash,
+            code_version=evidence.code_version,
+            settings_digest=evidence.settings_digest,
+        )
+    except EvidenceError as exc:
+        _reject(rejections, exc.code, str(exc).removeprefix(f"{exc.code}: "))
+        return False
+    except (TypeError, ValueError) as exc:
+        # canonical_json refuses NaN/inf, so an unverifiable payload lands here.
+        _reject(rejections, "checksum_mismatch", f"the bundle payload is not canonical: {exc}")
+        return False
+    observed["evidence_checksum"] = evidence.checksum
+    return True
+
+
 def _check_bundle(
     evidence: CandidateEvidence,
     policy: PromotionPolicy,
@@ -507,37 +578,16 @@ def _check_bundle(
     observed: dict[str, Any],
 ) -> None:
     """Identity, structure, sample and threshold checks on the candidate alone."""
-    computed = evidence_checksum(evidence)
-    if evidence.checksum != computed:
+    _verify(evidence, rejections, observed)
+
+    if not isinstance(evidence.splits, SplitBoundaries):
         _reject(
             rejections,
-            "checksum_mismatch",
-            "the bundle checksum does not re-derive from its payload",
-            observed=evidence.checksum[:12] if evidence.checksum else "",
-            required=computed[:12],
+            "missing_section",
+            "the bundle has no dataset split boundaries",
+            observed=type(evidence.splits).__name__,
+            required="SplitBoundaries",
         )
-    else:
-        observed["evidence_checksum"] = computed
-
-    if evidence.schema_version != EVIDENCE_SCHEMA_VERSION:
-        _reject(
-            rejections,
-            "schema_unsupported",
-            "the bundle layout version is not the one this policy reads",
-            observed=evidence.schema_version,
-            required=EVIDENCE_SCHEMA_VERSION,
-        )
-
-    for name in _REQUIRED_IDENTITY:
-        value = getattr(evidence, name)
-        if not isinstance(value, str) or not value.strip():
-            _reject(
-                rejections,
-                "missing_section",
-                f"identity field {name} is empty; the bundle cannot be attributed",
-                observed=name,
-                required="non-empty",
-            )
 
     if not isinstance(evidence.policy, EvidencePolicy):
         _reject(
@@ -554,6 +604,18 @@ def _check_bundle(
             "the bundle records no bootstrap samples",
             observed=evidence.policy.bootstrap_samples,
             required=1,
+        )
+
+    if isinstance(evidence.policy, EvidencePolicy) and (
+        not evidence.policy.cost_stress
+        or not any(float(value) > 1.0 for value in evidence.policy.cost_stress)
+    ):
+        _reject(
+            rejections,
+            "missing_cost_stress",
+            "the bundle's evidence policy has no genuine cost-stress multiplier above 1.0",
+            observed="none > 1.0",
+            required="> 1.0",
         )
 
     folds = evidence.folds
@@ -620,6 +682,23 @@ def _check_bundle(
                 required=previous_end,
             )
         previous_end = fold.test_end_row
+
+    if isinstance(evidence.splits, SplitBoundaries) and policy.max_selection_fold_share > 0.0:
+        selection = _selection_folds(evidence)
+        share = len(selection) / len(folds)
+        observed["selection_fold_share"] = share
+        observed["selection_folds"] = selection
+        if share > policy.max_selection_fold_share + _COMPARISON_TOLERANCE:
+            _reject(
+                rejections,
+                "selection_fold_share",
+                (
+                    f"{len(selection)} of {len(folds)} folds overlap the validation/selection "
+                    "window; the policy requires more independent folds"
+                ),
+                observed=share,
+                required=policy.max_selection_fold_share,
+            )
 
     fold_trades = sum(int(fold.trades) for fold in folds)
     if fold_trades != int(aggregate.total_trades):
@@ -844,6 +923,26 @@ def _check_champion(
         )
         return
 
+    # A comparison without the same identity is not a comparison. Missing
+    # identity is its own code; differing values get a specific mismatch below.
+    missing: list[str] = []
+    for side, bundle in (("candidate", evidence), ("champion", champion_evidence)):
+        for name in ("dataset_checksum", "settings_digest", "code_version"):
+            value = getattr(bundle, name)
+            if not isinstance(value, str) or not value.strip():
+                missing.append(f"{side}.{name}")
+        if not bundle.folds:
+            missing.append(f"{side}.folds")
+    if missing:
+        _reject(
+            rejections,
+            "incomparable_evidence",
+            "candidate and champion do not carry the identity a comparison needs",
+            observed=",".join(missing[:8]),
+            required="dataset_checksum, settings_digest, code_version, folds",
+        )
+        return
+
     if champion_evidence.checksum != evidence_checksum(champion_evidence):
         _reject(
             rejections,
@@ -884,6 +983,14 @@ def _check_champion(
             "candidate and champion were measured on different dataset builds",
             observed=evidence.dataset_checksum[:12],
             required=champion_evidence.dataset_checksum[:12],
+        )
+    if champion_evidence.settings_digest != evidence.settings_digest:
+        _reject(
+            rejections,
+            "champion_settings_mismatch",
+            "candidate and champion were priced under different execution settings",
+            observed=evidence.settings_digest[:12],
+            required=champion_evidence.settings_digest[:12],
         )
     if champion_evidence.code_version != evidence.code_version:
         _reject(
@@ -990,6 +1097,8 @@ def evaluate_promotion(
             candidate_spec_hash=None,
             champion_spec_hash=champion_spec_hash,
             dataset_id=None,
+            dataset_checksum=None,
+            settings_digest=None,
             code_version=None,
             observed=observed,
         )
@@ -1004,19 +1113,19 @@ def evaluate_promotion(
         observed,
     )
 
-    checksum = evidence_checksum(evidence)
-    checksum_ok = evidence.checksum == checksum
-    accepted = not rejections and checksum_ok
+    accepted = not rejections
     return PromotionDecision(
         accepted=accepted,
         rejections=tuple(rejections),
         policy_id=policy.policy_id,
         version=policy.version,
-        evidence_checksum=checksum if checksum_ok else None,
+        evidence_checksum=observed.get("evidence_checksum"),
         champion_checksum=None if champion_evidence is None else champion_evidence.checksum,
         candidate_spec_hash=evidence.spec_hash or None,
         champion_spec_hash=champion_spec_hash,
         dataset_id=evidence.dataset_id or None,
+        dataset_checksum=evidence.dataset_checksum or None,
+        settings_digest=evidence.settings_digest or None,
         code_version=evidence.code_version or None,
         observed=observed,
     )
@@ -1103,6 +1212,8 @@ def promote_with_evidence(
         )
     if decision.dataset_id is None:  # pragma: no cover - accepted bundle has one
         raise PromotionRefused("an accepted decision has no dataset id")
+    if decision.dataset_checksum is None or decision.settings_digest is None:
+        raise PromotionRefused("an accepted decision has no dataset checksum or settings digest")
 
     return archive.promote_evidence(
         candidate_id,
@@ -1112,6 +1223,8 @@ def promote_with_evidence(
         policy_version=decision.version,
         evidence_checksum=decision.evidence_checksum,
         dataset_id=decision.dataset_id,
+        dataset_checksum=decision.dataset_checksum,
+        settings_digest=decision.settings_digest,
         candidate_spec_hash=decision.candidate_spec_hash,
         champion_checksum=decision.champion_checksum,
         detail={
