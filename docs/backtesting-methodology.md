@@ -235,9 +235,11 @@ later extension, not silently assumed.
   not a bug: the holdout slice attaches the section.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
-  folds may overlap the validation/selection window, but no deflated metric or
-  false-discovery control is applied here. A policy pass bounds the exposure; it
-  does not undo it.
+  folds may overlap the validation/selection window. The screening control in
+  `scalping.discovery.selection` now applies a Bonferroni/Sidak-adjusted mean-R
+  test and a deflated effect floor, but no evidence bundle or promotion policy
+  consumes its report automatically. A policy pass bounds the exposure; it does
+  not undo it.
 - **Parameter-neighbourhood and cross-symbol stability.** One spec on one
   dataset build is measured; a sensitivity sweep is not.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
@@ -258,6 +260,168 @@ policy accept it, not `paper-traded` until the exact spec runs in the paper
 engine, and never a profitability claim. Discovery produces candidates; a
 bundle is not a promotion, and a validation winner after N trials is a
 multiple-testing warning rather than evidence of a durable edge.
+
+## Multiple-testing and data-snooping control (discovery)
+
+`scalping.discovery.selection` answers one narrow question: after a search
+scored `m` candidates and kept the best, is the winner's mean R still above a
+threshold that accounts for the search? It is a screening control. It never
+promotes, never selects and never writes the archive.
+
+### Inputs
+
+| Config field | Default | Meaning |
+|---|---|---|
+| `trial_count` | `1` | candidates actually scored before this winner, including rejected ones |
+| `search_budget` | `100` | the run's declared cap; a trial count above it is an inconsistent record |
+| `family_alpha` | `0.05` | family-wise error rate, not a per-test rate; must be in `(0, 0.5)` |
+| `min_effect` | `0.0` | economically meaningful mean R before deflation; a floor, never a target |
+| `complexity` | `0` | the candidate's structural cost; only a logarithm enters the penalty |
+| `folds` | `3` | contiguous chunks used for the minimum-sample check, not an OOS split |
+| `seed` | `0` | makes the naive percentile bootstrap reproducible |
+
+`selection_report(trades, config)` reads each closed trade's `r_multiple`
+(already net of costs) in chronological order. It refuses, with a stable
+`SelectionError` code:
+
+- `trial_count < 1`, a non-positive or above-`1 000 000` `search_budget`, or
+  `trial_count > search_budget`;
+- a non-finite `r_multiple`, `family_alpha`, `min_effect` or computed statistic;
+- fewer than `max(folds * 5, 10)` trades;
+- a zero-variance sample, where the standard error is zero and a t-test would
+  be undefined.
+
+The fold count is a diagnostic, not walk-forward evidence: the ordered trades
+are cut into contiguous chunks and every chunk must hold at least five trades.
+Balanced chunking makes that automatic once the total floor is met. The
+implementation also bounds `folds` to `1..100`, `complexity` to `1 000 000` and
+`seed` to `2**63 - 1`, so a nonsense integer cannot make the arithmetic or the
+RNG call undefined.
+
+### Family-wise significance
+
+The test is one-sided over the mean R multiple:
+
+```text
+t      = mean_r / (s / sqrt(n))          with n - 1 degrees of freedom
+p      = P(T > t)                        one-sided, unadjusted
+alpha_B = family_alpha / m               Bonferroni per-test rate
+alpha_S = 1 - (1 - family_alpha) ** (1/m)   Sidak per-test rate
+alpha*  = min(alpha_B, alpha_S)           the value that gates
+t*      = t quantile at 1 - alpha*
+threshold_r = t* * s / sqrt(n)
+```
+
+Bonferroni is always at most Sidak for `m > 1`, and Bonferroni controls the
+family-wise error rate without assuming independent trials. Sidak is reported
+for reference only. The report also exposes the equivalent
+`bonferroni_p_value = min(1, m * p)`.
+
+With one trial and `family_alpha = 0.05`, this reduces to the ordinary
+one-sided 95% t-test. With `m` trials it is not the ordinary test repeated: the
+critical value moves with `m`, and `threshold_r` grows.
+
+### Deflated effect floor
+
+Significance alone is not economic substance, and the winner of many trials is
+biased upward even when the null is true. The required mean R is raised by a
+penalty scaled by the standard error:
+
+```text
+search_term     = sqrt(2 * ln(max(m, 1)))
+complexity_term = 0.25 * ln(1 + complexity)
+penalty_r       = min(1.0, 0.5 * se * (search_term + complexity_term))
+deflated_r      = max(min_effect, threshold_r + penalty_r)
+```
+
+`sqrt(2 ln m)` is the leading order of the expected maximum of `m` independent
+standard normals, the intuition shared with a deflated Sharpe ratio. The
+complexity term charges for a larger hypothesis space. The `0.5` factor keeps
+the penalty from double-counting the critical value. The `1.0 R` cap prevents
+an extreme trial count from producing an unbounded requirement. These
+coefficients are stated heuristics, not calibrated constants; no decimal of the
+deflated threshold should be read as precision.
+
+The report passes only when both conditions hold:
+
+```text
+mean_r >= deflated_r
+bonferroni_p_value <= family_alpha
+```
+
+The second condition is arithmetically implied by the first up to floating-point
+rounding; it is checked so the threshold and p-value cannot disagree silently.
+
+### Naive interval
+
+`naive_ci` is a seeded percentile bootstrap of the mean, 1 000 resamples,
+two-sided at `1 - family_alpha`. It is called naive because it ignores the
+number of trials and the selection of this candidate. It is iid by
+construction: it destroys streak clustering and can look tighter than a
+chronological trade sequence supports. A block bootstrap is not implemented.
+
+### Promotion advice
+
+`promotion_advice(report)` returns a recommendation and reasons, never a
+promotion:
+
+| Recommendation | When |
+|---|---|
+| `accept` | the report passed the adjusted threshold and deflated floor |
+| `reject` | the report failed **and** the naive interval's upper bound is below `min_effect`, so the required effect is ruled out |
+| `insufficient_evidence` | the report failed but the interval still leaves the required effect possible, or the supplied sample is below a stricter `min_trades` floor |
+
+Statistical non-significance is reported as insufficient evidence, not as
+proof of no edge. `accept` means only "this screening control did not stop the
+candidate". The named, versioned promotion policy still judges identity, fold
+geometry, locked out-of-sample evidence, cost stress, regime coverage and the
+champion comparison. The advice object has no policy authority and cannot be
+passed to the archive or the promotion path.
+
+### Limits
+
+- **The trial count must be truthful.** Unrecorded trials, a changed search
+  space, discarded candidates or adaptive stopping all invalidate the
+  correction. The module cannot detect them.
+- **No look-elsewhere guarantee.** The correction covers the finite number of
+  trials the caller declares. It says nothing about an unbounded or uncountable
+  search space, and it is not a p-hacking panacea: a lucky result can still
+  pass, and a manipulated search can still produce a report that looks honest.
+- **iid and normal-ish assumptions.** A t-test and an iid bootstrap assume
+  trade R multiples are sufficiently independent and similarly distributed.
+  Serial dependence, regime shifts, cost changes and path-dependent sizing can
+  make both the p-value and the interval optimistic.
+- **The deflated penalty is a heuristic.** It is bounded, monotonic in trials
+  and complexity, and deliberately coarse. It is not a posterior probability,
+  a false-discovery rate or a calibrated expected maximum.
+- **No parameter-neighbourhood, cross-symbol or out-of-sample evidence.** One
+  candidate's trade list is screened. Parameter stability and the locked
+  holdout are separate gates.
+- **Not a promotion.** A passing report is a candidate for independent
+  evidence, never a champion and never a profitability claim.
+
+```python
+from scalping.discovery.selection import (
+    SelectionConfig,
+    promotion_advice,
+    selection_report,
+)
+
+report = selection_report(
+    trades,
+    SelectionConfig(
+        trial_count=42,
+        search_budget=100,
+        complexity=12,
+        min_effect=0.05,
+        folds=3,
+        seed=7,
+    ),
+)
+advice = promotion_advice(report)
+print(report.to_dict())
+print(advice.recommendation, advice.reasons)
+```
 
 ## Reproducing a candidate experiment (discovery)
 
