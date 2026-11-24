@@ -595,3 +595,12 @@ uv run pytest
 cd ../frontend
 npm test -- src/app/paper/page.test.tsx
 ```
+
+## UI accessibility
+
+The `/paper` page follows WCAG 2.2 AA where its code can enforce it: labelled
+controls, captions and `scope` on every table, focusable scroll regions, explicit
+empty/missing/unreadable states, and a focus target after the inline close
+confirmation. Contrast, focus and announcement findings are recorded in
+`docs/ui-accessibility-audit-2026-11-24.md`; the reusable gate for new pages is
+`docs/ui-accessibility-checklist.md`.

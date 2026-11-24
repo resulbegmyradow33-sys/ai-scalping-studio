@@ -469,6 +469,9 @@ describe("MLLabPage", () => {
     await flush();
 
     expect(screen.getByTestId("ml-stress-error")).toHaveTextContent("0'dan büyük");
+    // The message is announced even though focus stays on the submit button.
+    expect(screen.getByTestId("ml-stress-error")).toHaveAttribute("role", "alert");
+    expect(screen.getByLabelText("Maliyet çarpanları")).toHaveAttribute("aria-invalid", "true");
     expect(calls.some((call) => call.path === "/api/ml/evaluate")).toBe(false);
   });
 
@@ -486,6 +489,23 @@ describe("MLLabPage", () => {
 
     expect(screen.getByTestId("ml-runs-empty")).toHaveTextContent("Henüz ML koşusu yok");
     expect(screen.queryByRole("table", { name: /ML koşuları/ })).not.toBeInTheDocument();
+  });
+
+  it("marks the selected run with aria-current, not aria-selected on the row", async () => {
+    handlers["/api/ml/runs"] = () => json([summary()]);
+    handlers["/api/ml/runs/mlrun123"] = () => json(completed());
+
+    renderPage();
+    await flush();
+
+    fireEvent.click(screen.getByRole("button", { name: "mlrun123" }));
+    await flush();
+
+    const button = screen.getByRole("button", { name: "mlrun123" });
+    expect(button).toHaveAttribute("aria-current", "true");
+    // aria-selected is not supported on a plain table row; the button carries
+    // the selection state instead.
+    expect(button.closest("tr")).not.toHaveAttribute("aria-selected");
   });
 
   it("treats a 404 runs endpoint as an explicit missing state", async () => {

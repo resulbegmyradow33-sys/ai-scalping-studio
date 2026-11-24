@@ -14,15 +14,21 @@ loop is connected.
 1. **Evidence before promotion.** Extend discovery from one validation slice to
    chronological walk-forward folds with purge/embargo, an inaccessible locked
    OOS set, realistic costs/risk and stability reporting. Track every attempted
-   candidate and address multiple-testing/data-snooping bias.
-2. **Fail-closed champion governance.** Require mandatory evidence, compare the
-   candidate and incumbent on identical windows, keep immutable lineage, reject
-   missing evidence, and test rollback. Validation-only #109 is a foundation,
-   not a production gate.
+   candidate and address multiple-testing/data-snooping bias. The fold bundle
+   (#114), fail-closed policy (#117), one-shot holdout (#121) and reproducer
+   (#130) exist; what is missing is a producer that persists the bundle from a
+   run (issue #136).
+2. **Fail-closed champion governance.** `PROMOTION_V1` (#117) requires
+   mandatory evidence, compares the candidate and incumbent on identical
+   windows, keeps immutable lineage and rejects missing evidence. It has no
+   runtime call site yet; validation-only #109 remains a foundation, not a
+   production gate.
 3. **Wire autonomy.** Register real handlers in the persistent orchestrator;
    add a scheduler/daemon, new-data/document/paper-completion triggers,
    eligibility/deduplication policies, measured RAM/CPU/disk limits and
-   isolation between paper replay and training failures.
+   isolation between paper replay and training failures. Handlers (#115),
+   guard (#112), daemon (#118) and paper-outcome trigger (#122, proposal only)
+   are merged; routing remains manual.
 4. **Connect research to discovery.** Preserve document provenance, parse
    supported sources honestly, route source-linked hypotheses to quantitative
    experiments, and never let prose create orders or bypass validation.
@@ -39,11 +45,16 @@ loop is connected.
 
 ### Mainline alignment
 
-- #105, #106, #107, #108, #109 and #110 are merged into main as of the verified
-  snapshot recorded in `STATUS.md`.
+- As of `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875`, #105–#118, #120–#124 and
+  #128–#135 are merged.
 - #107 is deterministic heuristic triage, not semantic understanding.
 - #109 is champion history/provider/rollback infrastructure, not a
   promotion-grade OOS/walk-forward gate.
+- #117 is a fail-closed promotion policy; #121 is a one-shot locked holdout;
+  #130 is a bundle reproducer. None of them has a runtime producer (#136 open).
+- #119 (knowledge table structure) is an open PR, not merged.
+- `backend/tests/test_api_autonomy.py` fails on current main (removed
+  `DiscoveryArchive.promote`); see `STATUS.md` for the CI run ids.
 - #105 is optional benchmark infrastructure; do not let model-zoo expansion
   displace autonomous evidence and handler integration.
 
@@ -147,9 +158,14 @@ Progress (2026-11-22):
 - Tests: group coverage, order, split gaps, label alignment, tail drop,
   deterministic manifest, CLI.
 
-Remaining: availability rules (flow only with tick volumes), H4 multi-timeframe
-alignment, wiring the manifest id into the trainer/registry, and a persisted
-array format for large datasets.
+Progress (2026-11-24): #133 pins M30/H4 alignment semantics (a higher-timeframe
+value reaches a decision bar only after its bucket closes) and the chained
+resampling path. M30/H4 remain data-layer timeframes; the feature layer still
+consumes M5/M15 (`htf_context` is timeframe-agnostic). `log_ret_3` is a
+documented read-only alias for the log-return column.
+
+Remaining: availability rules (flow only with tick volumes), wiring the manifest
+id into the trainer/registry, and a persisted array format for large datasets.
 
 Exit criteria: a dataset can be rebuilt from a manifest and matches checksums;
 no feature set uses future information.
@@ -304,6 +320,13 @@ Deliverables:
 Dependencies: Phases 5–9. RAM: < 500 MB (scheduler/SQLite). Tests: promotion,
 rejection, rollback, drift trigger, job cancellation, DB migration.
 
+Progress (2026-11-24): the gate is no longer hypothetical. #117 adds a named,
+versioned, fail-closed `PROMOTION_V1` policy (no empty policy, no force flag,
+locked OOS required); #121 adds the one-shot holdout ledger that can attach the
+locked section; #130 replays a stored bundle. The remaining gap is the producer:
+no command persists an evidence bundle or dataset artifact from a discovery run
+(#136), and `paper.advance` does not consume a promotion decision.
+
 Exit criteria: a candidate can be trained, rejected, promoted and rolled back
 with a queryable audit trail; the previous champion is always recoverable.
 
@@ -324,6 +347,11 @@ Deliverables:
 
 Dependencies: Phase 3; can run in parallel with Phase 5. RAM: < 1 GB. Tests:
 kill-switch triggers, embargo, Monte Carlo determinism, sensitivity bounds.
+
+Progress (2026-11-24): #135 adds the Phase 11 non-bypass acceptance suite: a DSL
+spec, a raw simulator action and an orchestrator job payload all reach the same
+frozen `RiskEngine`, and divergence fails the test. Slippage cap, rejected-order
+model and data-quality trade block remain open.
 
 Exit criteria: risk blocks cannot be bypassed by a policy; every reported
 strategy has walk-forward, stress and sample-size context.
@@ -362,6 +390,11 @@ Deliverables:
 
 Dependencies: Phases 4–12. RAM: < 500 MB (UI). Tests: component tests, e2e
 smoke, type check, build.
+
+Progress (2026-11-24): the Paper Trading page (#128) reads `/api/paper` only and
+renders an explicit dash/unknown rather than a fabricated zero. The read-only
+autonomy status API (#134) exists, but no dashboard page consumes
+`/api/autonomy` yet.
 
 Exit criteria: every displayed number comes from an API or a documented local
 artifact.
@@ -491,6 +524,12 @@ Exit criteria: an end-to-end run creates strategy candidates without
 owner-authored rules, reproduces them from saved lineage, rejects an
 intentionally overfit candidate, and records a champion/no-change decision.
 
+Progress (2026-11-24): #104 runs search end to end on a validation slice and
+archives a decision. #114 builds a chronological fold bundle, #121 enforces a
+single holdout spend, #130 replays a bundle from identity. `discovery run`
+still writes a decision report, not an evidence bundle; the producer is #136.
+Reproduce commands are in `STATUS.md`.
+
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
 Add local document ingestion for supported PDF/TXT/Markdown/HTML/DOCX files,
@@ -517,6 +556,13 @@ skipped, promoted or rejected.
 Exit criteria: a new dataset/document or matured paper outcome automatically
 queues the appropriate eligible workflow; interrupted jobs recover safely;
 the full chain is queryable and auditable.
+
+Progress (2026-11-24): the daemon (#118) runs the persistent queue with the
+`m2_8gb` guard profile by default; the file trigger and the matured
+paper-outcome trigger (#122, proposal only) exist; five handlers (#115) and
+end-to-end integration tests (#129) are merged. The bare `Orchestrator` still
+defaults to `AllowAllGuard`, knowledge proposals do not auto-queue discovery, and
+there is no orchestrator-level rollback control.
 
 ## Phase 19 — Autonomous paper-trading acceptance
 
