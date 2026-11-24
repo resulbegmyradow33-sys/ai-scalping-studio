@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,8 +23,10 @@ from scalping.knowledge import (
     ProposalStore,
     RoutingError,
     SourceRef,
+    canonical_proposal_id,
     create_hypothesis,
     extract_hypotheses,
+    legacy_proposal_id,
     proposals_for_queue,
     propose_from_hypothesis,
     set_status,
@@ -64,8 +68,115 @@ def _proposal(
     hypothesis: Hypothesis, index: KnowledgeIndex, store: ProposalStore
 ) -> ExperimentProposal:
     return store.create(
-        propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+        propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index),
+        index=index,
     )
+
+
+def _rewrite(proposal: ExperimentProposal, **changes: object) -> ExperimentProposal:
+    """Apply changes and recompute the id, so payload checks reach the source check."""
+    candidate = replace(proposal, **changes)
+    return replace(
+        candidate,
+        proposal_id=canonical_proposal_id(
+            hypothesis_id=candidate.hypothesis_id,
+            source_refs=candidate.source_refs,
+            symbol=candidate.symbol,
+            timeframe=candidate.timeframe,
+            hypothesis_kind=candidate.hypothesis_kind,
+            kind_source=candidate.kind_source,
+            required_columns=candidate.required_columns,
+            required_groups=candidate.required_groups,
+            dsl_observation=candidate.dsl_observation,
+            dsl_condition=candidate.dsl_condition,
+            dsl_expected_effect=candidate.dsl_expected_effect,
+            falsification_test=candidate.falsification_test,
+        ),
+    )
+
+
+def _write_v1_proposal(
+    path: Path,
+    proposal: ExperimentProposal,
+    *,
+    status: str,
+    actor: str = "owner",
+    reason: str = "legacy decision",
+    candidate_hash: str | None = None,
+    dataset_id: str | None = None,
+) -> str:
+    """Write a schema-v1 store row under its legacy id; return that id."""
+    from scalping.knowledge.routing import _MIGRATIONS
+
+    legacy_id = legacy_proposal_id(
+        hypothesis_id=proposal.hypothesis_id,
+        source_refs=proposal.source_refs,
+        symbol=proposal.symbol,
+        timeframe=proposal.timeframe,
+        hypothesis_kind=proposal.hypothesis_kind,
+        required_columns=proposal.required_columns,
+        required_groups=proposal.required_groups,
+        dsl_observation=proposal.dsl_observation,
+        dsl_condition=proposal.dsl_condition,
+        dsl_expected_effect=proposal.dsl_expected_effect,
+        falsification_test=proposal.falsification_test,
+    )
+    decided = status != "proposed"
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        for statement in _MIGRATIONS[1]:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (1, ?)",
+            ("2026-01-01T00:00:00+00:00",),
+        )
+        conn.execute(
+            """
+            INSERT INTO proposals (
+                proposal_id, hypothesis_id, symbol, timeframe, hypothesis_kind,
+                required_columns_json, required_groups_json, dsl_observation,
+                dsl_condition, dsl_expected_effect, falsification_test, status,
+                approval_actor, approval_reason, approval_at,
+                converted_candidate_hash, dataset_id, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                legacy_id,
+                proposal.hypothesis_id,
+                proposal.symbol,
+                proposal.timeframe,
+                proposal.hypothesis_kind,
+                json.dumps(list(proposal.required_columns), separators=(",", ":")),
+                json.dumps(list(proposal.required_groups), separators=(",", ":")),
+                proposal.dsl_observation,
+                proposal.dsl_condition,
+                proposal.dsl_expected_effect,
+                proposal.falsification_test,
+                status,
+                actor if decided else None,
+                reason if decided else None,
+                proposal.updated_at if decided else None,
+                candidate_hash,
+                dataset_id,
+                proposal.created_at,
+                proposal.updated_at,
+            ),
+        )
+        for position, ref in enumerate(proposal.source_refs):
+            conn.execute(
+                """
+                INSERT INTO proposal_sources (proposal_id, position, doc_id, section_ordinal, quote)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (legacy_id, position, ref.doc_id, ref.section_ordinal, ref.quote),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return legacy_id
 
 
 def test_proposal_from_extracted_hypothesis_is_a_text_record(
@@ -94,7 +205,7 @@ def test_proposal_from_extracted_hypothesis_is_a_text_record(
     assert "volatility" in proposal.required_groups
     assert "spread" in proposal.required_columns
 
-    stored = store.create(proposal)
+    stored = store.create(proposal, index=index)
     assert stored == store.get(proposal.proposal_id)
     assert stored.to_dict()["status"] == "proposed"
 
@@ -196,7 +307,7 @@ def test_only_proposed_records_can_be_created(index: KnowledgeIndex, tmp_path: P
     )
 
     with pytest.raises(RoutingError) as excinfo:
-        store.create(forged)
+        store.create(forged, index=index)
     assert excinfo.value.code == "bad_status"
 
 
@@ -206,11 +317,15 @@ def test_candidate_link_is_one_way_and_one_time(index: KnowledgeIndex, tmp_path:
     proposal = _proposal(hypothesis, index, store)
 
     with pytest.raises(RoutingError) as excinfo:
-        store.link_candidate(proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc")
+        store.link_candidate(
+            proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+        )
     assert excinfo.value.code == "not_approved"
 
     store.approve(proposal.proposal_id, "approved for a bounded run", "owner")
-    converted = store.link_candidate(proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc")
+    converted = store.link_candidate(
+        proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+    )
 
     assert converted.status == "converted"
     assert converted.converted_candidate_hash == "a" * 64
@@ -219,7 +334,9 @@ def test_candidate_link_is_one_way_and_one_time(index: KnowledgeIndex, tmp_path:
     assert converted.approval.actor == "owner"
 
     with pytest.raises(RoutingError) as excinfo:
-        store.link_candidate(proposal.proposal_id, "b" * 64, "validation:XAUUSD:M15:def")
+        store.link_candidate(
+            proposal.proposal_id, "b" * 64, "validation:XAUUSD:M15:def", actor="owner"
+        )
     assert excinfo.value.code == "already_converted"
 
     with pytest.raises(RoutingError) as excinfo:
@@ -238,7 +355,9 @@ def test_queue_returns_only_approved_proposals(index: KnowledgeIndex, tmp_path: 
     store.approve(approved.proposal_id, "ready", "owner")
     store.reject(rejected.proposal_id, "not useful", "owner")
     store.approve(converted.proposal_id, "ready", "owner")
-    store.link_candidate(converted.proposal_id, "c" * 64, "validation:XAUUSD:M15:ccc")
+    store.link_candidate(
+        converted.proposal_id, "c" * 64, "validation:XAUUSD:M15:ccc", actor="owner"
+    )
 
     queue = proposals_for_queue(store, limit=10)
 
@@ -276,8 +395,8 @@ def test_proposal_id_is_deterministic_and_survives_reopen(
     assert first.proposal_id == second.proposal_id
     assert first.to_dict()["proposal_id"] == second.to_dict()["proposal_id"]
 
-    stored = store.create(first)
-    assert store.create(second).proposal_id == stored.proposal_id
+    stored = store.create(first, index=index)
+    assert store.create(second, index=index).proposal_id == stored.proposal_id
     approved = store.approve(stored.proposal_id, "reproducible", "owner")
     assert store.schema_version == PROPOSAL_SCHEMA_VERSION
     store.close()
@@ -306,6 +425,441 @@ def test_unknown_and_closed_store_operations_raise(index: KnowledgeIndex, tmp_pa
     store.close()
     with pytest.raises(KnowledgeIndexError, match="closed"):
         store.get(proposal.proposal_id)
+
+
+def test_create_verifies_hypothesis_and_sources_at_persistence(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    store.create(proposal, index=index)
+
+    # A citation the hypothesis never made is a ref-ownership failure, even if
+    # the quote happens to exist elsewhere in the document.
+    ref_mismatch = _rewrite(
+        proposal,
+        source_refs=(
+            replace(hypothesis.source_refs[0], quote="This sentence is not in the document."),
+        ),
+    )
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(ref_mismatch, index=index)
+    assert excinfo.value.code == "missing_source"
+
+    unknown_hypothesis = _rewrite(proposal, hypothesis_id="not-a-stored-hypothesis")
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(unknown_hypothesis, index=index)
+    assert excinfo.value.code == "unknown_hypothesis"
+
+
+def test_create_refuses_a_hypothesis_in_a_terminal_status(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    set_status(index, hypothesis.hypothesis_id, "testing")
+    set_status(index, hypothesis.hypothesis_id, "supported")
+
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(proposal, index=index)
+    assert excinfo.value.code == "bad_status"
+
+
+def test_create_checks_section_existence_and_quote_ownership(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    index.connection.execute(
+        "DELETE FROM sections WHERE doc_id = ? AND ordinal = ?",
+        (hypothesis.source_refs[0].doc_id, hypothesis.source_refs[0].section_ordinal),
+    )
+
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(proposal, index=index)
+    assert excinfo.value.code == "missing_source"
+
+
+def test_create_verifies_quotes_against_the_section_text(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    document = _document(index, tmp_path)
+    section = index.sections(document.doc_id)[0]
+    fabricated = create_hypothesis(
+        index,
+        "A fabricated claim.",
+        "Nothing observed.",
+        "a condition",
+        "an effect",
+        "XAUUSD",
+        "M15",
+        "Reject it.",
+        source_refs=(SourceRef(document.doc_id, section.ordinal, "not in this section"),),
+    )
+    valid_hypothesis = _hypotheses(index, tmp_path)[0]
+    valid_proposal = propose_from_hypothesis(
+        valid_hypothesis, symbol="XAUUSD", timeframe="M15", index=index
+    )
+    store = _store(tmp_path)
+
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(
+            _rewrite(
+                valid_proposal,
+                hypothesis_id=fabricated.hypothesis_id,
+                source_refs=fabricated.source_refs,
+            ),
+            index=index,
+        )
+    assert excinfo.value.code == "unverified_quote"
+
+
+def test_create_refuses_a_document_that_is_not_indexed(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    index.connection.execute(
+        "UPDATE documents SET status = 'extraction_failed' WHERE doc_id = ?",
+        (hypothesis.source_refs[0].doc_id,),
+    )
+
+    with pytest.raises(RoutingError) as excinfo:
+        _store(tmp_path).create(proposal, index=index)
+    assert excinfo.value.code == "missing_source"
+
+
+def test_quote_check_normalises_case_and_whitespace(index: KnowledgeIndex, tmp_path: Path) -> None:
+    document = _document(index, tmp_path)
+    section = index.sections(document.doc_id)[0]
+    reflowed = "WHEN   volatility expands, momentum signals become less reliable"
+    hypothesis = create_hypothesis(
+        index,
+        "Reflow does not change the claim.",
+        "Observed once.",
+        "volatility expands",
+        "momentum weakens",
+        "XAUUSD",
+        "M15",
+        "Reject it.",
+        source_refs=(SourceRef(document.doc_id, section.ordinal, reflowed),),
+    )
+    store = _store(tmp_path)
+
+    stored = store.create(
+        propose_from_hypothesis(
+            hypothesis, symbol="XAUUSD", timeframe="M15", index=index, hypothesis_kind="claim"
+        ),
+        index=index,
+    )
+
+    assert stored.source_refs[0].quote == reflowed
+
+
+def test_decisions_are_append_only_and_keep_an_earlier_approval(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    assert store.decisions(proposal.proposal_id) == []
+
+    store.approve(proposal.proposal_id, "scope is clear", "owner")
+    store.approve(proposal.proposal_id, "already approved", "owner")
+    rejected = store.reject(proposal.proposal_id, "withdrawn after review", "owner")
+
+    assert rejected.status == "rejected"
+    assert rejected.approval is not None
+    assert rejected.approval.reason == "withdrawn after review"
+    log = store.decisions(proposal.proposal_id)
+    assert [(item.from_status, item.to_status, item.actor, item.reason) for item in log] == [
+        ("proposed", "approved", "owner", "scope is clear"),
+        ("approved", "rejected", "owner", "withdrawn after review"),
+    ]
+    assert all(item.at for item in log)
+    assert log[0].to_dict()["to_status"] == "approved"
+
+    with pytest.raises(RoutingError) as excinfo:
+        store.decisions("0" * 64)
+    assert excinfo.value.code == "unknown_proposal"
+
+
+def test_link_candidate_requires_an_actor_and_a_hash(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    store.approve(proposal.proposal_id, "approved for a bounded run", "owner")
+
+    with pytest.raises(ValueError, match="actor"):
+        store.link_candidate(
+            proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="   "
+        )
+    with pytest.raises(RoutingError) as excinfo:
+        store.link_candidate(
+            proposal.proposal_id, "not-a-sha256", "validation:XAUUSD:M15:abc", actor="owner"
+        )
+    assert excinfo.value.code == "invalid_proposal"
+
+    converted = store.link_candidate(
+        proposal.proposal_id, "a" * 64, "validation:XAUUSD:M15:abc", actor="owner"
+    )
+    decision = store.decisions(proposal.proposal_id)[-1]
+    assert converted.status == "converted"
+    assert decision.from_status == "approved"
+    assert decision.to_status == "converted"
+    assert decision.actor == "owner"
+    assert "a" * 64 in decision.reason
+    assert "validation:XAUUSD:M15:abc" in decision.reason
+
+
+def test_rejected_proposal_cannot_be_reproposed(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    store.reject(proposal.proposal_id, "not testable with stored data", "owner")
+
+    again = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    assert again.proposal_id == proposal.proposal_id
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(again, index=index)
+    assert excinfo.value.code == "already_rejected"
+    assert store.get(proposal.proposal_id).status == "rejected"
+
+
+def test_keyword_groups_match_whole_words_only(index: KnowledgeIndex, tmp_path: Path) -> None:
+    document = _document(index, tmp_path)
+    section = index.sections(document.doc_id)[0]
+    hypothesis = create_hypothesis(
+        index,
+        "Many traders buy any dip.",
+        "Nothing measured here.",
+        "many traders buy any dip",
+        "no measurable edge",
+        "XAUUSD",
+        "M15",
+        "Reject when the edge is absent.",
+        source_refs=(SourceRef(document.doc_id, section.ordinal, section.text),),
+    )
+
+    proposal = propose_from_hypothesis(
+        hypothesis,
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="claim",
+    )
+
+    assert "session" not in proposal.required_groups
+    assert set(proposal.required_groups) == {"price", "volatility"}
+
+    session_hypothesis = _hypotheses(index, tmp_path)[3]
+    session_proposal = propose_from_hypothesis(
+        session_hypothesis, symbol="XAUUSD", timeframe="M15", index=index
+    )
+    assert "session" in session_proposal.required_groups
+    assert "structure" in session_proposal.required_groups
+
+
+def test_source_ref_order_does_not_change_the_proposal_id(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    document = _document(index, tmp_path)
+    sections = index.sections(document.doc_id)
+    refs = tuple(SourceRef(document.doc_id, section.ordinal, section.text) for section in sections)
+    hypothesis = create_hypothesis(
+        index,
+        "Citation order does not matter.",
+        "Observed once.",
+        "a condition",
+        "an effect",
+        "XAUUSD",
+        "M15",
+        "Reject it.",
+        source_refs=refs,
+    )
+
+    forward = propose_from_hypothesis(
+        hypothesis, symbol="XAUUSD", timeframe="M15", index=index, hypothesis_kind="claim"
+    )
+    backward = propose_from_hypothesis(
+        replace(hypothesis, source_refs=tuple(reversed(refs))),
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="claim",
+    )
+
+    assert forward.proposal_id == backward.proposal_id
+    assert [ref.section_ordinal for ref in backward.source_refs] == [
+        section.ordinal for section in reversed(sections)
+    ]
+
+
+def test_hypothesis_kind_source_is_recorded(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    classified = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    supplied = propose_from_hypothesis(
+        hypothesis,
+        symbol="XAUUSD",
+        timeframe="M15",
+        index=index,
+        hypothesis_kind="observation",
+    )
+
+    assert classified.kind_source == "classified"
+    assert supplied.kind_source == "supplied"
+    assert supplied.hypothesis_kind == "observation"
+    assert supplied.to_dict()["kind_source"] == "supplied"
+    assert classified.proposal_id != supplied.proposal_id
+
+    stored = store.create(supplied, index=index)
+    assert stored.kind_source == "supplied"
+    assert store.get(supplied.proposal_id) == stored
+
+
+def test_schema_v1_rejected_proposal_migrates_and_stays_rejected(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    draft = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    path = tmp_path / "proposals.sqlite3"
+    legacy_id = _write_v1_proposal(path, draft, status="rejected", reason="not testable")
+    assert legacy_id != draft.proposal_id
+
+    store = ProposalStore(path)
+    assert store.schema_version == PROPOSAL_SCHEMA_VERSION
+    migrated = store.get(legacy_id)
+    assert migrated is not None
+    assert migrated.status == "rejected"
+    assert migrated.kind_source == "legacy"
+    assert migrated.approval is not None
+    assert migrated.approval.reason == "not testable"
+    assert [
+        (item.from_status, item.to_status, item.actor, item.reason)
+        for item in store.decisions(legacy_id)
+    ] == [("proposed", "rejected", "owner", "not testable")]
+
+    again = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(again, index=index)
+    assert excinfo.value.code == "already_rejected"
+    with pytest.raises(RoutingError) as excinfo:
+        store.approve(legacy_id, "reconsider", "owner")
+    assert excinfo.value.code == "bad_status"
+    assert len(store.list()) == 1
+
+
+def test_schema_v1_converted_proposal_backfills_two_decisions(
+    index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    draft = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+    path = tmp_path / "proposals.sqlite3"
+    legacy_id = _write_v1_proposal(
+        path,
+        draft,
+        status="converted",
+        candidate_hash="a" * 64,
+        dataset_id="validation:XAUUSD:M15:abc",
+    )
+
+    store = ProposalStore(path)
+    converted = store.get(legacy_id)
+    assert converted is not None
+    assert converted.status == "converted"
+    assert converted.kind_source == "legacy"
+    assert converted.converted_candidate_hash == "a" * 64
+    assert [
+        (item.from_status, item.to_status, item.actor, item.reason)
+        for item in store.decisions(legacy_id)
+    ] == [
+        ("proposed", "approved", "owner", "legacy decision"),
+        (
+            "approved",
+            "converted",
+            "owner",
+            "legacy conversion: candidate " + "a" * 64 + " on dataset validation:XAUUSD:M15:abc",
+        ),
+    ]
+
+    # The v2 draft finds the migrated row under its v1 id and does not duplicate it.
+    replayed = store.create(draft, index=index)
+    assert replayed.proposal_id == legacy_id
+    assert replayed.status == "converted"
+    assert len(store.list()) == 1
+
+
+def test_failed_read_back_rolls_back_the_insert(
+    monkeypatch: pytest.MonkeyPatch, index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+
+    def explode(raw: str, field: str) -> tuple[str, ...]:
+        raise KnowledgeIndexError(f"corrupt stored {field}")
+
+    monkeypatch.setattr("scalping.knowledge.routing._parse_strings", explode)
+    with pytest.raises(KnowledgeIndexError, match="corrupt stored"):
+        store.create(proposal, index=index)
+
+    remaining = store.connection.execute("SELECT COUNT(*) FROM proposals").fetchone()[0]
+    sources = store.connection.execute("SELECT COUNT(*) FROM proposal_sources").fetchone()[0]
+    assert remaining == 0
+    assert sources == 0
+
+
+def test_required_data_and_kind_source_are_validated(index: KnowledgeIndex, tmp_path: Path) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = propose_from_hypothesis(hypothesis, symbol="XAUUSD", timeframe="M15", index=index)
+
+    invalid_changes: tuple[dict[str, object], ...] = (
+        {"required_groups": ("price", "nonsense")},
+        {"required_columns": ("open", "tick")},
+        {"required_groups": ("price", "price")},
+        {"required_groups": ()},
+        {"kind_source": "legacy"},
+    )
+    for changes in invalid_changes:
+        with pytest.raises(RoutingError) as excinfo:
+            store.create(_rewrite(proposal, **changes), index=index)
+        assert excinfo.value.code == "invalid_proposal"
+    assert store.list() == []
+
+
+def test_concurrent_rejected_insert_is_already_rejected(
+    monkeypatch: pytest.MonkeyPatch, index: KnowledgeIndex, tmp_path: Path
+) -> None:
+    hypothesis = _hypotheses(index, tmp_path)[0]
+    store = _store(tmp_path)
+    proposal = _proposal(hypothesis, index, store)
+    store.reject(proposal.proposal_id, "not testable with stored data", "owner")
+
+    real_get = store.get
+    calls: list[str] = []
+
+    def flaky_get(proposal_id: str) -> ExperimentProposal | None:
+        if not calls:
+            calls.append(proposal_id)
+            return None
+        return real_get(proposal_id)
+
+    monkeypatch.setattr(store, "get", flaky_get)
+    with pytest.raises(RoutingError) as excinfo:
+        store.create(proposal, index=index)
+    assert excinfo.value.code == "already_rejected"
+
+
+def test_proposal_store_documents_its_api_level_boundary() -> None:
+    class_doc = " ".join((ProposalStore.__doc__ or "").split())
+    connection_doc = " ".join((ProposalStore.connection.__doc__ or "").split())
+    assert "API-level boundary" in class_doc
+    assert "API-level boundary" in connection_doc
 
 
 def test_proposal_groups_match_the_live_feature_registry() -> None:
