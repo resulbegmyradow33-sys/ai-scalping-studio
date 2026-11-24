@@ -1,5 +1,17 @@
 # Autonomous system audit — 2026-11-24
 
+> **Current-state notice (2026-11-24):** This document preserves its original
+> historical code/PR audit snapshot. Its PR-state and main-commit references are
+> not the latest verified snapshot. For current mainline status and corrected
+> priorities, read `docs/current-state-addendum-2026-11-24.md` and
+> `STATUS.md`. The latest verified main commit for this refresh is
+> `54bcf38abe7ed654e99935360fb6527d23127493`; #107 and #110 are merged.
+>
+> Do not use historical statements below that say #107 is open, needs rebasing,
+> or that #109 is still an open PR as current status. Technical limitations
+> identified in the historical code review remain relevant unless the
+> addendum explicitly updates them.
+>
 ## Scope
 
 Repository: resulbegmyradow33-sys/ai-scalping-studio  
