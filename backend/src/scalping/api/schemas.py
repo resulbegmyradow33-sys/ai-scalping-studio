@@ -20,6 +20,18 @@ __all__ = [
     "ML_RUN_ID_PATTERN",
     "PAPER_SESSION_PATTERN",
     "SYMBOL_PATTERN",
+    "AutonomyChampion",
+    "AutonomyChampionList",
+    "AutonomyDataStatus",
+    "AutonomyDiscoveries",
+    "AutonomyEventItem",
+    "AutonomyEventPage",
+    "AutonomyJobItem",
+    "AutonomyJobPage",
+    "AutonomyLastEvent",
+    "AutonomyOrchestratorStatus",
+    "AutonomyPaperStatus",
+    "AutonomyStatus",
     "BacktestRequest",
     "BacktestResponse",
     "BanditWeight",
@@ -691,3 +703,150 @@ class PaperEquityPage(BaseModel):
     total: int
     limit: int
     offset: int
+
+
+# ------------------------------------------------------------------ autonomy
+
+
+class AutonomyPaperStatus(BaseModel):
+    """Paper ledger counts.
+
+    A missing ledger is ``configured=False``. A file that exists but cannot be
+    opened or has no schema is ``configured=True, readable=False``; in both cases
+    the counts are absent instead of zeros that were never read.
+    """
+
+    configured: bool
+    readable: bool
+    sessions: int | None = None
+    open_positions: int | None = None
+    closed_trades: int | None = None
+
+
+class AutonomyLastEvent(BaseModel):
+    """The newest audit line in the orchestrator database."""
+
+    id: int
+    ts: str
+    event: str
+    job_id: int | None = None
+
+
+class AutonomyOrchestratorStatus(BaseModel):
+    """Queue counts and persisted controls.
+
+    ``readable=False`` means the file could not be opened or the jobs table lacks
+    a column this reader needs; every count and flag is then absent.
+    """
+
+    configured: bool
+    readable: bool
+    queued: int | None = None
+    running: int | None = None
+    failed: int | None = None
+    paused: bool | None = None
+    safe_mode: bool | None = None
+    research_disabled: bool | None = None
+    last_event: AutonomyLastEvent | None = None
+
+
+class AutonomyChampion(BaseModel):
+    """One scope's champion.
+
+    ``candidate_id`` is the archive's sha256 identity. ``policy_digest`` repeats
+    it unless the payload records a more specific digest; ``policy_id`` is only
+    present when the payload names one.
+    """
+
+    scope: str
+    candidate_id: str
+    mode: str | None = None
+    promoted_at: str | None = None
+    policy_id: str | None = None
+    policy_digest: str | None = None
+
+
+class AutonomyChampionList(BaseModel):
+    """Every scope with a champion.
+
+    ``items`` is present only when the archive and its champion table are
+    readable; an unreadable archive omits it rather than answering "no champions".
+    """
+
+    configured: bool
+    readable: bool
+    items: list[AutonomyChampion] | None = None
+
+
+class AutonomyDiscoveries(BaseModel):
+    """Archived evaluations (``runs``) and gate decisions; absent tables are ``None``."""
+
+    configured: bool
+    readable: bool
+    runs: int | None = None
+    decisions: int | None = None
+
+
+class AutonomyDataStatus(BaseModel):
+    """Data symbols with at least one month partition on disk."""
+
+    configured: bool
+    readable: bool
+    symbols: list[str] | None = None
+
+
+class AutonomyStatus(BaseModel):
+    """The aggregate dashboard answer; each section owns its own readable flag."""
+
+    paper: AutonomyPaperStatus
+    orchestrator: AutonomyOrchestratorStatus
+    champions: list[AutonomyChampion]
+    champions_readable: bool
+    discoveries: AutonomyDiscoveries
+    data: AutonomyDataStatus
+
+
+class AutonomyJobItem(BaseModel):
+    """One recent job row, including the deferral counter that explains a stall."""
+
+    id: int
+    kind: str
+    status: str
+    attempts: int
+    defer_count: int
+    priority: int
+    created_at: str
+    scheduled_at: str
+    started_at: str | None = None
+    finished_at: str | None = None
+
+
+class AutonomyJobPage(BaseModel):
+    """Newest jobs first; bounded by ``limit``; ``items`` is absent if unreadable."""
+
+    configured: bool
+    readable: bool
+    items: list[AutonomyJobItem] | None = None
+    limit: int
+
+
+class AutonomyEventItem(BaseModel):
+    """One audit event; a control event has no ``job_id``.
+
+    The free-form ``detail`` column is deliberately not exposed: it can contain
+    local paths or handler errors that are not part of the status contract.
+    """
+
+    id: int
+    job_id: int | None = None
+    ts: str
+    event: str
+
+
+class AutonomyEventPage(BaseModel):
+    """Newest audit events first; bounded by ``limit``; ``items`` is absent if unreadable."""
+
+    configured: bool
+    readable: bool
+    items: list[AutonomyEventItem] | None = None
+    limit: int
