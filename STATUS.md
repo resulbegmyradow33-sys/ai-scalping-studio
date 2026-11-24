@@ -1,7 +1,7 @@
 # STATUS — autonomous system status
 
 Snapshot: **2026-11-24**, verified `main` at
-`54bcf38abe7ed654e99935360fb6527d23127493`.
+`cdfd9d5a546f0e15630300c108e904d80ff5c6fc`.
 
 Canonical goal: `docs/requirements/master-prompt.md`.
 Current code audit and priority addendum: `docs/current-state-addendum-2026-11-24.md`.
@@ -35,13 +35,13 @@ feedback remain incomplete.
 | Legacy strategy family + LinUCB | Legacy baseline | Finite pre-authored families are optional comparisons, not autonomous discovery |
 | Legacy flow_momentum card | Active compatibility path | Still used by legacy panel/runtime; migration to governed DSL champion remains |
 | Safe strategy DSL/AST | Implemented | Typed bounded AST; no generated arbitrary Python |
-| Candidate discovery | Implemented, limited | #104 merged; bounded search on a validation slice, not walk-forward/OOS |
-| Champion governance | Partial foundation | #109 merged; history/provider/rollback exist, but promotion-grade evidence is incomplete |
-| Knowledge ingestion | Partial | TXT/MD/HTML/DOCX; PDF/OCR and structured tables remain absent |
+| Candidate discovery | Implemented, limited | #104 bounded validation-slice search; #114 adds a chronological fold evidence bundle, but folds stay inside train+validation and the final test is not yet a gated holdout |
+| Champion governance | Partial foundation | #109 history/provider/rollback; evidence bundle #114 merged; fail-closed promotion policy is PR #117 and locked OOS is in progress |
+| Knowledge ingestion | Partial | TXT/MD/HTML/DOCX; table structure extraction is in PR #119 (held); PDF/OCR absent |
 | Hypothesis extraction | Heuristic foundation | #106 creates source-linked drafts; not semantic book understanding or proven alpha |
 | Sentence classification | Merged heuristic | #107 is on main; deterministic triage, not semantic understanding |
-| Orchestrator | Infrastructure only | Persistent queue/control/recovery; production handlers, scheduler and measured resource guard remain |
-| DSL paper runner | Implemented component | #103 runs a supplied validated spec over a stored slice; it does not autonomously select/advance a champion |
+| Orchestrator | Infrastructure only | Queue/control/recovery, five production handlers (#115) and a measured guard (#112) exist; scheduler/daemon is PR #118, and the guard is not yet the default in every caller |
+| DSL paper runner | Implemented component | #103 runs a supplied spec; #116 adds append-only continuation and matured outcomes, but `paper.advance` still uses the slice runner and champion provenance is not enforced |
 | Closed-loop autonomy | Not accepted | No proven import → discover → independent OOS → promote → paper → matured feedback cycle |
 | Real-money execution | Disabled | Must remain disabled and out of scope |
 
@@ -54,9 +54,14 @@ feedback remain incomplete.
 - #108: risk gates included in action masks and evaluation.
 - #109: champion history/provider/rollback foundation.
 - #110: repository-wide contributor/AI-agent contract and team workflow.
+- #112: measured resource guard (RSS/load/disk, fail-closed probe).
+- #113: current-state addendum and corrected autonomy priorities.
+- #114: promotion-grade candidate evidence bundle (schema v2, settings/dataset identity).
+- #115: production orchestrator handlers (ingest/dataset/discover/paper advance/analyse).
+- #116: continuous paper operation and matured-outcome batches.
 
-The current main commit includes #107. The old audit/task-board text that says
-#107 is open or needs rebasing was stale and is being corrected.
+Open and unmerged: #117 (fail-closed promotion policy), #118 (orchestrator
+daemon), #119 (knowledge tables, held), and the locked-holdout worktree.
 
 ## Critical path — do not reorder
 
