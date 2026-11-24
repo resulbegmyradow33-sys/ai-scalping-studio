@@ -12,6 +12,13 @@ import type {
   MLTrainRequest,
   MLTrainResponse,
   OkResponse,
+  PaperEquityPoint,
+  PaperOrder,
+  PaperPage,
+  PaperPosition,
+  PaperSessionItem,
+  PaperSessionSummary,
+  PaperTrade,
   RegimeResponse,
   RunControlAction,
   RunDetail,
@@ -41,6 +48,9 @@ const ML_PREPARE_TIMEOUT_MS = 60_000;
 
 /** `/api/ml/evaluate` runs the simulator once per stress multiplier. */
 const ML_EVALUATE_TIMEOUT_MS = 300_000;
+
+/** `/api/paper/.../close` takes a short `BEGIN IMMEDIATE`; still not a cache hit. */
+const PAPER_CLOSE_TIMEOUT_MS = 15_000;
 
 /**
  * A failed API call. `status` is the HTTP status, or `0` when the request never
@@ -220,7 +230,71 @@ export const api = {
     // A split plus one simulator pass per stress multiplier; not a 5 s call.
     return post<MLEvaluateResponse>("/api/ml/evaluate", body, ML_EVALUATE_TIMEOUT_MS);
   },
+
+  // --- paper ledger ----------------------------------------------------------
+  // Reads are `mode=ro` on the backend and stay cheap; `close` is the only
+  // write this client performs. Every list is a bounded `{items,total,...}`.
+
+  paperSessions(limit = 100, offset = 0): Promise<PaperPage<PaperSessionItem>> {
+    return request<PaperPage<PaperSessionItem>>(paperPagePath("/api/paper/sessions", limit, offset));
+  },
+
+  paperSession(sessionId: string): Promise<PaperSessionSummary> {
+    return request<PaperSessionSummary>(paperSessionBase(sessionId));
+  },
+
+  closePaperSession(sessionId: string): Promise<PaperSessionSummary> {
+    // The ledger takes `BEGIN IMMEDIATE` for one row; still give it headroom.
+    return request<PaperSessionSummary>(
+      `${paperSessionBase(sessionId)}/close`,
+      { method: "POST" },
+      PAPER_CLOSE_TIMEOUT_MS,
+    );
+  },
+
+  paperPositions(
+    sessionId: string,
+    limit = 100,
+    offset = 0,
+  ): Promise<PaperPage<PaperPosition>> {
+    return request<PaperPage<PaperPosition>>(
+      paperPagePath(`${paperSessionBase(sessionId)}/positions`, limit, offset),
+    );
+  },
+
+  paperOrders(sessionId: string, limit = 100, offset = 0): Promise<PaperPage<PaperOrder>> {
+    return request<PaperPage<PaperOrder>>(
+      paperPagePath(`${paperSessionBase(sessionId)}/orders`, limit, offset),
+    );
+  },
+
+  paperHistory(sessionId: string, limit = 100, offset = 0): Promise<PaperPage<PaperTrade>> {
+    return request<PaperPage<PaperTrade>>(
+      paperPagePath(`${paperSessionBase(sessionId)}/history`, limit, offset),
+    );
+  },
+
+  paperEquity(
+    sessionId: string,
+    limit = 100,
+    offset = 0,
+  ): Promise<PaperPage<PaperEquityPoint>> {
+    // `offset=0` is the newest window; raising it pages into older marks.
+    return request<PaperPage<PaperEquityPoint>>(
+      paperPagePath(`${paperSessionBase(sessionId)}/equity`, limit, offset),
+    );
+  },
 };
+
+/** Session ids are opaque tokens; encoding keeps them a single path segment. */
+function paperSessionBase(sessionId: string): string {
+  return `/api/paper/sessions/${encodeURIComponent(sessionId)}`;
+}
+
+function paperPagePath(base: string, limit: number, offset: number): string {
+  const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+  return `${base}?${params.toString()}`;
+}
 
 /**
  * Runtime mirror of the `SimMessage["type"]` union. `ReadonlySet<string>`
