@@ -2,13 +2,14 @@
 
 Phase 18 slice one: a persistent job queue, the loop that runs it, owner
 controls and trigger sources. The queue, its audit log and the controls are real
-code with tests. The jobs themselves are injected handlers; no ML, DSL, strategy
-search or paper-trading pipeline is wired yet, and there is no scheduler thread.
+code with tests. Slice two (P3 slice 1) registers five production handlers:
+document ingestion, dataset build, discovery, paper advance and outcome
+analysis. There is still no scheduler thread and no measured resource guard.
 
 This slice answers one question honestly: *can the system remember, order,
-refuse, retry and explain work across a restart?* The answer is tested. It does
-not yet answer *which* research is worth queueing — that is the next slice, once
-the ingestion, discovery and strategy DSL modules merge.
+refuse, retry and explain work across a restart?* The answer is tested. The
+handlers answer *what* work exists for the first research cycle; scheduling and
+resource measurement remain later changes.
 
 ## Files
 
@@ -17,23 +18,25 @@ the ingestion, discovery and strategy DSL modules merge.
 | `backend/src/scalping/orchestrator/store.py` | SQLite queue + append-only events + persisted state |
 | `backend/src/scalping/orchestrator/core.py` | Handler registry, controls, claim/run/fail/retry loop |
 | `backend/src/scalping/orchestrator/triggers.py` | `TriggerSource` protocol, `FileTriggerSource`, `scan_once` |
+| `backend/src/scalping/orchestrator/handlers.py` | `HandlerContext`, payload validators, the five pipeline handlers |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
+| `backend/tests/test_orchestrator_handlers.py` | Real handlers on synthetic stores and temporary roots |
 
 ## What is not in this slice
 
 - **No scheduler thread.** `run_once()` processes one unit of work;
   `run_until_idle()` drains for a CLI or a test. A daemon loop is a later change
-  and would not alter these semantics.
-- **No handlers for real work.** The registry is a mapping the caller fills.
-  Dataset preparation, hypothesis generation, training, evaluation and drift
-  checks are wired after their modules merge.
-- **No automatic promotion.** Champion/candidate governance stays in
-  `scalping.registry.gate`; the orchestrator can enqueue a job that calls it,
-  but nothing here promotes or rolls back.
-- **No resource measurement.** `ResourceGuard` is a veto hook, not a monitor.
-  The default `AllowAllGuard` never refuses, so "RAM budget" is only as real as
-  the guard a caller supplies.
+  and would not alter these semantics. Nothing calls the handlers on a timer.
+- **No measured resource guard.** `ResourceGuard` is a veto hook, not a monitor.
+  The default `AllowAllGuard` never refuses. `HEAVY_HANDLER_KINDS` names the two
+  heavy kinds so a caller can enforce the M2 one-heavy-job rule, but peak RSS,
+  CPU and disk are not measured yet.
+- **No promotion handler.** Discovery only records `no_trade`, `no_change` or
+  `rejected`. `paper.advance` reads a champion that a reviewed path promoted;
+  neither handler can promote, replace or roll back one.
+- **No training handler.** Training on locked OOS is out of scope for this
+  slice, and no handler here fits a model.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
 - **No API/UI.** State is queryable through `JobStore` and
@@ -249,6 +252,124 @@ def prepare_dataset(job, context):
     return {"path": f"/data/{job.payload['symbol']}_M1.parquet", "rows": rows}
 ```
 
+## Production handlers (P3 slice 1)
+
+`register_default_handlers(registry, context)` binds five namespaced kinds. The
+context is the only source of paths and settings; there is no module-level
+state:
+
+```python
+context = HandlerContext(
+    data_root=Path("data"),
+    runs_root=Path("runs"),
+    archive_root=Path("archive"),
+    settings=Settings(),
+    use_feature_cache=True,
+    discovery_runner=None,       # None means scalping.discovery.run.run_discovery
+)
+register_default_handlers(orchestrator, context)
+```
+
+| Field | Holds | Loss impact |
+|---|---|---|
+| `data_root` | Parquet bars (read only) and `.feature-cache` | Re-ingestable source data |
+| `runs_root` | Dataset manifests and `discovery/discovery.sqlite` | Re-computable run products |
+| `archive_root` | `knowledge/index.sqlite`, preserved sources, `paper.sqlite` | Durable evidence; back it up |
+
+| Kind | Handler | Payload (all fields validated; unknown fields are rejected) | Success result |
+|---|---|---|---|
+| `knowledge.ingest` | document → index → drafts | `document_path` (required), `market_scope`, `timeframe_scope`, `max_hypotheses` | `doc_id`, `checksum`, `status`, `sections`, `drafts`, `skipped`, `scanned_sentences`, `duplicate`, `stored_path`, `index` |
+| `dataset.build` | stored bars → cached features → manifest | `symbol`, `timeframe` (required), `horizon`, `train_fraction`, `validation_fraction`, `purge_bars`, `embargo_bars`, `notes` | Manifest document plus `bars_rows`, `purged_rows`, `manifest_path` |
+| `discovery.run` | bounded search → recorded decision | `symbol`, `timeframe`, `max_trials`, `seed`, `gate` (all required), `stress`, `population`, `generations`, `patience`, `horizon` | `decision`, `reason`, `promoted: false`, `trials`, `accepted`, `best_candidate_id`, `dataset_id`, `decision_id`, `stop_reason`, `seed`, `code_version`, `archive` |
+| `paper.advance` | champion → autonomous DSL paper run | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `spec_hash`, `session_id`, bar/trade counts, ledger path |
+| `paper.analyse` | ledger → closed-trade summary | `symbol`, `timeframe`, `max_sessions` (all optional) | Counts, P&L, R, win rate, `open_positions_excluded`, per-session attribution |
+
+### Payload contract
+
+A request is a frozen dataclass with `from_payload`. Validation is strict:
+missing required fields, unknown fields, wrong types, booleans used as integers,
+non-finite numbers, path traversal (`..`, NUL) and out-of-range bounds all
+reject. Bounds exist so one job cannot run for hours: `max_trials <= 2000`,
+`population <= 256`, `generations <= 100`, `bars <= 100_000`,
+`max_sessions <= 1000`, `max_hypotheses <= 500`. `symbol`/`timeframe` must match
+`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`, which also keeps a store path from
+escaping its root.
+
+`discovery.run` requires the `gate` block even when every threshold is
+disabled. An empty gate is exploratory search policy, not promotion evidence,
+and writing it down makes that visible in the job payload. `stress` defaults to
+`[1.5, 2.0]` but is always passed to `DiscoveryRunConfig` explicitly.
+
+### Failure classification
+
+| Class | Example | Queue behaviour |
+|---|---|---|
+| Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
+| Retryable (any other exception) | SQLite busy, I/O error, unexpected bug | bounded retry with exponential backoff |
+| No handler | kind not registered | `failed`, permanent, `no_handler` event |
+| NO TRADE | no champion, invalid champion payload | `succeeded`; the result document says `action: "no_trade"` and why |
+
+NO TRADE is never a failure. A retry would not change a missing champion, so it
+must not consume attempts.
+
+### Idempotency
+
+- `knowledge.ingest` hashes the file before extraction. A checksum already in the
+  index reuses the stored copy and re-runs extraction, whose `(statement,
+  section)` dedupe creates no second draft; a retry after a crash between
+  indexing and extraction therefore converges on the intended end state.
+- `dataset.build` derives the dataset id and manifest filename from the content
+  checksum, so a rerun overwrites the same path with the same id and checksum;
+  `created_at` records the latest build, not the first.
+- `discovery.run` deduplicates candidates by canonical hash in the archive; a
+  rerun on the same dataset/seed evaluates no new trials and records
+  `no_change`.
+- `paper.advance` is idempotent at the queue, not at the handler: the dedupe key
+  is what prevents a second advance. Advancing is a step, so calling the same
+  handler twice with different keys intentionally advances twice. Use
+  `paper.advance:{symbol}:{timeframe}:{bars}` (or a bar-range key) as the dedupe
+  key.
+- `paper.analyse` only reads; a rerun returns the same summary unless the ledger
+  changed.
+
+### No-promotion rule
+
+`discovery.run` cannot write a `promoted` decision: `run_discovery` refuses it
+and `DiscoveryRunResult` raises if asked. The handler also checks the returned
+decision before storing its result. Promotion and rollback stay in
+`DiscoveryArchive.promote/rollback`, reached by a separate reviewed path.
+`paper.advance` selects the champion of `symbol:timeframe` through
+`ChampionProvider`. If the archive is absent, has no champion, or the stored
+payload fails DSL validation or hashes inconsistently, the job records NO TRADE
+and the handler opens no ledger, writes no order and never falls back to the
+legacy `flow_momentum` rule.
+
+### Outcome attribution
+
+`paper.analyse` counts only `trades` rows, which the ledger writes when a trade
+closes. Open `positions` are reported as `open_positions_excluded` and are never
+summed into P&L or R. Each session row carries `spec_hash` from
+`model_version`, `config_spec_hash` from the stored autonomous config, and a
+`data_fingerprint` from `features.cache.frame_meta` over the stored bars the
+session's signals span. The window ends at the last signal, so appending new
+bars later does not change a past attribution. When the bars are unavailable the
+fingerprint is `null` and `data_attribution` says `"unavailable"`; a session
+spanning more than 31 days is not read at all and reports
+`"window_too_large"`. No hash is invented.
+
+### Honest limits
+
+- No scheduler thread, daemon or timer. A caller must invoke `run_once` or
+  `run_until_idle`.
+- The resource guard still does not measure anything. `HEAVY_HANDLER_KINDS`
+  names `dataset.build` and `discovery.run` for the caller's `heavy_kinds`, but
+  peak RAM/CPU/disk on the M2 are unproven here.
+- `paper.advance` is dedupe-key idempotent, not replay-idempotent.
+- Outcome analysis is descriptive: counts, P&L and R. It does not test a
+  hypothesis, enqueue the next discovery cycle or train anything.
+- `discovery.run` still evaluates on one validation slice. It is not
+  promotion-grade walk-forward evidence; see the audit's P1.
+
 ## Trigger sources
 
 `TriggerSource` has two methods: `scan()` returns `Trigger(kind, dedupe_key,
@@ -275,15 +396,22 @@ often to scan.
 cd backend
 uv run ruff check src tests scripts
 uv run mypy src
-uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py -q
+uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
+  tests/test_orchestrator_handlers.py -q
 uv run pytest
 ```
 
 The slice is accepted on those commands passing, not on the design above. The
-tests cover idempotent enqueue, priority and insertion order, schedule gating,
-dependency order, dependency failure to `skipped` (including a cascade),
+queue tests cover idempotent enqueue, priority and insertion order, schedule
+gating, dependency order, dependency failure to `skipped` (including a cascade),
 retry backoff bounds and exhaustion, permanent failures, cancel while queued and
 while running, pause/resume/safe-mode/disable-research (including persistence
 across a reopen), crash recovery with and without attempts left, one heavy job,
 guard refusal without spending an attempt, event-log completeness, and
-file-trigger dedupe across a store restart.
+file-trigger dedupe across a store restart. The handler tests cover a real
+ingest/index/extract round trip, checksum idempotency, dataset manifest
+reproducibility, an unknown symbol refusal, a real bounded discovery run that
+records no promotion, a no-champion NO TRADE that writes nothing, a governed
+champion paper advance with queue dedupe, an invalid champion payload, closed-
+only outcome analysis with an open position excluded, and permanent failure for
+invalid payloads with the retry budget untouched.
