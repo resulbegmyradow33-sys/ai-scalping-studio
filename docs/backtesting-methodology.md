@@ -149,6 +149,7 @@ correctly, never that the candidate has an edge.
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
@@ -229,9 +230,9 @@ later extension, not silently assumed.
 - **The locked final OOS call.** This slice never reads the test split, so the
   final holdout is still untouched; evaluating it once is a later, explicit
   decision that must not be used for tuning. The production policy sets
-  `require_locked_oos=True`, so every bundle without a valid locked-OOS section
-  rejects with `missing_locked_oos`. That rejection is honest and expected, not
-  a bug: the holdout slice attaches the section.
+  `require_locked_oos=True`, so every bundle without a valid `LockedOOSEvidence`
+  field rejects with `missing_locked_oos`. That rejection is honest and expected,
+  not a bug: the holdout slice attaches the section.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
   and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
   folds may overlap the validation/selection window, but no deflated metric or

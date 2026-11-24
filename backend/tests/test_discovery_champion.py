@@ -42,9 +42,10 @@ from scalping.discovery.champion import (
     scope_for,
 )
 from scalping.discovery.promotion import (
+    PRODUCTION_POLICIES,
     PROMOTION_V1,
     EvidenceIdentity,
-    promote_with_evidence,
+    _promote_for_tests,
 )
 from scalping.discovery.protocols import canonical_json
 from scalping.strategy.dsl import (
@@ -75,6 +76,15 @@ IDENTITY = EvidenceIdentity(
 TEST_POLICY = replace(PROMOTION_V1, policy_id="test-policy", require_locked_oos=False)
 
 
+@pytest.fixture(autouse=True)
+def _register_test_policy():
+    PRODUCTION_POLICIES[TEST_POLICY.digest] = TEST_POLICY
+    try:
+        yield
+    finally:
+        PRODUCTION_POLICIES.pop(TEST_POLICY.digest, None)
+
+
 def _evidence_mode_champion(
     archive: DiscoveryArchive,
     candidate_id: str,
@@ -92,7 +102,7 @@ def _evidence_mode_champion(
         settings_digest=SETTINGS_DIGEST,
         expectancy_r=expectancy_r,
     )
-    return promote_with_evidence(
+    return _promote_for_tests(
         archive,
         candidate_id,
         evidence,
@@ -144,6 +154,8 @@ def _trial(
         dataset_id=dataset_id,
         code_version=CODE_VERSION,
         seed=1,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
 
 
@@ -687,7 +699,7 @@ def test_schema_v1_migrates_and_keeps_evidence(tmp_path: Path) -> None:
     candidate_id = _build_v1_database(path, spec, 0.35)
 
     with DiscoveryArchive(path) as archive:
-        assert archive.schema_version == SCHEMA_VERSION == 3
+        assert archive.schema_version == SCHEMA_VERSION == 4
         assert archive.candidate(candidate_id) is not None
         assert archive.trial_count(candidate_id) == 1
         old = archive.decisions()

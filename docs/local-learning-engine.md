@@ -118,9 +118,13 @@ transaction, so the live champion and the audit trail cannot disagree.
 
 Schema v3 adds `mode` (`evidence`, `exploratory`, `manual`) and an
 `evidence_checksum` pointer to both `champion_promotions` and `champions`, plus an
-immutable `evidence` table keyed by the bundle checksum. A rollback restores the
-mode and evidence pointer of the candidate's last promotion. The paper provider
-accepts only `mode = "evidence"`; a research or manual champion is visible in the
+immutable `evidence` table keyed by the bundle checksum. Schema v4 adds
+`policy_id`, `policy_version` and `policy_digest` to the champion rows and
+`dataset_checksum`/`settings_digest` to `trials`; legacy rows keep NULL and are
+never treated as production evidence. A rollback restores the mode, evidence
+pointer and policy identity of the candidate's last promotion. The paper provider
+accepts only `mode = "evidence"` **whose policy digest is in the production
+allow-list**; a research, manual or unregistered-policy champion is visible in the
 audit trail but cannot trade.
 
 `promote_exploratory` refuses, writing nothing: an unknown candidate, a candidate
@@ -173,7 +177,7 @@ policy:
 | `min_bootstrap_confidence` | `0.95` | the aggregate interval must be at least 95% |
 | `min_bootstrap_samples` | `500` | fewer draws are not a usable interval |
 | `max_stress_degradation` | `2.0` | a stressed fold keeps at least half the base expectancy, stays profitable and keeps PF > 1 |
-| `require_locked_oos` | **`True`** | **nothing promotes until the holdout slice attaches a valid locked-OOS section** |
+| `require_locked_oos` | **`True`** | **nothing promotes until the holdout slice attaches a valid `LockedOOSEvidence` section** |
 | `max_selection_fold_share` | `0.4` | at most 40% of folds may overlap the validation/selection window; `0` disables the check |
 
 `evaluate_promotion(evidence, policy, *, champion_evidence=None,
@@ -223,7 +227,9 @@ a wider window.
 | `min_bootstrap_samples` / `min_bootstrap_confidence` | the aggregate interval is weaker than the policy |
 | `cost_stress` | a required stressed fold is not profitable or has PF <= 1 |
 | `stress_degradation` | a stressed fold loses more expectancy than `max_stress_degradation` allows |
-| `missing_locked_oos` | the bundle has no valid locked-OOS section; **this is the normal state until the holdout slice lands** |
+| `missing_locked_oos` | the bundle has no valid `locked_oos` dataclass section, or its identity/policy/test range does not match; **the normal state until the holdout slice lands** |
+| `non_production_policy` | the policy digest is not in `PRODUCTION_POLICIES` (constructor/refusal text, not a `PromotionRejection`) |
+| `stale_trial_evidence` | the accepted trial lacks the same `dataset_checksum`/`settings_digest`, or predates schema v4 |
 | `champion_evidence_missing` / `champion_identity_missing` | a champion was named without its bundle or without a spec hash |
 | `incomparable_evidence` | candidate or champion lacks `dataset_checksum`, `settings_digest`, `code_version`, splits, folds or fold identity |
 | `champion_invalid_evidence` | the stored champion bundle fails `verify_evidence` (edited, wrong schema, no aggregate) |
@@ -251,17 +257,26 @@ because floats cannot represent `0.25 - 0.20` exactly; a tie still fails.
 expected_identity)` is the only production call. It evaluates the policy
 **inside**; there is no accepted-decision argument to forge:
 
-- it reads the current champion from the archive. If a champion exists, its
-  stored evidence is the comparison baseline; a champion without stored evidence
-  is rejected with `champion_evidence_missing`. A first promotion records
-  `comparison = "first"` and no baseline explicitly.
+- it reads the current champion from the archive. An **evidence** champion uses
+  its stored evidence as the comparison baseline; an evidence champion whose
+  stored evidence is missing is rejected with `champion_evidence_missing`. An
+  exploratory or manual champion is replaced as an explicit, audited first
+  evidence promotion: `detail_json.comparison = "replaces_non_evidence"` and
+  `replaces_non_evidence` keeps the old candidate id, mode, promotion id and
+  reason. A true first promotion records `comparison = "first"`.
 - it requires `evidence.spec_hash == candidate_id`, so evidence cannot be
   detached from the spec it measured.
 - it refuses unless the internal decision is accepted, then calls the private
-  `archive._promote_evidence`. There is no public `archive.promote_evidence`.
-- the archive requires an **accepted trial on the evidence dataset**
-  (`no_accepted_trial` otherwise), stores the immutable bundle in the `evidence`
-  table keyed by its checksum, and writes the champion pointer, history row and
+  `archive._promote_evidence` with a process-private HMAC capability over the
+  candidate/evidence/policy identity. There is no public
+  `archive.promote_evidence`; a direct call without a valid capability is
+  rejected.
+- the archive re-builds the payload with `evidence_from_dict`, re-derives its
+  checksum and runs `verify_evidence`; an arbitrary blob or mismatched digest is
+  `ArchiveError`. It then requires an **accepted trial on the evidence dataset**
+  whose `dataset_checksum` and `settings_digest` match (`no_accepted_trial` /
+  `stale_trial_evidence`), stores the immutable bundle in the `evidence` table
+  keyed by its checksum, and writes the champion pointer, history row and
   `promoted` decision in one transaction.
 - the history row stores **no metric** (`metric`/`value` are NULL) and both the
   row and the decision detail record `mode = "evidence"`, the policy
@@ -291,6 +306,23 @@ dataset. The provider refuses a manual champion for paper.
 The rule is simple: an override can be stored for audit, but it can never be
 mistaken for a passed policy, and the next promotion decision must not cite it as
 validation.
+
+### Locked-OOS contract (for the holdout slice)
+
+`CandidateEvidence.locked_oos` is a real frozen `LockedOOSEvidence` field, not a
+dictionary read from `to_dict`. It must carry: `checksum`, `evidence_checksum`,
+`dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `spec_hash`,
+`spec_version`, `complexity`, `code_version`, `settings_digest`, `policy_id`,
+`policy_version`, `test_start_row`, `test_end_row`, `test_rows`,
+`test_start_ts`, `test_end_ts`, `trades`, `net_profit`, `profit_factor`,
+`win_rate`, `expectancy_r`, `total_r`, `max_drawdown`,
+`expectancy_r_ci95_low/high`, `total_r_ci95_low/high`, `bootstrap_samples`,
+`bootstrap_confidence`, `bootstrap_method`, `regime_coverage`, plus optional
+`regimes`, `stress`, `created_at` and `schema_version`. The section enters the
+bundle checksum. `_locked_oos` requires its identity, policy id/version, symbol,
+timeframe, spec version and test-row range to match the bundle and the applied
+policy; a subclass overriding `to_dict` cannot inject one because the policy
+requires `type(evidence) is CandidateEvidence`.
 
 ### What acceptance means
 

@@ -61,6 +61,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Self
 
+from scalping.discovery._evidence_auth import verify as _verify_authorization
+from scalping.discovery.evidence import (
+    EvidenceError,
+    evidence_from_dict,
+    verify_evidence,
+)
+from scalping.discovery.evidence import (
+    evidence_checksum as _evidence_checksum,
+)
 from scalping.discovery.protocols import Candidate, TrialResult, canonical_digest, canonical_json
 
 __all__ = [
@@ -83,7 +92,7 @@ __all__ = [
 
 #: Schema version written by this module. A database from a newer module is
 #: refused instead of being written with an older layout.
-SCHEMA_VERSION: int = 3
+SCHEMA_VERSION: int = 4
 
 #: Default scope key. A real deployment passes ``<symbol>:<timeframe>``
 #: (:func:`scalping.discovery.champion.scope_for` builds it); this literal keeps
@@ -321,6 +330,20 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         END
         """,
     ),
+    4: (
+        # A promotion names the exact policy that allowed it; NULL is the honest
+        # value for legacy/exploratory/manual rows.
+        "ALTER TABLE champion_promotions ADD COLUMN policy_id TEXT",
+        "ALTER TABLE champion_promotions ADD COLUMN policy_version INTEGER",
+        "ALTER TABLE champion_promotions ADD COLUMN policy_digest TEXT",
+        "ALTER TABLE champions ADD COLUMN policy_id TEXT",
+        "ALTER TABLE champions ADD COLUMN policy_version INTEGER",
+        "ALTER TABLE champions ADD COLUMN policy_digest TEXT",
+        # A trial now records the data build and settings it ran under, so an
+        # evidence promotion can compare them instead of trusting the bundle.
+        "ALTER TABLE trials ADD COLUMN dataset_checksum TEXT",
+        "ALTER TABLE trials ADD COLUMN settings_digest TEXT",
+    ),
 }
 
 
@@ -384,6 +407,8 @@ class TrialRecord:
     accepted: bool
     rejections_json: str
     created_at: str
+    dataset_checksum: str | None = None
+    settings_digest: str | None = None
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -410,6 +435,8 @@ class TrialRecord:
             "accepted": self.accepted,
             "rejections": list(self.rejections),
             "created_at": self.created_at,
+            "dataset_checksum": self.dataset_checksum,
+            "settings_digest": self.settings_digest,
         }
 
 
@@ -466,6 +493,9 @@ class ChampionPromotion:
     created_at: str
     mode: str = "exploratory"
     evidence_checksum: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    policy_digest: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -481,6 +511,9 @@ class ChampionPromotion:
             "created_at": self.created_at,
             "mode": self.mode,
             "evidence_checksum": self.evidence_checksum,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "policy_digest": self.policy_digest,
         }
 
 
@@ -503,6 +536,9 @@ class ChampionRecord:
     previous_candidate_id: str | None
     mode: str = "exploratory"
     evidence_checksum: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    policy_digest: str | None = None
 
     @property
     def canonical(self) -> dict[str, Any]:
@@ -521,6 +557,9 @@ class ChampionRecord:
             "previous_candidate_id": self.previous_candidate_id,
             "mode": self.mode,
             "evidence_checksum": self.evidence_checksum,
+            "policy_id": self.policy_id,
+            "policy_version": self.policy_version,
+            "policy_digest": self.policy_digest,
         }
 
 
@@ -650,6 +689,23 @@ def _require_digest(value: object, field: str) -> str:
     return text
 
 
+def _require_hex_digest(value: object, field: str) -> str:
+    """A lowercase hex digest of at least 16 bytes.
+
+    The dataset builder uses blake2b-128 (32 hex chars), while evidence and
+    settings digests are sha256 (64 chars). The field must still be a digest, not
+    free text, but a fixed length would reject the real manifest.
+    """
+    text = _require_text(value, field)
+    if (
+        len(text) < 32
+        or len(text) % 2 != 0
+        or any(character not in "0123456789abcdef" for character in text)
+    ):
+        raise ValueError(f"{field} must be a lowercase hex digest, got {text!r}")
+    return text
+
+
 def _scope_tokens(scope: str) -> frozenset[str]:
     """Lowercase alphanumeric tokens of a scope or dataset id.
 
@@ -763,6 +819,10 @@ def _trial_from_row(row: sqlite3.Row) -> TrialRecord:
         accepted=bool(row["accepted"]),
         rejections_json=str(row["rejections_json"]),
         created_at=str(row["created_at"]),
+        dataset_checksum=(
+            None if row["dataset_checksum"] is None else str(row["dataset_checksum"])
+        ),
+        settings_digest=(None if row["settings_digest"] is None else str(row["settings_digest"])),
     )
 
 
@@ -799,6 +859,7 @@ def _promotion_from_row(row: sqlite3.Row) -> ChampionPromotion:
     value = row["value"]
     previous_value = row["previous_value"]
     evidence_checksum = row["evidence_checksum"]
+    policy_version = row["policy_version"]
     return ChampionPromotion(
         id=int(row["id"]),
         scope=str(row["scope"]),
@@ -812,6 +873,9 @@ def _promotion_from_row(row: sqlite3.Row) -> ChampionPromotion:
         created_at=str(row["created_at"]),
         mode=str(row["mode"]),
         evidence_checksum=None if evidence_checksum is None else str(evidence_checksum),
+        policy_id=None if row["policy_id"] is None else str(row["policy_id"]),
+        policy_version=None if policy_version is None else int(policy_version),
+        policy_digest=None if row["policy_digest"] is None else str(row["policy_digest"]),
     )
 
 
@@ -1108,14 +1172,30 @@ class DiscoveryArchive:
         dataset_id: str,
         code_version: str,
         seed: int,
+        dataset_checksum: str | None = None,
+        settings_digest: str | None = None,
     ) -> TrialRecord:
-        """Append one evaluation and bump the cached counter on its candidate."""
+        """Append one evaluation and bump the cached counter on its candidate.
+
+        ``dataset_checksum`` and ``settings_digest`` identify the exact data
+        build and execution settings the trial ran under. They are optional for
+        backward compatibility, but an evidence promotion refuses a trial that
+        does not carry them (``stale_trial_evidence``).
+        """
         candidate_id = _require_text(candidate_id, "candidate_id")
         if not isinstance(result, TrialResult):
             raise TypeError(f"result must be a TrialResult, got {type(result).__name__}")
         dataset_id = _require_text(dataset_id, "dataset_id")
         code_version = _require_text(code_version, "code_version")
         seed = _require_count(seed, "seed")
+        dataset_checksum = (
+            None
+            if dataset_checksum is None
+            else _require_hex_digest(dataset_checksum, "dataset_checksum")
+        )
+        settings_digest = (
+            None if settings_digest is None else _require_digest(settings_digest, "settings_digest")
+        )
         metrics_json = _canonical_json(result.metrics)
         rejections_json = json.dumps(
             list(result.rejections), ensure_ascii=True, separators=(",", ":")
@@ -1134,8 +1214,9 @@ class DiscoveryArchive:
                     """
                     INSERT INTO trials (
                         candidate_id, dataset_id, code_version, seed,
-                        metrics_json, accepted, rejections_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        metrics_json, accepted, rejections_json, created_at,
+                        dataset_checksum, settings_digest
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         candidate_id,
@@ -1146,6 +1227,8 @@ class DiscoveryArchive:
                         int(result.accepted),
                         rejections_json,
                         stamp,
+                        dataset_checksum,
+                        settings_digest,
                     ),
                 )
                 trial_id = cursor.lastrowid
@@ -1170,6 +1253,8 @@ class DiscoveryArchive:
             accepted=result.accepted,
             rejections_json=rejections_json,
             created_at=stamp,
+            dataset_checksum=dataset_checksum,
+            settings_digest=settings_digest,
         )
 
     def history(self, candidate_id: str) -> tuple[TrialRecord, ...]:
@@ -1512,7 +1597,10 @@ class DiscoveryArchive:
                         promoted_at = excluded.promoted_at,
                         reason = excluded.reason,
                         mode = excluded.mode,
-                        evidence_checksum = NULL
+                        evidence_checksum = NULL,
+                        policy_id = NULL,
+                        policy_version = NULL,
+                        policy_digest = NULL
                     """,
                     (scope, candidate_id, promotion_id, stamp, reason_text),
                 )
@@ -1581,6 +1669,9 @@ class DiscoveryArchive:
         evidence_payload: Mapping[str, Any],
         champion_checksum: str | None = None,
         champion_candidate_id: str | None = None,
+        replaces_non_evidence: bool = False,
+        authorization: str,
+        authorization_payload: Mapping[str, Any],
         detail: Mapping[str, Any] | None = None,
     ) -> ChampionRecord:
         """Store an evidence promotion through a sealed policy decision.
@@ -1592,9 +1683,12 @@ class DiscoveryArchive:
 
         The method enforces the remaining links itself:
 
-        * the candidate must have an **accepted** trial on ``dataset_id``
-          (``no_accepted_trial``), so evidence cannot float free of an
-          evaluation the archive recorded;
+        * the evidence payload must rebuild with ``evidence_from_dict``, re-derive
+          its checksum and pass ``verify_evidence``, so an arbitrary JSON blob is
+          not accepted;
+        * the candidate must have an **accepted** trial on ``dataset_id`` whose
+          ``dataset_checksum`` and ``settings_digest`` match the bundle
+          (``no_accepted_trial`` / ``stale_trial_evidence``);
         * the evidence payload is stored content-addressed by its checksum and
           the champion row points at that exact row;
         * if a champion exists, ``champion_candidate_id`` must name it, so a
@@ -1616,7 +1710,7 @@ class DiscoveryArchive:
             raise ValueError(f"policy_version must be >= 1, got {policy_version}")
         policy_digest = _require_digest(policy_digest, "policy_digest")
         evidence_checksum = _require_digest(evidence_checksum, "evidence_checksum")
-        dataset_checksum = _require_digest(dataset_checksum, "dataset_checksum")
+        dataset_checksum = _require_hex_digest(dataset_checksum, "dataset_checksum")
         settings_digest = _require_digest(settings_digest, "settings_digest")
         code_version = _require_text(code_version, "code_version")
         champion_checksum = (
@@ -1647,6 +1741,43 @@ class DiscoveryArchive:
             raise ArchiveError(f"evidence payload is not canonical JSON: {exc}") from exc
         if detail is not None and not isinstance(detail, Mapping):
             raise TypeError(f"detail must be a mapping, got {type(detail).__name__}")
+        if not isinstance(replaces_non_evidence, bool):
+            raise TypeError("replaces_non_evidence must be a bool")
+        if not _verify_authorization(authorization_payload, authorization):
+            raise ArchiveError("unauthorized promotion: the decision capability is invalid")
+        expected_authorization = {
+            "candidate_id": candidate_id,
+            "evidence_checksum": evidence_checksum,
+            "policy_digest": policy_digest,
+            "dataset_id": dataset_id,
+            "dataset_checksum": dataset_checksum,
+            "settings_digest": settings_digest,
+            "code_version": code_version,
+            "champion_candidate_id": champion_candidate_id,
+        }
+        if dict(authorization_payload) != expected_authorization:
+            raise ArchiveError(
+                "unauthorized promotion: the signed identity does not match this promotion"
+            )
+        try:
+            rebuilt = evidence_from_dict(evidence_payload)
+        except EvidenceError as exc:
+            raise ArchiveError(f"evidence payload cannot be rebuilt: {exc}") from exc
+        if evidence_checksum != _evidence_checksum(rebuilt):
+            raise ArchiveError(
+                f"evidence checksum {evidence_checksum[:12]} does not match the payload"
+            )
+        try:
+            verify_evidence(
+                rebuilt,
+                dataset_id=dataset_id,
+                dataset_checksum=dataset_checksum,
+                spec_hash=candidate_spec_hash,
+                code_version=code_version,
+                settings_digest=settings_digest,
+            )
+        except EvidenceError as exc:
+            raise ArchiveError(f"evidence payload failed verification: {exc}") from exc
         tokens = _scope_tokens(scope)
         stamp = _now()
         reason_text = (
@@ -1664,10 +1795,10 @@ class DiscoveryArchive:
 
                 accepted = tx.execute(
                     """
-                    SELECT 1 FROM trials
+                    SELECT dataset_checksum, settings_digest FROM trials
                     WHERE candidate_id = ? AND dataset_id = ? AND code_version = ?
                       AND accepted = 1
-                    LIMIT 1
+                    ORDER BY id DESC LIMIT 1
                     """,
                     (candidate_id, dataset_id, code_version),
                 ).fetchone()
@@ -1676,6 +1807,16 @@ class DiscoveryArchive:
                         f"no_accepted_trial: candidate {candidate_id!r} has no accepted trial "
                         f"on {dataset_id!r} under code version {code_version!r}; evidence "
                         "promotion needs a recorded evaluation"
+                    )
+                if (
+                    accepted["dataset_checksum"] is None
+                    or accepted["settings_digest"] is None
+                    or str(accepted["dataset_checksum"]) != dataset_checksum
+                    or str(accepted["settings_digest"]) != settings_digest
+                ):
+                    raise ArchiveError(
+                        "stale_trial_evidence: the accepted trial does not carry the same "
+                        "dataset checksum and settings digest as the evidence bundle"
                     )
 
                 row = tx.execute("SELECT * FROM champions WHERE scope = ?", (scope,)).fetchone()
@@ -1737,10 +1878,22 @@ class DiscoveryArchive:
                     INSERT INTO champion_promotions (
                         scope, kind, candidate_id, previous_candidate_id,
                         metric, value, previous_value, reason, created_at, mode,
-                        evidence_checksum
-                    ) VALUES (?, 'promoted', ?, ?, NULL, NULL, NULL, ?, ?, 'evidence', ?)
+                        evidence_checksum, policy_id, policy_version, policy_digest
+                    ) VALUES (
+                        ?, 'promoted', ?, ?, NULL, NULL, NULL, ?, ?, 'evidence', ?, ?, ?, ?
+                    )
                     """,
-                    (scope, candidate_id, previous_id, reason_text, stamp, evidence_checksum),
+                    (
+                        scope,
+                        candidate_id,
+                        previous_id,
+                        reason_text,
+                        stamp,
+                        evidence_checksum,
+                        policy_id,
+                        policy_version,
+                        policy_digest,
+                    ),
                 )
                 promotion_id = cursor.lastrowid
                 if promotion_id is None:  # pragma: no cover - sqlite guarantees a rowid
@@ -1749,18 +1902,31 @@ class DiscoveryArchive:
                     """
                     INSERT INTO champions (
                         scope, candidate_id, promotion_id, promoted_at, reason, mode,
-                        evidence_checksum
+                        evidence_checksum, policy_id, policy_version, policy_digest
                     )
-                    VALUES (?, ?, ?, ?, ?, 'evidence', ?)
+                    VALUES (?, ?, ?, ?, ?, 'evidence', ?, ?, ?, ?)
                     ON CONFLICT(scope) DO UPDATE SET
                         candidate_id = excluded.candidate_id,
                         promotion_id = excluded.promotion_id,
                         promoted_at = excluded.promoted_at,
                         reason = excluded.reason,
                         mode = excluded.mode,
-                        evidence_checksum = excluded.evidence_checksum
+                        evidence_checksum = excluded.evidence_checksum,
+                        policy_id = excluded.policy_id,
+                        policy_version = excluded.policy_version,
+                        policy_digest = excluded.policy_digest
                     """,
-                    (scope, candidate_id, promotion_id, stamp, reason_text, evidence_checksum),
+                    (
+                        scope,
+                        candidate_id,
+                        promotion_id,
+                        stamp,
+                        reason_text,
+                        evidence_checksum,
+                        policy_id,
+                        policy_version,
+                        policy_digest,
+                    ),
                 )
 
                 payload = dict(detail or {})
@@ -1774,7 +1940,11 @@ class DiscoveryArchive:
                         "evidence_checksum": evidence_checksum,
                         "champion_checksum": champion_checksum,
                         "champion_candidate_id": previous_id,
-                        "comparison": "first" if previous_id is None else "champion",
+                        "comparison": (
+                            "replaces_non_evidence"
+                            if replaces_non_evidence
+                            else ("first" if previous_id is None else "champion")
+                        ),
                         "candidate_spec_hash": candidate_spec_hash,
                         "dataset_id": dataset_id,
                         "dataset_checksum": dataset_checksum,
@@ -1804,6 +1974,9 @@ class DiscoveryArchive:
                     previous_candidate_id=previous_id,
                     mode="evidence",
                     evidence_checksum=evidence_checksum,
+                    policy_id=policy_id,
+                    policy_version=policy_version,
+                    policy_digest=policy_digest,
                 )
         except sqlite3.IntegrityError as exc:
             raise ArchiveError(f"evidence promotion of {candidate_id!r} failed: {exc}") from exc
@@ -1905,7 +2078,10 @@ class DiscoveryArchive:
                         promoted_at = excluded.promoted_at,
                         reason = excluded.reason,
                         mode = excluded.mode,
-                        evidence_checksum = excluded.evidence_checksum
+                        evidence_checksum = excluded.evidence_checksum,
+                        policy_id = NULL,
+                        policy_version = NULL,
+                        policy_digest = NULL
                     """,
                     (scope, candidate_id, promotion_id, stamp, reason_text, evidence_checksum),
                 )
@@ -1972,6 +2148,7 @@ class DiscoveryArchive:
             raise ArchiveError(f"champion promotion {row['promotion_id']!r} is missing")
         previous = promotion["previous_candidate_id"]
         evidence_checksum = row["evidence_checksum"]
+        policy_version = row["policy_version"]
         return ChampionRecord(
             scope=scope,
             candidate=candidate,
@@ -1982,6 +2159,9 @@ class DiscoveryArchive:
             previous_candidate_id=None if previous is None else str(previous),
             mode=str(row["mode"]),
             evidence_checksum=None if evidence_checksum is None else str(evidence_checksum),
+            policy_id=None if row["policy_id"] is None else str(row["policy_id"]),
+            policy_version=None if policy_version is None else int(policy_version),
+            policy_digest=None if row["policy_digest"] is None else str(row["policy_digest"]),
         )
 
     def evidence_record(self, checksum: str) -> EvidenceRecord | None:
@@ -2059,7 +2239,8 @@ class DiscoveryArchive:
                     )
                 prior = tx.execute(
                     """
-                    SELECT mode, evidence_checksum FROM champion_promotions
+                    SELECT mode, evidence_checksum, policy_id, policy_version, policy_digest
+                    FROM champion_promotions
                     WHERE scope = ? AND candidate_id = ?
                     ORDER BY id DESC LIMIT 1
                     """,
@@ -2071,6 +2252,19 @@ class DiscoveryArchive:
                     if prior is None or prior["evidence_checksum"] is None
                     else str(prior["evidence_checksum"])
                 )
+                restored_policy_id = (
+                    None if prior is None or prior["policy_id"] is None else str(prior["policy_id"])
+                )
+                restored_policy_version = (
+                    None
+                    if prior is None or prior["policy_version"] is None
+                    else int(prior["policy_version"])
+                )
+                restored_policy_digest = (
+                    None
+                    if prior is None or prior["policy_digest"] is None
+                    else str(prior["policy_digest"])
+                )
 
                 reason_text = f"{reason}; rolled back from {current[:12]}"
                 cursor = tx.execute(
@@ -2078,8 +2272,10 @@ class DiscoveryArchive:
                     INSERT INTO champion_promotions (
                         scope, kind, candidate_id, previous_candidate_id,
                         metric, value, previous_value, reason, created_at, mode,
-                        evidence_checksum
-                    ) VALUES (?, 'rolled_back', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?)
+                        evidence_checksum, policy_id, policy_version, policy_digest
+                    ) VALUES (
+                        ?, 'rolled_back', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?
+                    )
                     """,
                     (
                         scope,
@@ -2089,6 +2285,9 @@ class DiscoveryArchive:
                         stamp,
                         restored_mode,
                         restored_evidence,
+                        restored_policy_id,
+                        restored_policy_version,
+                        restored_policy_digest,
                     ),
                 )
                 promotion_id = cursor.lastrowid
@@ -2098,16 +2297,19 @@ class DiscoveryArchive:
                     """
                     INSERT INTO champions (
                         scope, candidate_id, promotion_id, promoted_at, reason, mode,
-                        evidence_checksum
+                        evidence_checksum, policy_id, policy_version, policy_digest
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(scope) DO UPDATE SET
                         candidate_id = excluded.candidate_id,
                         promotion_id = excluded.promotion_id,
                         promoted_at = excluded.promoted_at,
                         reason = excluded.reason,
                         mode = excluded.mode,
-                        evidence_checksum = excluded.evidence_checksum
+                        evidence_checksum = excluded.evidence_checksum,
+                        policy_id = excluded.policy_id,
+                        policy_version = excluded.policy_version,
+                        policy_digest = excluded.policy_digest
                     """,
                     (
                         scope,
@@ -2117,6 +2319,9 @@ class DiscoveryArchive:
                         reason_text,
                         restored_mode,
                         restored_evidence,
+                        restored_policy_id,
+                        restored_policy_version,
+                        restored_policy_digest,
                     ),
                 )
                 tx.execute(
@@ -2137,6 +2342,9 @@ class DiscoveryArchive:
                                 "promotion_id": int(promotion_id),
                                 "mode": restored_mode,
                                 "evidence_checksum": restored_evidence,
+                                "policy_id": restored_policy_id,
+                                "policy_version": restored_policy_version,
+                                "policy_digest": restored_policy_digest,
                             }
                         ),
                     ),
@@ -2157,6 +2365,9 @@ class DiscoveryArchive:
                     previous_candidate_id=current,
                     mode=restored_mode,
                     evidence_checksum=restored_evidence,
+                    policy_id=restored_policy_id,
+                    policy_version=restored_policy_version,
+                    policy_digest=restored_policy_digest,
                 )
         except sqlite3.IntegrityError as exc:
             raise ArchiveError(f"rollback to {to_candidate_id!r} failed: {exc}") from exc

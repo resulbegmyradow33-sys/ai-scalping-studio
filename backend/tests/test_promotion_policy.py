@@ -33,6 +33,7 @@ from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidencePolicy,
     FoldEvidence,
+    LockedOOSEvidence,
     RegimeEvidence,
     SplitBoundaries,
     StressEvidence,
@@ -40,10 +41,12 @@ from scalping.discovery.evidence import (
     evidence_from_dict,
 )
 from scalping.discovery.promotion import (
+    PRODUCTION_POLICIES,
     PROMOTION_V1,
     EvidenceIdentity,
     PromotionDecision,
     PromotionRefused,
+    _promote_for_tests,
     evaluate_promotion,
     manual_override,
     promote_manual_override,
@@ -305,6 +308,7 @@ def test_promotion_v1_is_explicit_and_locked() -> None:
         {"min_bootstrap_samples": 499},
         {"max_stress_degradation": 0.5},
         {"max_selection_fold_share": -0.1},
+        {"max_selection_fold_share": 0.0},
         {"max_selection_fold_share": 1.1},
     ],
 )
@@ -341,6 +345,72 @@ def test_the_test_policy_is_the_only_accepting_path_in_these_tests() -> None:
     assert decision.accepted is True
     assert decision.policy_id == "test-policy"
     assert decision.policy_digest == TEST_POLICY.digest
+
+
+def locked_section(evidence: CandidateEvidence, policy: Any) -> LockedOOSEvidence:
+    splits = evidence.splits
+    return LockedOOSEvidence(
+        checksum="a" * 64,
+        evidence_checksum=evidence.checksum,
+        dataset_id=evidence.dataset_id,
+        dataset_checksum=evidence.dataset_checksum,
+        symbol=evidence.symbol,
+        timeframe=evidence.timeframe,
+        spec_hash=evidence.spec_hash,
+        spec_version=evidence.spec_version,
+        complexity=evidence.complexity,
+        code_version=evidence.code_version,
+        settings_digest=evidence.settings_digest,
+        policy_id=policy.policy_id,
+        policy_version=policy.version,
+        test_start_row=splits.test_start_row,
+        test_end_row=splits.test_end_row,
+        test_rows=splits.test_end_row - splits.test_start_row,
+        test_start_ts=_ts(300),
+        test_end_ts=_ts(399),
+        trades=40,
+        net_profit=5.0,
+        profit_factor=1.6,
+        win_rate=0.5,
+        expectancy_r=0.3,
+        total_r=12.0,
+        max_drawdown=0.1,
+        expectancy_r_ci95_low=0.1,
+        expectancy_r_ci95_high=0.5,
+        total_r_ci95_low=2.0,
+        total_r_ci95_high=20.0,
+        bootstrap_samples=1000,
+        bootstrap_confidence=0.95,
+        bootstrap_method="iid-bootstrap",
+        regime_coverage=0.95,
+        created_at="2026-11-24T00:00:00+00:00",
+    )
+
+
+def test_a_locked_oos_section_is_a_real_dataclass_field_and_unlocks() -> None:
+    policy = replace(TEST_POLICY, policy_id="locked-test", require_locked_oos=True)
+    base = make_evidence()
+    section = locked_section(base, policy)
+    bundle = reseal(base, locked_oos=section)
+
+    decision = evaluate_promotion(bundle, policy)
+
+    assert decision.accepted is True, decision.codes
+    restored = evidence_from_dict(bundle.to_dict())
+    assert restored.locked_oos == section
+    assert evidence_checksum(restored) == bundle.checksum
+
+
+def test_a_locked_section_from_another_policy_does_not_unlock() -> None:
+    policy = replace(TEST_POLICY, policy_id="locked-test", require_locked_oos=True)
+    base = make_evidence()
+    section = locked_section(base, replace(policy, policy_id="other-policy"))
+    bundle = reseal(base, locked_oos=section)
+
+    decision = evaluate_promotion(bundle, policy)
+
+    assert decision.accepted is False
+    assert "missing_locked_oos" in codes(decision)
 
 
 # --- accepted path ------------------------------------------------------------
@@ -398,6 +468,61 @@ def test_a_sealed_decision_cannot_be_replaced_into_an_acceptance() -> None:
 def test_the_archive_has_no_public_evidence_promotion() -> None:
     assert not hasattr(DiscoveryArchive, "promote_evidence")
     assert hasattr(DiscoveryArchive, "_promote_evidence")
+
+
+def test_a_forged_seal_is_refused() -> None:
+    import scalping.discovery.promotion as promotion_module
+
+    assert not hasattr(promotion_module, "_DECISION_SEAL")
+    with pytest.raises(ValueError, match="evaluate_promotion"):
+        PromotionDecision(
+            accepted=True,
+            rejections=(),
+            policy_id="test-policy",
+            version=1,
+            policy_digest=TEST_POLICY.digest,
+            evidence_checksum=SPEC_HASH,
+            champion_checksum=None,
+            candidate_spec_hash=SPEC_HASH,
+            champion_spec_hash=None,
+            dataset_id=DATASET_ID,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            code_version=CODE_VERSION,
+            _seal="0" * 64,
+        )
+
+
+def test_a_subclass_cannot_inject_a_locked_oos_section() -> None:
+    base = make_evidence()
+
+    class ForgedEvidence(CandidateEvidence):
+        def to_dict(self) -> dict[str, Any]:
+            payload = super().to_dict()
+            payload["locked_oos"] = {"checksum": "a" * 64, "trades": 10}
+            return payload
+
+    forged = ForgedEvidence(**{name: getattr(base, name) for name in base.__dataclass_fields__})
+    decision = evaluate_promotion(forged, TEST_POLICY)  # type: ignore[arg-type]
+
+    assert decision.accepted is False
+    assert "invalid_evidence" in codes(decision)
+
+
+def test_a_public_call_refuses_a_test_policy(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+
+    with pytest.raises(PromotionRefused, match="non_production_policy"):
+        promote_with_evidence(
+            archive,
+            candidate.canonical_hash(),
+            candidate_evidence(candidate),
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="test policy must not pass the public API",
+            expected_identity=IDENTITY,
+        )
+    assert archive.champion(SCOPE) is None
 
 
 # --- candidate rejections -----------------------------------------------------
@@ -686,6 +811,39 @@ def test_an_empty_fold_list_is_rejected() -> None:
     decision = evaluate_promotion(bundle, TEST_POLICY)
 
     assert "insufficient_folds" in codes(decision)
+
+
+def test_policy_and_aggregate_bootstrap_must_match() -> None:
+    folds = default_folds()
+    bundle = make_evidence(
+        folds=folds,
+        policy=replace(evidence_policy(), bootstrap_samples=900),
+    )
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "inconsistent_evidence" in codes(decision)
+
+
+def test_policy_fold_count_must_match_the_folds() -> None:
+    bundle = make_evidence(policy=replace(evidence_policy(), folds=5))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "inconsistent_evidence" in codes(decision)
+
+
+def test_policy_cost_stress_must_match_every_fold() -> None:
+    bundle = make_evidence(policy=replace(evidence_policy(), cost_stress=(1.5, 3.0)))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "inconsistent_evidence" in codes(decision)
+
+
+def test_a_zero_trade_fold_is_inconsistent() -> None:
+    folds = (fold(1, trades=30), fold(2, trades=30), fold(3, trades=0))
+    bundle = make_evidence(folds=folds, aggregate=aggregate_for(folds))
+    decision = evaluate_promotion(bundle, TEST_POLICY)
+
+    assert "inconsistent_evidence" in codes(decision)
 
 
 # --- champion comparison ------------------------------------------------------
@@ -1040,6 +1198,8 @@ def archive_with_candidate(
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
     return archive, candidate
 
@@ -1052,7 +1212,7 @@ def test_first_evidence_promotion_is_recorded_without_a_baseline(tmp_path: Any) 
     archive, candidate = archive_with_candidate(tmp_path)
     evidence = candidate_evidence(candidate)
 
-    champion = promote_with_evidence(
+    champion = _promote_for_tests(
         archive,
         candidate.canonical_hash(),
         evidence,
@@ -1101,7 +1261,7 @@ def test_first_evidence_promotion_is_recorded_without_a_baseline(tmp_path: Any) 
 def test_second_promotion_uses_the_stored_champion_evidence(tmp_path: Any) -> None:
     archive, first = archive_with_candidate(tmp_path)
     first_evidence = candidate_evidence(first)
-    promote_with_evidence(
+    _promote_for_tests(
         archive,
         first.canonical_hash(),
         first_evidence,
@@ -1119,6 +1279,8 @@ def test_second_promotion_uses_the_stored_champion_evidence(tmp_path: Any) -> No
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
     folds = default_folds()
     second_evidence = candidate_evidence(
@@ -1127,7 +1289,7 @@ def test_second_promotion_uses_the_stored_champion_evidence(tmp_path: Any) -> No
         aggregate=aggregate_for(folds, expectancy_r=0.35),
     )
 
-    champion = promote_with_evidence(
+    champion = _promote_for_tests(
         archive,
         second.canonical_hash(),
         second_evidence,
@@ -1146,7 +1308,18 @@ def test_second_promotion_uses_the_stored_champion_evidence(tmp_path: Any) -> No
 
 def test_second_promotion_without_champion_evidence_is_refused(tmp_path: Any) -> None:
     archive, first = archive_with_candidate(tmp_path)
-    archive.promote_exploratory(first.canonical_hash(), scope=SCOPE, reason="research mode")
+    _promote_for_tests(
+        archive,
+        first.canonical_hash(),
+        candidate_evidence(first),
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="first evidence champion",
+        expected_identity=IDENTITY,
+    )
+    # An evidence-mode champion whose stored evidence pointer is gone must not be
+    # silently treated as a first promotion.
+    archive.connection.execute("UPDATE champions SET evidence_checksum = NULL")
 
     second = ToyCandidate((3, 4))
     archive.add_candidate(second, code_version=CODE_VERSION)
@@ -1156,6 +1329,8 @@ def test_second_promotion_without_champion_evidence_is_refused(tmp_path: Any) ->
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
     folds = default_folds()
     evidence = candidate_evidence(
@@ -1165,7 +1340,7 @@ def test_second_promotion_without_champion_evidence_is_refused(tmp_path: Any) ->
     )
 
     with pytest.raises(PromotionRefused, match="champion_evidence_missing"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             second.canonical_hash(),
             evidence,
@@ -1175,7 +1350,6 @@ def test_second_promotion_without_champion_evidence_is_refused(tmp_path: Any) ->
             expected_identity=IDENTITY,
         )
 
-    assert archive.champion_evidence(SCOPE) is None
     assert archive.champion(SCOPE).candidate.candidate_id == first.canonical_hash()  # type: ignore[union-attr]
 
 
@@ -1184,7 +1358,7 @@ def test_a_stale_expected_identity_refuses_promotion(tmp_path: Any) -> None:
     evidence = candidate_evidence(candidate)
 
     with pytest.raises(PromotionRefused, match="stale_code_version"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             evidence,
@@ -1204,7 +1378,7 @@ def test_archive_refuses_a_rejected_policy(tmp_path: Any) -> None:
     )
 
     with pytest.raises(PromotionRefused):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             evidence,
@@ -1226,7 +1400,7 @@ def test_archive_refuses_evidence_for_another_candidate(tmp_path: Any) -> None:
     evidence = candidate_evidence(candidate)
 
     with pytest.raises(PromotionRefused, match="detached promotion"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             other.canonical_hash(),
             evidence,
@@ -1242,7 +1416,7 @@ def test_archive_requires_an_accepted_trial(tmp_path: Any) -> None:
     evidence = candidate_evidence(candidate)
 
     with pytest.raises(ArchiveError, match="no_accepted_trial"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             evidence,
@@ -1262,7 +1436,7 @@ def test_archive_requires_a_trial_at_all(tmp_path: Any) -> None:
     evidence = candidate_evidence(candidate)
 
     with pytest.raises(ArchiveError, match="no_accepted_trial"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             evidence,
@@ -1277,7 +1451,7 @@ def test_archive_scope_must_match_the_dataset(tmp_path: Any) -> None:
     archive, candidate = archive_with_candidate(tmp_path)
 
     with pytest.raises(ArchiveError, match="scope"):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             candidate_evidence(candidate),
@@ -1338,7 +1512,7 @@ def test_manual_override_cannot_be_passed_to_the_evidence_api(tmp_path: Any) -> 
     )
 
     with pytest.raises(TypeError):
-        promote_with_evidence(
+        _promote_for_tests(
             archive,
             candidate.canonical_hash(),
             override,  # type: ignore[arg-type]
@@ -1352,7 +1526,7 @@ def test_manual_override_cannot_be_passed_to_the_evidence_api(tmp_path: Any) -> 
 def test_rollback_preserves_the_restored_mode(tmp_path: Any) -> None:
     archive, first = archive_with_candidate(tmp_path)
     first_evidence = candidate_evidence(first)
-    promote_with_evidence(
+    _promote_for_tests(
         archive,
         first.canonical_hash(),
         first_evidence,
@@ -1369,6 +1543,8 @@ def test_rollback_preserves_the_restored_mode(tmp_path: Any) -> None:
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
     archive.promote_exploratory(second.canonical_hash(), scope=SCOPE, reason="research")
 
@@ -1382,7 +1558,7 @@ def test_rollback_preserves_the_restored_mode(tmp_path: Any) -> None:
 
 def test_archive_evidence_schema_and_modes(tmp_path: Any) -> None:
     archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
-    assert archive.schema_version == SCHEMA_VERSION == 3
+    assert archive.schema_version == SCHEMA_VERSION == 4
     tables = {
         row[0]
         for row in archive.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
@@ -1390,7 +1566,222 @@ def test_archive_evidence_schema_and_modes(tmp_path: Any) -> None:
     assert "evidence" in tables
 
 
-def test_provider_accepts_a_real_spec_promoted_with_evidence(tmp_path: Any) -> None:
+def test_a_direct_private_archive_call_with_a_forged_payload_is_refused(
+    tmp_path: Any,
+) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    evidence = candidate_evidence(candidate)
+
+    from scalping.discovery._evidence_auth import issue
+
+    payload = {
+        "candidate_id": candidate.canonical_hash(),
+        "evidence_checksum": evidence.checksum,
+        "policy_digest": TEST_POLICY.digest,
+        "dataset_id": DATASET_ID,
+        "dataset_checksum": DATASET_CHECKSUM,
+        "settings_digest": SETTINGS_DIGEST,
+        "code_version": CODE_VERSION,
+        "champion_candidate_id": None,
+    }
+    with pytest.raises(ArchiveError, match="cannot be rebuilt"):
+        archive._promote_evidence(
+            candidate.canonical_hash(),
+            scope=SCOPE,
+            reason="forged payload",
+            policy_id=TEST_POLICY.policy_id,
+            policy_version=TEST_POLICY.version,
+            policy_digest=TEST_POLICY.digest,
+            evidence_checksum=evidence.checksum,
+            dataset_id=DATASET_ID,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            code_version=CODE_VERSION,
+            candidate_spec_hash=candidate.canonical_hash(),
+            evidence_payload={"not": "an evidence bundle"},
+            champion_candidate_id=None,
+            authorization=issue(payload),
+            authorization_payload=payload,
+        )
+    assert archive.champion(SCOPE) is None
+
+
+def test_a_direct_private_archive_call_with_a_forged_capability_is_refused(
+    tmp_path: Any,
+) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    evidence = candidate_evidence(candidate)
+    payload = {
+        "candidate_id": candidate.canonical_hash(),
+        "evidence_checksum": evidence.checksum,
+        "policy_digest": TEST_POLICY.digest,
+        "dataset_id": DATASET_ID,
+        "dataset_checksum": DATASET_CHECKSUM,
+        "settings_digest": SETTINGS_DIGEST,
+        "code_version": CODE_VERSION,
+        "champion_candidate_id": None,
+    }
+
+    with pytest.raises(ArchiveError, match="unauthorized"):
+        archive._promote_evidence(
+            candidate.canonical_hash(),
+            scope=SCOPE,
+            reason="forged capability",
+            policy_id=TEST_POLICY.policy_id,
+            policy_version=TEST_POLICY.version,
+            policy_digest=TEST_POLICY.digest,
+            evidence_checksum=evidence.checksum,
+            dataset_id=DATASET_ID,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            code_version=CODE_VERSION,
+            candidate_spec_hash=candidate.canonical_hash(),
+            evidence_payload=evidence.to_dict(),
+            champion_candidate_id=None,
+            authorization="0" * 64,
+            authorization_payload=payload,
+        )
+    assert archive.champion(SCOPE) is None
+
+
+def test_a_direct_private_archive_call_without_a_capability_is_refused(
+    tmp_path: Any,
+) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    evidence = candidate_evidence(candidate)
+
+    with pytest.raises(TypeError, match="authorization"):
+        archive._promote_evidence(
+            candidate.canonical_hash(),
+            scope=SCOPE,
+            reason="no capability",
+            policy_id=TEST_POLICY.policy_id,
+            policy_version=TEST_POLICY.version,
+            policy_digest=TEST_POLICY.digest,
+            evidence_checksum=evidence.checksum,
+            dataset_id=DATASET_ID,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            code_version=CODE_VERSION,
+            candidate_spec_hash=candidate.canonical_hash(),
+            evidence_payload=evidence.to_dict(),
+            champion_candidate_id=None,
+        )
+
+
+def test_a_trial_without_the_evidence_checksum_is_stale(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    archive.record_trial(
+        candidate.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.3, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=1,
+        dataset_checksum="e" * 64,
+        settings_digest=SETTINGS_DIGEST,
+    )
+
+    with pytest.raises(ArchiveError, match="stale_trial_evidence"):
+        _promote_for_tests(
+            archive,
+            candidate.canonical_hash(),
+            candidate_evidence(candidate),
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="stale trial",
+            expected_identity=IDENTITY,
+        )
+    assert archive.champion(SCOPE) is None
+
+
+def test_a_trial_without_digests_is_stale(tmp_path: Any) -> None:
+    archive = DiscoveryArchive(tmp_path / "discovery.sqlite")
+    candidate = ToyCandidate((9,))
+    archive.add_candidate(candidate, code_version=CODE_VERSION)
+    archive.record_trial(
+        candidate.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.3, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+    )
+
+    with pytest.raises(ArchiveError, match="stale_trial_evidence"):
+        _promote_for_tests(
+            archive,
+            candidate.canonical_hash(),
+            candidate_evidence(candidate),
+            TEST_POLICY,
+            scope=SCOPE,
+            reason="legacy trial",
+            expected_identity=IDENTITY,
+        )
+
+
+def test_an_exploratory_champion_is_replaced_as_an_audited_transition(tmp_path: Any) -> None:
+    archive, first = archive_with_candidate(tmp_path)
+    archive.promote_exploratory(first.canonical_hash(), scope=SCOPE, reason="legacy research")
+    previous = archive.champion(SCOPE)
+    assert previous is not None and previous.mode == "exploratory"
+
+    second = ToyCandidate((3, 1))
+    archive.add_candidate(second, code_version=CODE_VERSION)
+    archive.record_trial(
+        second.canonical_hash(),
+        TrialResult(metrics={"expectancy_r": 0.35, "trades": 75.0}, accepted=True),
+        dataset_id=DATASET_ID,
+        code_version=CODE_VERSION,
+        seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
+    )
+    folds = default_folds()
+    evidence = candidate_evidence(
+        second,
+        folds=folds,
+        aggregate=aggregate_for(folds, expectancy_r=0.35),
+    )
+
+    champion = _promote_for_tests(
+        archive,
+        second.canonical_hash(),
+        evidence,
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="first evidence champion after research mode",
+        expected_identity=IDENTITY,
+    )
+
+    assert champion.mode == "evidence"
+    assert champion.previous_candidate_id == first.canonical_hash()
+    detail = archive.decisions(second.canonical_hash())[-1].detail
+    assert detail is not None
+    assert detail["comparison"] == "replaces_non_evidence"
+    assert detail["replaces_non_evidence"]["previous_mode"] == "exploratory"
+    assert detail["replaces_non_evidence"]["previous_candidate_id"] == first.canonical_hash()
+    assert detail["replaces_non_evidence"]["previous_reason"] == previous.reason
+
+
+def test_the_provider_refuses_a_champion_from_an_unregistered_policy(tmp_path: Any) -> None:
+    archive, candidate = archive_with_candidate(tmp_path)
+    _promote_for_tests(
+        archive,
+        candidate.canonical_hash(),
+        candidate_evidence(candidate),
+        TEST_POLICY,
+        scope=SCOPE,
+        reason="not registered in production",
+        expected_identity=IDENTITY,
+    )
+
+    with pytest.raises(NoEvidenceChampion, match="allow-list"):
+        ChampionProvider(archive, scope=SCOPE).champion()
+
+
+def test_provider_accepts_a_real_spec_promoted_with_evidence(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setitem(PRODUCTION_POLICIES, TEST_POLICY.digest, TEST_POLICY)
     spec = StrategySpec(
         entries=(EntryRule("long", Compare(Const(1.0), ">", Const(0.5))),),
         exits=(ExitRule(Compare(Const(0.0), ">", Const(1.0))),),
@@ -1405,10 +1796,12 @@ def test_provider_accepts_a_real_spec_promoted_with_evidence(tmp_path: Any) -> N
         dataset_id=DATASET_ID,
         code_version=CODE_VERSION,
         seed=0,
+        dataset_checksum=DATASET_CHECKSUM,
+        settings_digest=SETTINGS_DIGEST,
     )
     evidence = make_evidence(spec_hash=candidate_id)
 
-    promote_with_evidence(
+    _promote_for_tests(
         archive,
         candidate_id,
         evidence,

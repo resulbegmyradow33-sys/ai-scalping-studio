@@ -54,10 +54,12 @@ version 1 created four domain tables plus `schema_version`; version 2 adds
 strategy champion governance (`champion_promotions`, `champions`), the
 `rolled_back` outcome and a JSON `detail_json` on `decisions`; version 3 adds the
 promotion `mode` (`evidence`, `exploratory`, `manual`), an evidence pointer on
-the champion rows and an immutable `evidence` table keyed by the bundle checksum.
-The migration is idempotent and keeps every existing candidate, trial, lineage
-edge and decision; existing promotions default to `exploratory`, which is what
-they were.
+the champion rows and an immutable `evidence` table keyed by the bundle checksum;
+version 4 adds the policy id/version/digest to champion rows and the trial's
+dataset checksum/settings digest. The migration is idempotent and keeps every
+existing candidate, trial, lineage edge and decision; existing promotions default
+to `exploratory`, which is what they were, and legacy NULL policy/trial digests
+are never treated as production evidence.
 
 `candidates` — one row per canonical hash.
 
@@ -353,7 +355,9 @@ champion = promote_with_evidence(
 ```
 
 The policy is evaluated **inside** the call; there is no decision object to
-forge and no public archive promotion method. The current champion is read from
+forge, no public archive promotion method and no unregistered policy. The public
+path only accepts a digest in `PRODUCTION_POLICIES`, so a weaker test policy is
+refused with `non_production_policy`. The current champion is read from
 the archive and its stored evidence is the baseline. The function writes the
 policy id/version/digest, evidence checksum, dataset id/checksum, settings digest
 and code version into the audit detail. The history row stores no metric
@@ -433,9 +437,9 @@ run = provider.champion()         # scope, spec, candidate id, promotion, metric
 ```
 
 It raises `NoChampionError` when nothing was promoted, `NoEvidenceChampion` when
-the champion came from the exploratory or manual path, and
-`InvalidChampionSpec` when the payload does not load as a strategy or its
-recomputed hash differs from the archived id. There is no fallback to a hand-written strategy: a silent
+the champion came from the exploratory or manual path or was promoted by a policy
+digest outside `PRODUCTION_POLICIES`, and `InvalidChampionSpec` when the payload
+does not load as a strategy or its recomputed hash differs from the archived id. There is no fallback to a hand-written strategy: a silent
 default would mean the autonomous run stops testing what the search produced.
 The module imports the archive and the DSL only; `scalping.paper` is never
 imported from `scalping.discovery`, so the dependency stays one-way.
