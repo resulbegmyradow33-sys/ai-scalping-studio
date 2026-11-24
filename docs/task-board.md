@@ -363,10 +363,12 @@ It supersedes older partial notes above where they describe pre-#104 code.
    strategy-selection system.** #104 is merged. It compares hold and ret_5,
    uses the simulator and costs, records lineage and can return no_trade,
    no_change or rejected. It does not run walk-forward or OOS.
-2. **Champion governance is not complete.** #109 is open, two commits ahead and
-   two behind main. Its own limits say validation-only, one higher-is-better
-   metric and no automatic drift/decay monitor. Do not treat it as a production
-   promotion gate until the evidence requirements in master-prompt §§38 pass.
+2. **Champion governance foundation is merged, but its production evidence gate
+   is incomplete.** #109 merged into main. It adds champion history, comparison,
+   rollback and a validated DSL ChampionProvider. Its own PR limits still say
+   validation-only metrics, no OOS/walk-forward, one higher-is-better metric
+   and no automatic drift/decay monitor. Do not treat it as a production
+   promotion gate until master-prompt §§38 are implemented.
 3. **Knowledge extraction is limited.** #106 is merged and creates deterministic
    source-linked drafts. #107 is open and three commits behind main; it must be
    rebased. PDF/OCR and automatic hypothesis-to-discovery routing remain open.
@@ -378,20 +380,24 @@ It supersedes older partial notes above where they describe pre-#104 code.
    champion or continuously ingest new bars/outcomes by itself.
 6. **Risk action masking:** #108 is merged for simulator/evaluation. PPO training
    still uses plain PPO; do not report MaskablePPO training as implemented.
-7. **Model zoo:** #105 is open and behind main. Its benchmark is useful but
-   lower priority than evidence validation and closed-loop autonomy.
+7. **Model zoo:** #105 is merged. It adds measured forward benchmarks and a
+   Transformer evaluator round-trip; this is useful research infrastructure,
+   not evidence of a trading edge. Keep further model expansion below the
+   autonomous evidence and closed-loop work.
 
 ### Next work, in strict order
 
-- [ ] Rebase open PRs #107, #109 and #105 onto current main; do not merge a
-      branch that is behind or diverged. #105 is non-blocking for the core goal.
+- [ ] Rebase open PR #107 onto current main (it still targets the pre-#109 main
+      and was stacked on #106). Review it as deterministic heuristic triage,
+      not semantic book understanding.
 - [ ] Add a walk-forward discovery evaluator with chronological folds and
       purge/embargo; preserve one locked final OOS set that search cannot read.
 - [ ] Add multiple-testing/data-snooping controls and report total attempts,
       effective trials, complexity, sensitivity and uncertainty.
-- [ ] Make production champion promotion fail closed with mandatory evidence;
-      compare candidate and incumbent on identical folds/costs/regimes. No
-      validation-only promotion and no default-empty gate for promotion.
+- [ ] Upgrade merged champion governance so production promotion fails closed
+      with mandatory walk-forward/OOS evidence; compare candidate and incumbent
+      on identical folds/costs/regimes. No validation-only promotion and no
+      default-empty gate for promotion.
 - [ ] Integrate champion loading, no-fallback/NO-TRADE behaviour and the
       autonomous paper runner behind one tested interface.
 - [ ] Implement real orchestrator handlers, scheduler/daemon, triggers and
