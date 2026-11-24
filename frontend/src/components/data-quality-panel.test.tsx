@@ -100,6 +100,11 @@ describe("DataQualityPanel", () => {
     // The counters are a real table with a caption and scoped headers.
     const table = screen.getByRole("table", { name: /Doğrulama sayaçları — XAUUSD M1/ });
     expect(table).toBeInTheDocument();
+    // The scroll wrapper is a named region so keyboard users can reach it.
+    expect(screen.getByRole("region", { name: /Doğrulama sayaçları/ })).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
     expect(screen.getAllByRole("columnheader")).toHaveLength(2);
     expect(screen.getByRole("rowheader", { name: "Zaman boşlukları" })).toBeInTheDocument();
     expect(screen.getByTestId("quality-load")).toHaveAttribute("role", "status");

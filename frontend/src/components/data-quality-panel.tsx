@@ -168,7 +168,12 @@ function QualityBody({ quality }: { quality: DataQuality }) {
         )}
       </dl>
 
-      <div className="overflow-x-auto">
+      <div
+        role="region"
+        aria-label={`Doğrulama sayaçları — ${quality.symbol} ${quality.timeframe}`}
+        tabIndex={0}
+        className="overflow-x-auto"
+      >
         <table className="w-full text-sm">
           <caption className="sr-only">
             Doğrulama sayaçları — {quality.symbol} {quality.timeframe}
