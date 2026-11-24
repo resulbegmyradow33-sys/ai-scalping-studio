@@ -78,6 +78,15 @@ from scalping.knowledge.routing import (
     proposals_for_queue,
     propose_from_hypothesis,
 )
+from scalping.knowledge.tables import (
+    MERGED_CELL,
+    TABLE_KINDS,
+    TableExtraction,
+    TableProblem,
+    TableRecord,
+    extract_tables,
+    flatten_table,
+)
 
 __all__ = [
     "APPROVAL_STATUSES",
@@ -85,6 +94,7 @@ __all__ = [
     "CLAIM_KINDS",
     "DEFAULT_FALSIFICATION",
     "HYPOTHESIS_STATUSES",
+    "MERGED_CELL",
     "PROPOSAL_BAR_COLUMNS",
     "PROPOSAL_GROUPS",
     "PROPOSAL_KIND_SOURCES",
@@ -94,6 +104,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "SEARCH_BACKENDS",
     "STATUS_TRANSITIONS",
+    "TABLE_KINDS",
     "Approval",
     "ChunkRecord",
     "ClaimKind",
@@ -116,6 +127,9 @@ __all__ = [
     "Section",
     "SectionRecord",
     "SourceRef",
+    "TableExtraction",
+    "TableProblem",
+    "TableRecord",
     "TextExtractor",
     "UnsupportedFormat",
     "canonical_proposal_id",
@@ -123,6 +137,8 @@ __all__ = [
     "classify_sentence",
     "create_hypothesis",
     "extract_hypotheses",
+    "extract_tables",
+    "flatten_table",
     "get_hypothesis",
     "legacy_proposal_id",
     "link_experiment",
