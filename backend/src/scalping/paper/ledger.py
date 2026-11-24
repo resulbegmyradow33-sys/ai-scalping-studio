@@ -43,10 +43,12 @@ from typing import Any, Final, Self
 from scalping.types import Side
 
 __all__ = [
+    "GAP_POLICIES",
     "SCHEMA_VERSION",
     "DuplicateError",
     "EquityPoint",
     "FillRecord",
+    "GapRecord",
     "LedgerError",
     "OrderRecord",
     "PaperLedger",
@@ -61,7 +63,12 @@ __all__ = [
 
 #: Schema version written by this module. A database with a newer version is
 #: refused instead of being silently written with an older layout.
-SCHEMA_VERSION: int = 1
+SCHEMA_VERSION: int = 2
+
+#: Gap policies the audit accepts. They mirror
+#: :data:`scalping.paper.continuous.GapPolicy`; the table's CHECK constraint and
+#: this set must stay in step, which the paper tests assert.
+GAP_POLICIES: Final[frozenset[str]] = frozenset({"strict", "session_aware", "skip_with_report"})
 
 _SCHEMA_VERSION_DDL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -174,6 +181,27 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         )
         """,
         "CREATE INDEX IF NOT EXISTS equity_session_idx ON equity_curve(session_id, id)",
+    ),
+    # Version 2: append-only audit of tolerated cadence gaps. A gap row states
+    # that the runner moved from ``from_ts`` to ``to_ts`` without a bar for
+    # ``missing_bars`` expected in-session slots. It never stands in for a bar:
+    # no OHLCV, no fill and no decision is attached to a skipped instant.
+    2: (
+        """
+        CREATE TABLE IF NOT EXISTS paper_gaps (
+            gap_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+            from_ts TEXT NOT NULL,
+            to_ts TEXT NOT NULL,
+            missing_bars INTEGER NOT NULL CHECK (missing_bars >= 1),
+            policy TEXT NOT NULL
+                CHECK (policy IN ('strict', 'session_aware', 'skip_with_report')),
+            recorded_at TEXT NOT NULL,
+            CHECK (to_ts > from_ts),
+            UNIQUE (session_id, from_ts, to_ts)
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS paper_gaps_session_idx ON paper_gaps(session_id, gap_id)",
     ),
 }
 
@@ -341,6 +369,25 @@ class EquityPoint:
     ts: datetime
     balance: float
     equity: float
+
+
+@dataclass(frozen=True, slots=True)
+class GapRecord:
+    """One cadence gap the runner tolerated, recorded for audit.
+
+    ``from_ts`` is the last stored bar before the gap and ``to_ts`` the next
+    stored bar. ``missing_bars`` counts expected in-session slots between them
+    (a jump that lies entirely in a closed window is not a data gap and is not
+    recorded). ``policy`` is the runner's gap policy at the time.
+    """
+
+    gap_id: int
+    session_id: str
+    from_ts: datetime
+    to_ts: datetime
+    missing_bars: int
+    policy: str
+    recorded_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +656,18 @@ def _equity_from_row(row: sqlite3.Row) -> EquityPoint:
         ts=_parse(row["ts"]),
         balance=float(row["balance"]),
         equity=float(row["equity"]),
+    )
+
+
+def _gap_from_row(row: sqlite3.Row) -> GapRecord:
+    return GapRecord(
+        gap_id=int(row["gap_id"]),
+        session_id=str(row["session_id"]),
+        from_ts=_parse(row["from_ts"], "from_ts"),
+        to_ts=_parse(row["to_ts"], "to_ts"),
+        missing_bars=int(row["missing_bars"]),
+        policy=str(row["policy"]),
+        recorded_at=_parse(row["recorded_at"], "recorded_at"),
     )
 
 
@@ -1270,6 +1329,88 @@ class PaperLedger:
         """
         rows, total = self._page("equity", session_id, limit, offset)
         return [_equity_from_row(row) for row in reversed(rows)], total
+
+    # ---------------------------------------------------------------------- gaps
+
+    def record_gap(
+        self,
+        session_id: str,
+        *,
+        from_ts: datetime,
+        to_ts: datetime,
+        missing_bars: int,
+        policy: str,
+    ) -> int:
+        """Append one tolerated cadence gap; re-recording the same gap is a no-op.
+
+        The table is append-only: there is no update or delete path. The unique
+        ``(session_id, from_ts, to_ts)`` key makes a retried ``advance()``
+        idempotent. A retry that disagrees about ``missing_bars`` or ``policy``
+        means the stored slice changed under a recorded decision, so it raises
+        instead of rewriting history. Nothing here creates a bar or a decision.
+        """
+        _require_text(session_id, "session_id")
+        start = _stamp(from_ts, "from_ts")
+        end = _stamp(to_ts, "to_ts")
+        if _parse(end, "to_ts") <= _parse(start, "from_ts"):
+            raise ValueError(f"to_ts {to_ts!r} must be after from_ts {from_ts!r}")
+        if isinstance(missing_bars, bool) or not isinstance(missing_bars, int):
+            raise TypeError(f"missing_bars must be an int, got {type(missing_bars).__name__}")
+        if missing_bars < 1:
+            raise ValueError(f"missing_bars must be >= 1, got {missing_bars!r}")
+        name = _require_text(policy, "policy")
+        if name not in GAP_POLICIES:
+            raise ValueError(f"policy must be one of {sorted(GAP_POLICIES)}, got {policy!r}")
+
+        with self._transaction() as tx:
+            self._require_session(tx, session_id)
+            existing = tx.execute(
+                "SELECT * FROM paper_gaps WHERE session_id = ? AND from_ts = ? AND to_ts = ?",
+                (session_id, start, end),
+            ).fetchone()
+            if existing is not None:
+                if int(existing["missing_bars"]) != missing_bars or str(existing["policy"]) != name:
+                    raise LedgerError(
+                        f"gap {start}..{end} for session {session_id!r} is already"
+                        f" recorded as {existing['missing_bars']} bar(s) under"
+                        f" {existing['policy']!r}"
+                    )
+                return int(existing["gap_id"])
+            cursor = tx.execute(
+                """
+                INSERT INTO paper_gaps (
+                    session_id, from_ts, to_ts, missing_bars, policy, recorded_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (session_id, start, end, missing_bars, name, _now().isoformat()),
+            )
+            gap_id = cursor.lastrowid
+            if gap_id is None:  # pragma: no cover - sqlite always returns it
+                raise LedgerError("gap insert returned no id")
+        return int(gap_id)
+
+    def gaps(self, session_id: str) -> list[GapRecord]:
+        """Every recorded gap of the session, in the order it was appended."""
+        _require_text(session_id, "session_id")
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT * FROM paper_gaps WHERE session_id = ? ORDER BY gap_id",
+                (session_id,),
+            )
+            .fetchall()
+        )
+        return [_gap_from_row(row) for row in rows]
+
+    def count_gaps(self, session_id: str) -> int:
+        """How many gap rows the session has; cheaper than reading them all."""
+        _require_text(session_id, "session_id")
+        row = (
+            self._connection()
+            .execute("SELECT COUNT(*) FROM paper_gaps WHERE session_id = ?", (session_id,))
+            .fetchone()
+        )
+        return 0 if row is None else int(row[0])
 
     # --------------------------------------------------------------------- resume
 

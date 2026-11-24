@@ -115,7 +115,7 @@ def test_init_schema_is_idempotent(tmp_path: Path) -> None:
         assert book.init_schema() == SCHEMA_VERSION
         assert book.init_schema() == SCHEMA_VERSION
         rows = book.connection.execute("SELECT version FROM schema_version").fetchall()
-        assert [int(row["version"]) for row in rows] == [SCHEMA_VERSION]
+        assert [int(row["version"]) for row in rows] == list(range(1, SCHEMA_VERSION + 1))
         tables = {
             str(row["name"])
             for row in book.connection.execute(
