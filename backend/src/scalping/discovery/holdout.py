@@ -68,12 +68,20 @@ from scalping.discovery.evidence import (
     bootstrap_ci,
     evidence_checksum,
     locked_oos_checksum,
-    per_trade_regimes,
-    regime_labels,
-    regime_rows,
     settings_digest,
-    slice_frame,
     verify_evidence,
+)
+from scalping.discovery.evidence import (
+    _per_trade_regimes as per_trade_regimes,
+)
+from scalping.discovery.evidence import (
+    _regime_labels as regime_labels,
+)
+from scalping.discovery.evidence import (
+    _regime_rows as regime_rows,
+)
+from scalping.discovery.evidence import (
+    _slice_frame as slice_frame,
 )
 from scalping.discovery.promotion import (
     PromotionDecision,

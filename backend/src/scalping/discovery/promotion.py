@@ -106,7 +106,6 @@ __all__ = [
     "PROMOTION_V1",
     "EvidenceIdentity",
     "ExpectedIdentity",
-    "is_sealed_decision",
     "ManualOverride",
     "PromotionDecision",
     "PromotionPolicy",
@@ -115,6 +114,7 @@ __all__ = [
     "evaluate_promotion",
     "is_production_policy",
     "is_production_policy_digest",
+    "is_sealed_decision",
     "manual_override",
     "promote_manual_override",
     "promote_with_evidence",
@@ -605,9 +605,12 @@ def is_sealed_decision(decision: object) -> bool:
     helper re-checks a decision that crossed a boundary (unpickle, cache) and is
     used by the locked-holdout unlock path.
     """
-    return isinstance(decision, PromotionDecision) and _verify_decision(
-        decision._content(), decision._seal
-    )
+    if not isinstance(decision, PromotionDecision):
+        return False
+    try:
+        return _verify_decision(decision._content(), decision._seal)
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _sealed_decision(**kwargs: Any) -> PromotionDecision:
@@ -734,7 +737,10 @@ def _base_evidence_checksum(evidence: CandidateEvidence) -> str:
     content, and the final bundle checksum binds the pair.
     """
     payload = evidence.to_dict()
-    payload.pop("locked_oos", None)
+    # The pre-attachment bundle serialised ``locked_oos`` as null; keep the key
+    # (rather than dropping it) so this re-derives exactly that checksum.
+    if payload.get("locked_oos") is not None:
+        payload["locked_oos"] = None
     payload.pop("checksum", None)
     payload.pop("created_at", None)
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
