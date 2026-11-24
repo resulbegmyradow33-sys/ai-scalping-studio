@@ -295,8 +295,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       page/section references.
 - [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı ve OCR yok.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
-- [ ] PARTIAL: classification implementation is in open PR #107, not yet on
-      main; rebase it after #106 and review before marking complete.
+- [x] Classify claims, concepts, examples, opinions and empirical observations
+      (deterministic heuristic triage, #107; not semantic reading).
 - [x] Deterministic hypothesis drafts from sentence patterns with source refs
       (#106); this is not semantic book understanding and not tested alpha.
 - [x] Link each hypothesis to source passages and experiment outcomes.

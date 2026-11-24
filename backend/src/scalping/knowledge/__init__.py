@@ -15,6 +15,13 @@ It is deliberately deterministic and offline:
 See ``docs/knowledge-ingestion.md`` for the formats, schema and boundaries.
 """
 
+from scalping.knowledge.classify import (
+    CLAIM_KINDS,
+    ClaimKind,
+    ClassifiedSentence,
+    classify_document,
+    classify_sentence,
+)
 from scalping.knowledge.extract import (
     DEFAULT_FALSIFICATION,
     ExtractionResult,
@@ -56,12 +63,15 @@ from scalping.knowledge.ingest import (
 
 __all__ = [
     "CHUNK_CHARS",
+    "CLAIM_KINDS",
     "DEFAULT_FALSIFICATION",
     "HYPOTHESIS_STATUSES",
     "SCHEMA_VERSION",
     "SEARCH_BACKENDS",
     "STATUS_TRANSITIONS",
     "ChunkRecord",
+    "ClaimKind",
+    "ClassifiedSentence",
     "DocumentIngestionError",
     "DocumentIngestor",
     "DocumentRecord",
@@ -78,6 +88,8 @@ __all__ = [
     "SourceRef",
     "TextExtractor",
     "UnsupportedFormat",
+    "classify_document",
+    "classify_sentence",
     "create_hypothesis",
     "extract_hypotheses",
     "get_hypothesis",
