@@ -1,0 +1,279 @@
+{
+  "schema_version": 1,
+  "kind": "research-smoke",
+  "date": "2026-11-24",
+  "scope": "Bounded research smoke of the discovery -> evidence -> reproduce pipeline on the real local XAUUSD H1 store. Pipeline behaviour only; not validation, not promotion evidence.",
+  "environment": {
+    "machine": "Apple M2, 8 GB RAM, macOS 27.2.1 (arm64)",
+    "python": "3.12.13",
+    "numpy": "2.5.5",
+    "polars": "2.1.0",
+    "interpreter": ".worktrees/v1/backend/.venv/bin/python with PYTHONPATH=<research worktree>/backend/src",
+    "polars_threads": "default (unpinned) for discovery and the first evidence/reproduce attempts; pinned to 1 for the recorded bundle and the passing reproduce"
+  },
+  "data": {
+    "store_root": "/Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-ticks5-store",
+    "store_manifest_checksum": "0930bedd3c64554621c599ad6ee20214",
+    "symbol": "XAUUSD",
+    "timeframe": "H1",
+    "rows": 29586,
+    "first_ts": "2021-05-24T00:00:00+00:00",
+    "last_ts": "2026-05-22T20:00:00+00:00",
+    "source": "ticks:data-ticks5",
+    "synthetic": false,
+    "dataset_id": "XAUUSD:H1:h1:439ad79658c7",
+    "dataset_checksum": "439ad79658c774371ceb32c7e605d184",
+    "run_dataset_id": "validation:XAUUSD:H1:h1:439ad79658c7",
+    "splits": {
+      "horizon_bars": 1,
+      "purge_bars_requested": 0,
+      "embargo_bars_requested": 0,
+      "train_fraction": 0.7,
+      "validation_fraction": 0.15,
+      "train_rows": 20667,
+      "validation_rows": 4428,
+      "test_rows": 4428
+    },
+    "validation_slice": {
+      "first_ts": "2024-11-20T10:00:00+00:00",
+      "last_ts": "2025-08-21T16:00:00+00:00",
+      "rows": 4428
+    }
+  },
+  "commands": {
+    "discovery_run": "cd <research worktree> && PYTHONPATH=$PWD/backend/src <venv>/python -m scalping.cli discovery run --root /Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-ticks5-store --symbol XAUUSD --timeframe H1 --max-trials 25 --population 8 --generations 4 --seed 7 --archive runs/discovery/xauusd-h1-seed7.sqlite --out runs/discovery/xauusd-h1-seed7.run.json --no-cache",
+    "discovery_run_repeat": "same command with --archive runs/discovery/repro/xauusd-h1-seed7.sqlite --out runs/discovery/repro/xauusd-h1-seed7.run.json (empty archive, same seed)",
+    "evidence_build": "POLARS_MAX_THREADS=1 PYTHONPATH=$PWD/backend/src <venv>/python runs/discovery/smoke_evidence.py (scratch driver, gitignored)",
+    "reproduce_pinned": "POLARS_MAX_THREADS=1 PYTHONPATH=$PWD/backend/src <venv>/python -m scalping.cli discovery reproduce --bundle runs/discovery/evidence/most-active.evidence.json --store-root runs/discovery/store --out runs/discovery/evidence/most-active.reproduce.threads1.json",
+    "reproduce_default_threads": "same reproduce command without POLARS_MAX_THREADS, run twice"
+  },
+  "discovery_run": {
+    "archive": "runs/discovery/xauusd-h1-seed7.sqlite (fresh, decision row id 1)",
+    "config": {
+      "max_trials": 25,
+      "population": 8,
+      "generations": 4,
+      "seed": 7,
+      "mutation_rate": 0.3,
+      "crossover_rate": 0.2,
+      "complexity_cap": 40,
+      "patience": 3,
+      "max_lookback": 20,
+      "max_depth": 3,
+      "window": 60,
+      "stress": [1.5, 2.0],
+      "baselines": ["hold", "ret_5"],
+      "gate": {
+        "min_trades": 0,
+        "min_expectancy_r": 0.0,
+        "min_profit_factor": 0.0,
+        "max_drawdown": 0.0,
+        "require_stress": []
+      },
+      "feature_cache": "disabled (--no-cache)"
+    },
+    "code_version": "e78ad3ec15474596",
+    "settings_digest": "26f455b9bc177ec5ad2f924ec967bd3c51150cbe6a91768f7b0d39415969c957",
+    "attempts": {
+      "max_trials": 25,
+      "trials_evaluated": 22,
+      "skipped_before_evaluator": 3,
+      "deduped": 0,
+      "accepted": 22,
+      "gate_rejections": 0,
+      "stop_reason": "budget"
+    },
+    "baselines": {
+      "hold": {
+        "trades": 0,
+        "net_profit": 0.0,
+        "profit_factor": 0.0,
+        "sharpe": 0.0,
+        "max_drawdown": 0.0,
+        "expectancy_r": 0.0,
+        "total_costs": 0.0
+      },
+      "ret_5": {
+        "trades": 500,
+        "net_profit": 226.41561299211935,
+        "profit_factor": 1.0140284152210783,
+        "sharpe": 2.4760419518793,
+        "max_drawdown": 0.10149812143653315,
+        "win_rate": 0.342,
+        "expectancy_r": 0.011345076928731995,
+        "total_costs": 2270.0404042478995,
+        "cost_ratio": 0.1387029515544377,
+        "avg_bars": 6.276
+      }
+    },
+    "best_candidate": {
+      "candidate_id": "ebb1d79d3a06c3ba9a1a3e98f973055379bb2d0841d5e801b240140d789ddd75",
+      "complexity": 27,
+      "trades": 0,
+      "net_profit": 0.0,
+      "profit_factor": 0.0,
+      "expectancy_r": 0.0,
+      "reason_flat": "flat on the validation slice: 0 closed trades with a 1-bar holding limit",
+      "canonical_summary": "not LONG between(m15_rsi_14, -0.7993, 1.4942); exits (change(london,6) != eq_low_20) AND NOT fall(asia,13), or fall(order_block_dist_atr,9); holding 1 bar; sizing atr_multiple 1.98"
+    },
+    "comparison": {
+      "metric": "net_profit",
+      "best_candidate_value": 0.0,
+      "best_baseline": "ret_5",
+      "best_baseline_value": 226.41561299211935,
+      "beats_baseline": false
+    },
+    "decision": "no_trade",
+    "decision_reason": "candidate ebb1d79d3a06 is flat by construction (0 closed trades); NO TRADE is the recorded result",
+    "promotion_attempted": false
+  },
+  "evidence_bundle": {
+    "producer": "scalping.discovery.evidence.build_evidence (no persist module for CandidateEvidence exists in this tree; bundle written as JSON + spec sidecar under runs/, gitignored)",
+    "config": {
+      "folds": 3,
+      "cost_stress": [1.5, 2.0],
+      "min_trades_per_fold": 5,
+      "regime_coverage_min": 1.0,
+      "bootstrap_samples": 1000,
+      "bootstrap_confidence": 0.95,
+      "seed": 7,
+      "search_budget": 25,
+      "trial_count": 22,
+      "window": 60
+    },
+    "best_candidate_attempt": {
+      "candidate_id": "ebb1d79d3a06c3ba9a1a3e98f973055379bb2d0841d5e801b240140d789ddd75",
+      "outcome": "refused",
+      "code": "fold_trades_below_minimum",
+      "message": "fold_trades_below_minimum: fold 1 closed 0 trades; the policy requires 5",
+      "meaning": "fail-closed behaviour: a flat candidate cannot produce promotion evidence"
+    },
+    "most_active_candidate": {
+      "note": "Highest-trade accepted candidate in the archive; used only to exercise the evidence and reproduce plumbing. It is not the run winner and not a candidate for promotion.",
+      "candidate_id": "d11c64e25e1f527d30c1159fbdf500964488646aa6a5e7a54a317fea7c6b8881",
+      "spec_hash": "d11c64e25e1f527d30c1159fbdf500964488646aa6a5e7a54a317fea7c6b8881",
+      "complexity": 28,
+      "validation_trial": {
+        "trades": 724,
+        "net_profit": -2006.07421826139,
+        "trial_seed": 174509483
+      },
+      "bundle_checksum": "09f97bf5396de75b865f22c5d476f4be4c771bad4b10b0f161e3aaf31679cabb",
+      "bundle_path": "runs/discovery/evidence/most-active.evidence.json",
+      "spec_sidecar_path": "runs/discovery/evidence/most-active.evidence.spec.json",
+      "schema_version": 3,
+      "folds": [
+        {
+          "fold": 1,
+          "test_rows": 6274,
+          "trades": 119,
+          "net_profit": -2020.8836269797075,
+          "expectancy_r": -0.39276866984586734,
+          "stress": {
+            "x1.5": {"trades": 117, "net_profit": -2028.9104502897208},
+            "x2.0": {"trades": 86, "net_profit": -2006.8786633510426}
+          }
+        },
+        {
+          "fold": 2,
+          "test_rows": 6274,
+          "trades": 191,
+          "net_profit": -2007.169320172071,
+          "expectancy_r": -0.23728053575776217,
+          "stress": {
+            "x1.5": {"trades": 114, "net_profit": -2007.667243178421},
+            "x2.0": {"trades": 94, "net_profit": -2009.9436039361944}
+          }
+        },
+        {
+          "fold": 3,
+          "test_rows": 6274,
+          "trades": 1217,
+          "net_profit": -2035.2026485922424,
+          "expectancy_r": -0.040554099642403744,
+          "stress": {
+            "x1.5": {"trades": 569, "net_profit": -2033.0865351485345},
+            "x2.0": {"trades": 327, "net_profit": -2018.602495291124}
+          }
+        }
+      ],
+      "aggregate": {
+        "total_trades": 1527,
+        "total_r": -141.41439330619613,
+        "expectancy_r": -0.09260929489600271,
+        "profit_factor": 0.861050078933043,
+        "max_drawdown": 0.2628358344286035,
+        "positive_folds": 0,
+        "positive_fold_fraction": 0.0,
+        "expectancy_r_ci95": [-0.15716955487301146, -0.02469824975706356],
+        "total_r_ci95": [-239.9979102910885, -37.71422737903605],
+        "regime_coverage": 1.0
+      }
+    }
+  },
+  "reproduce": {
+    "default_threads": {
+      "runs": [
+        {"reproduced": false, "checksum": "4326974d361f69a72a2ca5306d96cd480f7c5208794f77a4a83b8bc64e9851af", "expected": "bd2af530936912aa3fb7194730c8b0e45c31a04b7e6cd2d5b15f770927a18f76", "mismatches": ["folds", "aggregate"]},
+        {"reproduced": false, "checksum": "d37f1043888d00c07d78a34ea73a0fe88efa8d87cf81ce3dcf1103517fdd2d20", "expected": "bd2af530936912aa3fb7194730c8b0e45c31a04b7e6cd2d5b15f770927a18f76", "mismatches": ["aggregate"]}
+      ],
+      "observed_difference": "last-bit float drift in regime sums, e.g. folds[2].regimes[0].net_profit -300.7723024042524 vs -300.77230240425234 (~1e-16 relative)",
+      "interpretation": "polars group-by summation order under the default thread pool is not pinned; each unpinned run produced a different checksum. The mismatch was reported and exit code was 1, never a silent pass."
+    },
+    "pinned_threads": {
+      "command": "POLARS_MAX_THREADS=1",
+      "bundle_checksum": "09f97bf5396de75b865f22c5d476f4be4c771bad4b10b0f161e3aaf31679cabb",
+      "reproduced": true,
+      "expected": "09f97bf5396de75b865f22c5d476f4be4c771bad4b10b0f161e3aaf31679cabb",
+      "mismatches": [],
+      "exit_code": 0
+    },
+    "search_level": {
+      "second_seeded_run_on_empty_archive": "identical dataset_id, trials 22, skipped 3, accepted 22, decision no_trade, best candidate id ebb1d79d3a06..., identical best metrics and identical baseline table"
+    }
+  },
+  "resources": {
+    "discovery_run": {"wall_seconds": 14.35, "peak_rss_bytes": 240107520, "limit_seconds": 600, "limit_bytes": 6442450944},
+    "discovery_run_repeat": {"wall_seconds": 15.35, "peak_rss_bytes": 279248896},
+    "evidence_build_default_threads": {"wall_seconds": 4.91, "peak_rss_bytes": 225722368},
+    "reproduce_default_threads": {"wall_seconds": 4.43, "peak_rss_bytes": 266108928},
+    "reproduce_pinned_threads": {"wall_seconds": 3.62, "peak_rss_bytes": 269500416},
+    "total_wall_seconds": 42.66,
+    "limits_respected": true
+  },
+  "limitations": [
+    "25 attempts (22 evaluated, 3 skipped before the evaluator) over a 4,428-bar validation slice is a wiring smoke, not a search. The multiple-testing denominator is 22 evaluations.",
+    "Gate defaults are all zero/empty, so all 22 evaluated candidates were accepted; 'accepted' here carries no quality meaning.",
+    "Selection metric is net_profit and the gate is empty: a flat candidate scores exactly 0.0 and ranks first whenever every trading candidate loses. The run's 'best' candidate is such a degenerate no-trade tree.",
+    "Validation slice only. The test split was never read or scored; there is no walk-forward, no locked OOS and no regime stability proof. Discovery cannot and did not promote.",
+    "The most-active candidate is a known validation loser (724 trades, -2006.07 net). Its evidence bundle exists to exercise the folds/stress/reproduce path, not to propose a policy.",
+    "Regime-level sums are not bit-reproducible under polars' default thread pool: two unpinned reproduce runs returned different checksums with ~1e-16 relative differences. Pinning POLARS_MAX_THREADS=1 makes bundle and reproduce agree exactly.",
+    "One store, one symbol, one timeframe (XAUUSD H1 derived from ticks5). No conclusion generalises beyond this store.",
+    "No CandidateEvidence persist module exists in this tree; bundles live as JSON plus a spec sidecar under runs/ and are not committed.",
+    "Folds use min_trades_per_fold=5 and an iid bootstrap CI; iid resampling ignores trade clustering, so the interval can look tighter than the sequence supports."
+  ],
+  "conclusion": "On the real local XAUUSD H1 store the pipeline ran end to end: seeded search (22 evaluations), a recorded no_trade decision, a fail-closed evidence refusal for the flat best candidate, a built bundle for an archive candidate, and a reproduce pass with the thread pool pinned. No candidate showed an edge. The single validation-slice search winner is a degenerate flat policy, and the one bundled candidate has a negative expectancy interval. This is pipeline evidence only; no promotion was attempted and no claim of validation or profitability is made.",
+  "not_claims": [
+    "not validated",
+    "not profitable",
+    "not paper-traded",
+    "no promotion attempted",
+    "no champion change"
+  ],
+  "artifacts": {
+    "committed": [
+      "docs/evidence/discovery-smoke-2026-11-24.json",
+      "docs/research-smoke-2026-11-24.md"
+    ],
+    "gitignored": [
+      "runs/discovery/xauusd-h1-seed7.sqlite",
+      "runs/discovery/xauusd-h1-seed7.run.json",
+      "runs/discovery/repro/xauusd-h1-seed7.*",
+      "runs/discovery/evidence/most-active.evidence.json",
+      "runs/discovery/evidence/most-active.evidence.spec.json",
+      "runs/discovery/evidence/most-active.reproduce.threads1.json",
+      "runs/discovery/store/datasets/439ad79658c774371ceb32c7e605d184/",
+      "runs/discovery/smoke_evidence.py"
+    ]
+  }
+}

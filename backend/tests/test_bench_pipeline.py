@@ -236,6 +236,8 @@ def test_cli_writes_the_same_json_it_prints(tmp_path: Path) -> None:
             "scripts/bench_pipeline.py",
             "--out",
             str(out),
+            "--max-trials",
+            "1",
         ],
         cwd=backend,
         capture_output=True,

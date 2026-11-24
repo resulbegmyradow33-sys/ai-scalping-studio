@@ -299,6 +299,7 @@ describe("PaperTradingPage", () => {
 
     fireEvent.click(screen.getByTestId("paper-close-button"));
     expect(screen.getByText("Bu oturum kapatılacak; kapanış geri alınamaz.")).toBeInTheDocument();
+    expect(screen.getByTestId("paper-close-confirm")).toHaveFocus();
     expect(calls.some((call) => call.path.endsWith("/close"))).toBe(false);
 
     await act(async () => {
@@ -312,6 +313,8 @@ describe("PaperTradingPage", () => {
     expect(screen.getByTestId("paper-close-notice")).toHaveTextContent("Oturum kapatıldı");
     expect(screen.getByTestId("paper-detail-status")).toHaveTextContent("Kapalı");
     expect(screen.getByTestId("paper-close-button")).toBeDisabled();
+    // The confirm group is gone; focus lands on the section heading, not <body>.
+    expect(screen.getByRole("heading", { name: "Oturum ayrıntısı" })).toHaveFocus();
 
     // The detail and the list are re-read after the write, not patched locally.
     expect(detailGetCount()).toBeGreaterThan(1);
@@ -344,6 +347,20 @@ describe("PaperTradingPage", () => {
     expect(detailGetCount()).toBeGreaterThan(before);
   });
 
+  it("returns focus to the close button when the confirmation is cancelled", async () => {
+    routeSessions([sessionItem()]);
+    routeDetail(RUNNING);
+
+    renderPage();
+    await flush();
+
+    fireEvent.click(screen.getByTestId("paper-close-button"));
+    expect(screen.getByTestId("paper-close-confirm")).toHaveFocus();
+
+    fireEvent.click(screen.getByRole("button", { name: "Vazgeç" }));
+    expect(screen.getByTestId("paper-close-button")).toHaveFocus();
+  });
+
   it("bounds session pagination to the real total", async () => {
     const first = Array.from({ length: 20 }, (_, index) =>
       sessionItem({ session_id: `sess-${index}`, status: "closed" }),
@@ -360,6 +377,8 @@ describe("PaperTradingPage", () => {
 
     const pager = screen.getByRole("group", { name: "Paper oturumları — en yeni önce sayfalama" });
     expect(pager).toHaveTextContent("1–20 / 25");
+    // Paging changes the range without moving focus; announce it politely.
+    expect(within(pager).getByText("1–20 / 25")).toHaveAttribute("aria-live", "polite");
     expect(within(pager).getByRole("button", { name: "Önceki" })).toBeDisabled();
 
     fireEvent.click(within(pager).getByRole("button", { name: "Sonraki" }));
