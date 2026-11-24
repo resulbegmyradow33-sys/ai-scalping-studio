@@ -1,4 +1,5 @@
 import type {
+  AutonomyChampionList,
   AutonomyEventPage,
   AutonomyJobPage,
   AutonomyStatus,
@@ -294,6 +295,10 @@ export const api = {
 
   autonomyStatus(): Promise<AutonomyStatus> {
     return request<AutonomyStatus>("/api/autonomy/status");
+  },
+
+  autonomyChampions(): Promise<AutonomyChampionList> {
+    return request<AutonomyChampionList>("/api/autonomy/champions");
   },
 
   autonomyJobs(limit = 50): Promise<AutonomyJobPage> {

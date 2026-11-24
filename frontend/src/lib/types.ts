@@ -630,7 +630,11 @@ export interface AutonomyOrchestratorStatus {
   last_event?: AutonomyLastEvent | null;
 }
 
-/** One scope's champion; `mode` is `evidence`, `exploratory` or `manual`. */
+/**
+ * One scope's champion. `mode` comes from the archived payload; the backend
+ * falls back to `dsl` when the payload names no mode, so a champion row here
+ * does not prove the payload declared it.
+ */
 export interface AutonomyChampion {
   scope: string;
   candidate_id: string;
@@ -638,6 +642,16 @@ export interface AutonomyChampion {
   promoted_at?: string | null;
   policy_id?: string | null;
   policy_digest?: string | null;
+}
+
+/**
+ * `GET /api/autonomy/champions`; `items` is absent when the archive or its
+ * champion table is unreadable. `readable: false` is not "no champions".
+ */
+export interface AutonomyChampionList {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyChampion[] | null;
 }
 
 /** Archived trial/gate counts; absent tables leave the count missing. */
