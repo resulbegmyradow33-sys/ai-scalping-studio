@@ -183,6 +183,29 @@ A source reference must point at a section of a document whose status is
 `indexed`. A citation to a failed or unsupported document, an unknown document
 or a missing section is rejected before the transaction.
 
+## Sentence classification
+
+`classify_sentence(text)` labels a research sentence with one of five kinds
+using deterministic patterns — no LLM, no network:
+
+| Kind | Marker | Example |
+|---|---|---|
+| `example` | "for example", "e.g.", "such as" | "For example, gold gaps at the London open." |
+| `opinion` | first person or hedge | "I think momentum is probably dead." |
+| `observation` | measurement/backtest terms or a number with a unit | "A backtest of 215 trades produced +0.159R." |
+| `concept` | definition ("refers to", "is a", "means") | "Liquidity refers to resting orders." |
+| `claim` | conditional/causal pattern or market statement with a modal | "When volatility expands, momentum signals weaken." |
+
+Precedence is example → opinion → observation → concept → claim. A sentence
+without a market term returns `None`, so generic prose is not forced into a
+bucket. `classify_document(index, doc_id)` returns `ClassifiedSentence` rows in
+section/sentence order.
+
+The hypothesis extractor uses this filter: only `claim` and `observation`
+sentences can become drafts; an opinion, definition or example never does. The
+classifier is triage, not truth — an `observation` is still prose until a
+quantitative experiment reproduces it.
+
 ## Hypothesis drafts from prose
 
 `scalping.knowledge.extract_hypotheses(index, doc_id)` proposes hypotheses from
@@ -271,6 +294,6 @@ uv run mypy src
   dropped); exact layout is not preserved.
 - The index stores the extracted text, not the source bytes; the preserved
   original remains the authority.
-- Hypothesis drafts are pattern-based; there is no semantic claim
-  classification, no strategy routing and no feedback ingestion of
-  backtest/paper logs in this slice.
+- Classification and extraction are pattern-based, not semantic; there is no
+  LLM, no strategy routing and no feedback ingestion of backtest/paper logs in
+  this slice.
