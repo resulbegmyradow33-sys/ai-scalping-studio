@@ -380,6 +380,95 @@ engine, and never a profitability claim. Discovery produces candidates; a
 bundle is not a promotion, and a validation winner after N trials is a
 multiple-testing warning rather than evidence of a durable edge.
 
+## Writing the dataset artifact and evidence bundle (discovery)
+
+`scalping.discovery.persist` is the production writer that closes issue #136.
+Before it, `discovery reproduce` expected an artifact and a bundle that only a
+test fixture could create. The writer uses the same builder, artifact module and
+evidence module every other command uses; it introduces no second arithmetic
+path.
+
+### What it writes
+
+```text
+<store-root>/datasets/<dataset_checksum>/artifact.json   manifest (written last)
+<store-root>/datasets/<dataset_checksum>/X.npy
+<store-root>/datasets/<dataset_checksum>/y_direction.npy
+<store-root>/datasets/<dataset_checksum>/y_return.npy
+<store-root>/datasets/<dataset_checksum>/ts.npy
+<store-root>/datasets/<dataset_checksum>/split.npy
+<out-path>                                             evidence JSON (canonical)
+<out-path without .json>.spec.json                     strategy sidecar
+```
+
+The dataset directory is keyed by `manifest.checksum` (the blake2b digest of
+`X`, `y_direction`, `y_return`, `ts` and `split`). `save_dataset_artifact`
+verifies that digest against the bundle arrays and the feature frame's
+timestamps before writing, stages the artifact in a unique sibling directory,
+re-reads it with digest verification and only then moves it onto its final name.
+A failure leaves no temp directory and no partial dataset. Re-saving the same
+bundle is idempotent. A directory that already holds a **different** dataset
+checksum, a manifest that lies about its arrays, or a corrupt artifact is a
+`PersistError` (`artifact_conflict`, `dataset_checksum_mismatch`,
+`artifact_corrupt`), never an overwrite.
+
+`save_evidence_bundle` re-derives the bundle checksum, requires the spec to hash
+to the recorded `spec_hash`, `complexity` and `spec_version`, writes the sidecar
+first and the bundle second, each atomically. An existing file at the bundle
+path is replaced because `--out` is a report location, not an identity. The
+sidecar uses exactly the path `discovery reproduce` looks up, so a replay needs
+no `--spec`.
+
+`persist_evidence_run` is the convenience the CLI calls: read the stored bars,
+build the causal feature frame and a chronological dataset with the standard
+purge/embargo builder, persist the artifact, build the evidence and persist the
+bundle plus sidecar. It returns the artifact directory, bundle path, sidecar
+path and the evidence identity for the JSON line.
+
+### Producer command
+
+```bash
+cd backend
+uv run python -m scalping.cli discovery evidence \
+  --symbol XAUUSD --timeframe M1 \
+  --spec runs/discovery/candidate.spec.json \
+  --out runs/discovery/candidate.evidence.json \
+  --root ../data-ticks5-store \
+  --folds 3 --regime-coverage-min 1.0 \
+  --stress 1.5,2.0 --bootstrap-samples 1000 --seed 0 \
+  --search-budget 100 --trials 4
+```
+
+`--spec` accepts a spec JSON path or inline JSON and is required: the evidence
+bundle stores a hash, and a hash cannot be inverted. `--root` is the same bar
+store and artifact root every other command uses; `--out` is the bundle path and
+its sidecar is written beside it. `--purge`/`--embargo` control the dataset
+gap, `--fold-purge`/`--fold-embargo` the fold gap. `--stress ''` is refused by
+the evidence builder because promotion evidence needs at least one multiplier
+above 1.0. The command prints one compact JSON line:
+
+```json
+{"persisted": true, "dataset_id": "XAUUSD:M1:h1:...", "dataset_checksum": "...",
+ "artifact": "...", "bundle": "...", "spec": "...", "evidence_checksum": "...",
+ "folds": 3, "validation_end_row": 1308, "test_start_row": 1309}
+```
+
+### Read it back, then reproduce
+
+`load_dataset_artifact` re-verifies the per-file digests with
+`load_dataset_arrays` **and** recomputes the dataset checksum from the loaded
+arrays, so a manifest that claims a checksum its arrays do not produce is
+caught. `load_evidence_bundle` parses with the strict field loader from
+`scalping.discovery.reproduce` and re-derives the bundle checksum. The replay
+contract and its refusal codes are described in
+[Reproducing a candidate experiment](#reproducing-a-candidate-experiment-discovery)
+below; the producer is not a second reproduce implementation and does not
+evaluate the test split.
+
+The exact replay of a producer-written bundle is also exercised end to end by
+`tests/test_discovery_persist.py`: save, load, `reproduce_bundle`, equal
+checksums.
+
 ## Reproducing a candidate experiment (discovery)
 
 `scalping.discovery.reproduce` answers master prompt §36.3: given the identity a
@@ -405,9 +494,10 @@ sidecar is a location convention only—its content is validated against
 `spec_hash`, so it is not a trusted shortcut.
 
 The dataset artifact is written by
-`scalping.datasets.artifact.save_dataset_arrays`. Its manifest supplies the
-split edges, feature groups and horizon that the evidence payload does not
-store, and its files are digest-checked on load. The arrays are then rebuilt
+`scalping.datasets.artifact.save_dataset_arrays` through the production writer
+`scalping.discovery.persist.save_dataset_artifact` (see the producer section
+above). Its manifest supplies the split edges, feature groups and horizon that
+the evidence payload does not store, and its files are digest-checked on load. The arrays are then rebuilt
 from the bars and must reproduce the recorded checksum; the artifact is not a
 source of arrays that could bypass a changed bar.
 

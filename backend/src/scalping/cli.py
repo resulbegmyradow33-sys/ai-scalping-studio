@@ -50,13 +50,25 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import build_dataset, save_manifest
-from scalping.discovery.evidence import CandidateEvidence, EvidenceError
+from scalping.discovery.evidence import CandidateEvidence, EvidenceConfig, EvidenceError
+from scalping.discovery.persist import (
+    PersistError,
+    load_strategy_spec,
+    persist_evidence_run,
+)
 from scalping.discovery.reproduce import (
     ReproduceError,
     ReproduceMismatch,
     reproduce_bundle,
 )
-from scalping.discovery.run import DiscoveryRunConfig, DiscoveryRunError, run_discovery
+from scalping.discovery.run import (
+    DiscoveryRunConfig,
+    DiscoveryRunError,
+    run_discovery,
+)
+from scalping.discovery.run import (
+    code_version as discovery_code_version,
+)
 from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
@@ -738,6 +750,62 @@ def _cmd_discovery_reproduce(args: argparse.Namespace) -> None:
     _print_json(payload)
     if isinstance(outcome, ReproduceMismatch):
         raise _ExitCode(1)
+
+
+def _cmd_discovery_evidence(args: argparse.Namespace) -> None:
+    """Build one experiment from stored bars and persist its artifact and bundle.
+
+    This is the production writer ``discovery reproduce`` depends on: the
+    dataset artifact under ``<root>/datasets/<checksum>/`` and the evidence JSON
+    plus strategy sidecar at ``--out``. One compact JSON line on success; input
+    or refusal errors go to stderr with exit code 2 like every other command.
+    """
+    settings = Settings()
+    if args.settings is not None:
+        try:
+            settings = Settings.load(args.settings)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError(f"cannot read --settings {args.settings}: {exc}") from exc
+    stress = _stress_values(args.stress)
+    try:
+        spec = load_strategy_spec(args.spec)
+        config = EvidenceConfig(
+            code_version=discovery_code_version(),
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            folds=args.folds,
+            purge_bars=args.fold_purge,
+            embargo_bars=args.fold_embargo,
+            min_trades_per_fold=args.min_trades_per_fold,
+            cost_stress=(1.5, 2.0) if stress is None else stress,
+            regime_coverage_min=args.regime_coverage_min,
+            bootstrap_samples=args.bootstrap_samples,
+            bootstrap_confidence=args.bootstrap_confidence,
+            seed=args.seed,
+            search_budget=args.search_budget,
+            trial_count=args.trials,
+            complexity=int(spec.complexity()),
+            window=args.window,
+        )
+        result = persist_evidence_run(
+            Path(args.root),
+            Path(args.out),
+            spec=spec,
+            symbol=args.symbol,
+            timeframe=args.timeframe,
+            config=config,
+            settings=settings,
+            horizon=args.horizon,
+            train_fraction=args.train_fraction,
+            validation_fraction=args.validation_fraction,
+            dataset_purge_bars=args.purge,
+            dataset_embargo_bars=args.embargo,
+            use_cache=not args.no_cache,
+        )
+    except (PersistError, EvidenceError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
+
+    _print_json(result.to_dict())
 
 
 # --- backtest ------------------------------------------------------------------
@@ -1482,6 +1550,57 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     d_reproduce.add_argument("--out", default=None, help="optional report path")
     d_reproduce.set_defaults(handler=_cmd_discovery_reproduce)
+
+    d_evidence = discovery_commands.add_parser(
+        "evidence",
+        help="build evidence from stored bars and persist the dataset artifact and bundle",
+    )
+    d_evidence.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    d_evidence.add_argument("--timeframe", default=TIMEFRAME)
+    d_evidence.add_argument(
+        "--spec",
+        required=True,
+        help="strategy spec JSON path or inline JSON (written to the sidecar)",
+    )
+    d_evidence.add_argument(
+        "--out",
+        required=True,
+        help="evidence bundle path; the sidecar is written next to it",
+    )
+    d_evidence.add_argument("--root", default=str(DEFAULT_ROOT))
+    d_evidence.add_argument(
+        "--settings", default=None, help="YAML settings; defaults to Settings()"
+    )
+    d_evidence.add_argument("--folds", type=int, default=3, help="chronological folds (>= 3)")
+    d_evidence.add_argument("--window", type=int, default=WINDOW)
+    d_evidence.add_argument("--horizon", type=int, default=1)
+    d_evidence.add_argument("--train-fraction", type=float, default=0.70)
+    d_evidence.add_argument("--validation-fraction", type=float, default=0.15)
+    d_evidence.add_argument("--purge", type=int, default=0, help="dataset purge bars")
+    d_evidence.add_argument("--embargo", type=int, default=0, help="dataset embargo bars")
+    d_evidence.add_argument("--fold-purge", type=int, default=0, help="fold purge bars")
+    d_evidence.add_argument("--fold-embargo", type=int, default=0, help="fold embargo bars")
+    d_evidence.add_argument("--min-trades-per-fold", type=int, default=5)
+    d_evidence.add_argument(
+        "--stress",
+        default=None,
+        help="comma-separated cost multipliers (default 1.5,2.0; '' is refused)",
+    )
+    d_evidence.add_argument("--regime-coverage-min", type=float, default=1.0)
+    d_evidence.add_argument("--bootstrap-samples", type=int, default=1000)
+    d_evidence.add_argument("--bootstrap-confidence", type=float, default=0.95)
+    d_evidence.add_argument("--seed", type=int, default=0)
+    d_evidence.add_argument(
+        "--search-budget",
+        type=int,
+        default=100,
+        help="trials the candidate search spent; recorded in the bundle identity",
+    )
+    d_evidence.add_argument(
+        "--trials", type=int, default=1, help="trial_count (<= --search-budget)"
+    )
+    d_evidence.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    d_evidence.set_defaults(handler=_cmd_discovery_evidence)
 
     serve = commands.add_parser("serve", help="serve the API (single worker)")
     serve.add_argument("--host", default="127.0.0.1")
