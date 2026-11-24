@@ -1,97 +1,69 @@
-# STATUS — nerede kaldık?
+# STATUS — autonomous system status
 
-Bu dosya, `docs/requirements/master-prompt.md` hedeflerine göre deponun
-durumunu tek sayfada gösterir. Ayrıntılı kanıt: `docs/architecture-audit.md`.
-Plan: `docs/implementation-roadmap.md`. Görev listesi: `docs/task-board.md`.
+Snapshot: **2026-11-24**, main at
+e90121aa844e0665ac448e3f9986e87631bed56f.
 
-Son güncelleme: 2026-11-23 · Branch `main` @ `93ef3c9`
+Canonical goal: docs/requirements/master-prompt.md.
+Current evidence and gaps: docs/autonomous-system-audit-2026-11-24.md.
+Ordered tasks: docs/task-board.md and docs/implementation-roadmap.md.
+Mandatory contributor/AI-agent rules: AGENTS.md.
 
-## Bugün gerçekten çalışan şey
+## Honest summary
 
-- XAUUSD için **uçtan uca paper-trading araştırma hattı**: veri → doğrulama →
-  özellik → dataset → klasik ML / PyTorch / PPO → simülatör + maliyet stresi →
-  panel.
-- **`flow_momentum` kuralı** canlı panelde H1 oynuyor: momentum + imzalı tick
-  akış kapısı, 3/6 ATR, 48 bar.
-- **Gerçek ileri test** (Haziran–Kasım 2026, kart değiştirilmeden):
-  24 işlem, **+0.502 R**, PF 2.15, +$481, DD %2,4. Örnek küçük; güven aralığı
-  hâlâ sıfırı içeriyor.
-- Ablasyon: akış kapısı olmadan aynı dönem **−0.128 R**, PF 0.79.
-- **Purged expanding-window CV** (embargo dahil) ve kalibrasyon (Brier, log loss,
-  ECE/MCE) var; hiçbir model promosyon kapısını geçmedi.
-- **Testler: 1266 backend (+2 store-gated skip), 210 frontend** (`main` @ `93ef3c9`);
-  ruff/mypy/eslint temiz; Next build geçiyor.
-- **Ölçülen performans:** M1 `build_features` 168–173 s → **8.65 s**; `fvg` taraması
-  149.5 s → **1.93 s**, çıktı bit-identical. Dil kararı: Python + TypeScript kalıyor.
+The repository has a tested local XAUUSD research stack and now contains a
+strategy-independent DSL discovery path. It is **not yet a closed-loop
+self-learning trading AI**. Discovery, champion governance, orchestration,
+knowledge research and autonomous paper execution are separate foundations;
+the production connections and independent evidence gates remain incomplete.
 
-## Durum matrisi
+## Current state
 
-| Alan | Durum | Not |
+| Area | State | Evidence / gap |
 |---|---|---|
-| Yerel, sıfır maliyet, LLM'siz | ✅ | Dış API yok; PyTorch/SB3 yerel |
-| XAUUSD veri hattı | ✅ | 5 yıl tick, 17 yıl M1, 2026 ileri |
-| Çoklu sembol (10 enstrüman) | 🟡 | 10 sembol registry + kontrat metadatası; gerçek feed hâlâ XAU/XAG |
-| Tick–D1 zaman dilimleri | ✅ | M1–D1 (M30/H4 dahil) |
-| CSV/Parquet/JSON ithal | ✅ | CSV chunked parse, JSON, Parquet, Dukascopy; HTTP import `imports/` allowlist |
-| Veri doğrulama + provenance | ✅ | duplicate/OHLC/spread/gap + istatistiksel outlier/kaynak mutabakatı |
-| Özellik mühendisliği | 🟡 | 59 nedensel özellik, yedi grup, kanonik sıra; ablation ve CVD/order-flow türevleri yok |
-| Gerçek bid/ask/order-flow | 🟡 | İmzalı flow var; L2/deep book yok |
-| Çoklu zaman dilimi analizi | 🟡 | M5/M15 bağlamı; bağımsız encoder/fusion yok |
-| Klasik ML | 🟡 | Logistic/RF/ExtraTrees/HistGB/LightGBM/XGBoost + purged CV + kalibrasyon + simülatör değerlendirmesi; SGD/IF/SVM ve rejim/volatilite hedefleri yok |
-| Derin öğrenme | 🟡 | MLP/RNN/LSTM/GRU/CNN/CNN-LSTM/causal TCN + ortak trainer; ML/NN/rule aynı dilimde karşılaştırma PR'da, NN için simulator/cost gate yok |
-| Transformer araştırması | 🟡 | Encoder, causal encoder, PatchTST, iTransformer var; TFT ve ölçülü benchmark tablosu yok |
-| RL (PPO + taklit) | 🟡 | PPO/BC + action mask (flow) var; SAC/TD3/DQN/A2C ve risk maskesi yok |
-| Piyasa rejimi motoru | ✅ | Kural + KMeans/GMM/HMM/supervised + strateji×rejim tablosu + API/panel |
-| Strateji araştırma/seçimi | 🟡 | 5 aile + flow kuralı + LinUCB; rejim bağımlı seçim yok |
-| Ensemble / karar motoru | ✅ | OOF stacking, soft/weighted/hard oylama, disagreement, NO TRADE karar motoru |
-| Güven/kalibrasyon | 🟡 | Brier/log loss/ECE/MCE var; temperature scaling ve OOD yok |
-| Otonom öğrenme | 🟡 | SQLite registry + scope'lu champion/rollback + gate + drift var; scheduler/otomatik promosyon yok |
-| Deney/HPO yönetimi | ❌ | Optuna/sweep yok |
-| Bağımsız risk motoru | 🟡 | Günlük + haftalık + DD + ardışık zarar + spread kill switch'leri var (varsayılan kapalı); slippage limiti yok |
-| Gerçekçi backtest | 🟡 | Walk-forward + maliyet stresi + purged CV; Monte Carlo/parametre duyarlılığı yok |
-| Paper trading defteri | 🟡 | Kalıcı SQLite ledger + restart-safe koşucu + `/api/paper` var; MT5 adapter iskelet, gerçek para kapalı |
-| Model registry / SQLite | 🟡 | datasets/models/promotions/jobs + scope'lu champion/rollback + gate + drift; artefakt doğrulaması yok |
-| Panel | 🟡 | Data, Intelligence, Performance, Training, `/labs/ml`; NN/RL/paper/monitoring sayfaları yok |
-| Scheduler | 🟡 | İki arka plan döngüsü; konfigüre edilebilir scheduler yok |
-| Testler | ✅ | 843 backend + 194 frontend; ruff/mypy/eslint/build temiz |
-| Dokümantasyon | 🟡 | Zorunlu 15 dokümanın bir kısmı hazır; `docs/task-board.md` gerçek durumu izliyor |
-| Otonom strateji keşfi (Phase 16) | 🟡 | Güvenli DSL/AST + discovery arşivi/arama + candidate gate var; DSL→simulator evaluator dilimi geliştiriliyor |
-| Bilgi ingestion (Phase 17) | 🟡 | TXT/MD/HTML/DOCX ingestion + FTS index + hypothesis kaydı var; PDF/OCR ve otomatik çıkarım yok |
-| Otonom orchestrator (Phase 18) | 🟡 | Kalıcı job kuyruğu, dependency, retry, pause/safe-mode, crash recovery, audit log var; gerçek handler'lar ve zamanlayıcı yok |
-| Kabul kriterleri | ❌ | Uçtan uca promote/reject → paper → monitor → rollback zinciri henüz yok |
+| Local/offline/zero mandatory API | Implemented | Python/ML/DL run locally; no paid LLM/API dependency |
+| XAUUSD data and provenance | Partial/usable | Historical tick-derived, broker M1 and forward datasets documented; data files are local, not committed |
+| Multi-symbol data | Partial | Registry/contract metadata exists; real feed coverage remains limited |
+| Causal features and datasets | Implemented foundation | 59 causal features, chronological splits, purge/embargo; MTF alignment, ablation and true order-book coverage remain |
+| Classical ML / compact DL | Implemented research tools | Baselines and shared evaluation exist; model prediction metrics are not strategy proof |
+| Transformer benchmark | Implemented research tool | #105 merged; forward benchmark/evaluator round-trip, not trading edge |
+| PPO / RL | Experimental | PPO/BC exists; #108 adds evaluation action masking; training is not MaskablePPO |
+| Legacy strategy family + LinUCB | Legacy research baseline | Five fixed arms; not autonomous open-ended discovery |
+| Legacy flow_momentum card | Active compatibility incumbent | Current panel path; historical forward sample is small and not proof of the new learner |
+| Safe strategy DSL/AST | Implemented | Typed bounded AST; no generated arbitrary Python |
+| Candidate discovery | Implemented, limited | #104 merged; evolutionary search + cost-aware simulator on one validation slice; no walk-forward/OOS |
+| Champion governance | Partial, merged foundation | #109 merged; adds champion history/provider/rollback, but validation-only, no OOS/walk-forward in its stated limits |
+| Knowledge ingestion | Partial | TXT/MD/HTML/DOCX; #106 source-linked regex hypothesis drafts; PDF/OCR absent |
+| Sentence classification | Open PR | #107; heuristic classification, not semantic understanding |
+| Orchestrator | Infrastructure only | Persistent queue/control/recovery; real handlers, scheduler and measured resource guard absent |
+| DSL paper runner | Implemented component | #103 executes a supplied spec over a stored slice; no automatic champion selection/continuous feedback |
+| Closed-loop autonomy | Not accepted | No proven import→discover→OOS→promote→paper→feedback cycle |
+| Real-money execution | Disabled | Must remain disabled |
 
-Lejant: ✅ tamam · 🟡 kısmi · ❌ yok.
+## Recent mainline changes
 
-## Canlı sistem hakkında dürüst notlar
+- #104 merged: end-to-end validation-slice strategy discovery and baseline decision.
+- #106 merged: deterministic, source-linked hypothesis drafts.
+- #108 merged: risk gates included in action masks and backtest evaluation.
+- #107 open: sentence classification; rebase required.
+- #109 merged: champion governance/rollback foundation; its validation-only evidence remains insufficient for production promotion.
+- #105 merged: transformer benchmark; non-blocking for autonomous completion.
+- #107 remains open and still needs rebase onto current main.
 
-- Panel bir **simülatördür**: gerçek broker bağlantısı, emir gönderimi veya
-  gerçek para yoktur. Gerçek para yolu bilerek kapalıdır.
-- Canlı oynayan strateji **kuraldır**, nöral ağ veya ensemble değil.
-- Hiçbir klasik/DL/RL modeli out-of-sample + maliyet stresinde kuralı geçmedi;
-  hiçbiri "kanıtlanmış kârlı" değil. Sadece ölçülmüş sonuç var.
-- Purged CV fold'ları erken geçmişi paylaşır; ortalama/std bağımsız tahmin değildir.
-- Rejim kırılımı ve ensemble metrikleri tanımlayıcıdır, promosyon kapısı değildir.
+## Immediate critical path
 
-## Sıradaki işler (yeni otonom hedefe göre)
+1. Walk-forward discovery with purge/embargo, locked untouched OOS and multiple-testing controls.
+2. Fail-closed champion gate; compare candidate vs incumbent on identical evidence.
+3. Real orchestrator handlers, scheduler/daemon, triggers and measured resource guard.
+4. Source-linked hypothesis routing into quantitative discovery.
+5. DSL champion → autonomous paper runner → matured outcome analysis → next research cycle.
+6. Reproducible real-XAUUSD acceptance within measured M2 8 GB limits.
 
-1. **Phase 16 — strategy DSL + discovery:** güvenli AST, doğrulayıcı, kanonik
-   hash, compile, mutasyon; ardından bütçeli arama ve aday arşivi.
-2. **Phase 10 — champion governance:** candidate gate + drift (PR'da), sonra
-   orchestrator'ın çağıracağı promote/reject/rollback akışı.
-3. **Phase 17 — knowledge ingestion:** TXT/MD/HTML/DOCX, provenance, FTS index,
-   falsifiable hypothesis kayıtları; PDF ayrı dilim.
-4. **Phase 18 — orchestrator:** yeni veri/doküman/paper tetikleri, kalıcı job
-   kuyruğu, pause/resume/cancel, crash recovery, tek ağır iş.
-5. **Phase 19 — otonom paper acceptance:** insan stratejisi olmadan uçtan uca
-   kanıt; gerçek para kapalı.
-6. **Phase 13/14 — panel ve optimizasyon:** her sayı API/artefakttan; feature
-   cache (#69), tek lazy plan (#70), global PPO slot (#71).
+## Reporting vocabulary
 
-Model ailesi genişletmesi (TFT, SAC/TD3/DQN, Mamba, GNN) bu listenin sonunda ve
-yalnızca ölçülmüş bir araştırma sorusu varsa.
+- **Implemented:** code exists and tests pass.
+- **Trained:** a model was actually fitted and its reproducible run/artifact is recorded.
+- **Validated:** independent chronological OOS and realistic cost-stress evidence exists.
+- **Paper-traded:** exact version ran in the paper engine with immutable attribution.
+- **Profitable:** only a cautious statement supported by sufficiently large forward evidence; never guaranteed.
 
-Ağır eğitimler aynı anda çalışmaz; 8 GB RAM sınırı korunur.
-
-## Görev panosu
-
-Ayrıntılı tek tek liste: [`docs/task-board.md`](task-board.md).
+A green CI run proves neither a trading edge nor profitability.

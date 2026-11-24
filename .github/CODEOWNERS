@@ -1,13 +1,3 @@
-# Default: either member can review.
-* @resulbegmyradow33-sys @lukmanhekim099
-
-# Repository, security and CI configuration stays owner-only.
-/.github/ @resulbegmyradow33-sys
-/CODEOWNERS @resulbegmyradow33-sys
-/SECURITY.md @resulbegmyradow33-sys
-/scripts/setup_github.sh @resulbegmyradow33-sys
-
-# Code and docs: both members.
-/backend/ @resulbegmyradow33-sys @lukmanhekim099
-/frontend/ @resulbegmyradow33-sys @lukmanhekim099
-/docs/ @resulbegmyradow33-sys @lukmanhekim099
+# Resul is the sole project owner and required code owner for all changes.
+# This requests Resul's review; repository rulesets must enforce approval before merge.
+* @resulbegmyradow33-sys

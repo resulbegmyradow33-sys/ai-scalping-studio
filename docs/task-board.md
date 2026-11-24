@@ -268,19 +268,23 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       execute arbitrary Python or shell code.
 - [x] Build candidate generation from reusable causal primitives, conditions,
       lookback windows, entry/exit/holding logic and NO TRADE.
-- [ ] PARTIAL: bounded evolutionary/genetic or grammar-based search — bütçeli
-      evolve döngüsü var (#95); gerçek DSL/evaluator bağlantısı ayrı dilimde.
+- [x] Bounded evolutionary search is connected to the DSL evaluator and
+      end-to-end discovery command (#104); it remains validation-slice only.
 - [x] Add candidate mutation, crossover, deduplication, complexity limits,
       reproducible seeds, experiment budgets and cancellation.
-- [ ] Connect candidate evaluation to realistic simulator costs, risk controls,
-      walk-forward validation and untouched OOS data.
+- [ ] PARTIAL: simulator fills/costs and risk controls are connected through
+      DslEvaluator (#102/#104); multi-fold walk-forward and untouched OOS
+      promotion evidence are not connected to discovery.
 - [ ] PARTIAL: trial sayısı kalıcı kaydediliyor; data-snooping düzeltmesi/ceza
       politikası yok.
 - [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
 - [x] Store full candidate lineage, dataset/code/config hashes and rejection
       reasons in the registry.
-- [ ] Compare candidates with simple baselines and champion; allow no candidate
-      to win and allow NO TRADE.
+- [x] Compare candidates with hold and ret_5 on the same validation slice;
+      allow no_trade / no_change outcomes.
+- [ ] PARTIAL: compare against a governed incumbent champion only after the
+      champion PR is rebased/merged and its evidence gate is upgraded; current
+      #109 proposal explicitly has no OOS/walk-forward evidence.
 - [ ] PARTIAL: no-look-ahead, determinizm, lineage ve DSL safety testleri var;
       overfit reddi, no-trade seçimi ve cost sensitivity evaluator diliminde.
 
@@ -291,8 +295,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       page/section references.
 - [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı ve OCR yok.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
-- [x] Classify claims, concepts, examples, opinions and empirical observations.
-- [x] Deterministik hipotez çıkarımı: cümle kalıplarından `proposed` taslak + kaynak bağı (LLM yok).
+- [x] Classify claims, concepts, examples, opinions and empirical observations
+      (deterministic heuristic triage, #107; not semantic reading).
+- [x] Deterministic hypothesis drafts from sentence patterns with source refs
+      (#106); this is not semantic book understanding and not tested alpha.
 - [x] Link each hypothesis to source passages and experiment outcomes.
 - [ ] Route hypotheses to strategy discovery; never treat prose as proven alpha.
 - [ ] Ingest completed backtests, paper logs and broker exports as feedback.
@@ -307,14 +313,16 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       paper oturumu bitişi ve veri/doküman yönlendirmesi yok.
 - [ ] PARTIAL: ingestion/index pipeline'ları hazır; orchestrator bunları henüz
       otomatik çağırmıyor.
-- [ ] PARTIAL: kalıcı kuyruk, dependency ve öncelik var; gerçek iş handler'ları
-      ve eligibility politikası henüz bağlı değil.
+- [ ] PARTIAL: persistent queue/dependencies/priorities exist (#99); actual
+      discovery, ingestion, evaluation and paper handlers/eligibility policies
+      are not wired into the orchestrator.
 - [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
 - [ ] PARTIAL: tek ağır iş kuralı ve ResourceGuard veto kancası var; gerçek
       RAM/disk ölçen guard yok.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] Connect strategy discovery, ML/DL/RL, model registry, champion gate and
-      paper-trading feedback into one auditable lifecycle.
+- [ ] Connect discovery, evidence validation, champion governance, paper
+      runner and matured-outcome feedback into one auditable lifecycle. The
+      champion governance proposal (#109) is open and validation-only.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
 - [ ] PARTIAL: pause/safe mode/disable research var; rollback kontrolü yok.
@@ -344,3 +352,56 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       the owner is required for the core system to function.
 - [ ] All autonomy remains bounded by immutable risk controls and resource
       limits.
+
+
+## Current autonomous priority update — 2026-11-24
+
+This dated status reflects main at 22cecdf5e2c6634b59433925b836bda6dea33199.
+It supersedes older partial notes above where they describe pre-#104 code.
+
+1. **Discovery is implemented as a validation-slice experiment, not a proven
+   strategy-selection system.** #104 is merged. It compares hold and ret_5,
+   uses the simulator and costs, records lineage and can return no_trade,
+   no_change or rejected. It does not run walk-forward or OOS.
+2. **Champion governance foundation is merged, but its production evidence gate
+   is incomplete.** #109 merged into main. It adds champion history, comparison,
+   rollback and a validated DSL ChampionProvider. Its own PR limits still say
+   validation-only metrics, no OOS/walk-forward, one higher-is-better metric
+   and no automatic drift/decay monitor. Do not treat it as a production
+   promotion gate until master-prompt §§38 are implemented.
+3. **Knowledge extraction is limited.** #106 is merged and creates deterministic
+   source-linked drafts. #107 is open and three commits behind main; it must be
+   rebased. PDF/OCR and automatic hypothesis-to-discovery routing remain open.
+4. **Orchestration is infrastructure only.** Queue, audit events, controls and
+   recovery exist; no long-running scheduler, production handlers or measured
+   resource guard are wired.
+5. **Paper execution is a runner, not a closed loop.** #103 is merged; the runner
+   executes a supplied DSL spec over a stored slice. It does not select the
+   champion or continuously ingest new bars/outcomes by itself.
+6. **Risk action masking:** #108 is merged for simulator/evaluation. PPO training
+   still uses plain PPO; do not report MaskablePPO training as implemented.
+7. **Model zoo:** #105 is merged. It adds measured forward benchmarks and a
+   Transformer evaluator round-trip; this is useful research infrastructure,
+   not evidence of a trading edge. Keep further model expansion below the
+   autonomous evidence and closed-loop work.
+
+### Next work, in strict order
+
+- [ ] Rebase open PR #107 onto current main (it still targets the pre-#109 main
+      and was stacked on #106). Review it as deterministic heuristic triage,
+      not semantic book understanding.
+- [ ] Add a walk-forward discovery evaluator with chronological folds and
+      purge/embargo; preserve one locked final OOS set that search cannot read.
+- [ ] Add multiple-testing/data-snooping controls and report total attempts,
+      effective trials, complexity, sensitivity and uncertainty.
+- [ ] Upgrade merged champion governance so production promotion fails closed
+      with mandatory walk-forward/OOS evidence; compare candidate and incumbent
+      on identical folds/costs/regimes. No validation-only promotion and no
+      default-empty gate for promotion.
+- [ ] Integrate champion loading, no-fallback/NO-TRADE behaviour and the
+      autonomous paper runner behind one tested interface.
+- [ ] Implement real orchestrator handlers, scheduler/daemon, triggers and
+      measured resource guard; isolate paper execution from training failures.
+- [ ] Route source-linked hypotheses to discovery and ingest matured paper
+      outcomes as new, non-leaking experiments.
+- [ ] Demonstrate the full loop on real XAUUSD data and the target M2 hardware.

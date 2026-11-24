@@ -84,8 +84,64 @@ stays the primitive.
   `rollback` restores an earlier champion with its own reason.
 
 Comparison against the current champion's *measured* metrics is not part of
-this slice: the caller decides which candidates reach the gate, and the gate
-only judges the evidence it is handed.
+this gate: the caller decides which candidates reach it, and the gate only judges
+the evidence it is handed. Strategy promotion — where the comparison *is* part of
+the policy — lives in the discovery archive and is described in the next
+section.
+
+## Strategy champion (discovery archive)
+
+A model registry champion and a strategy champion are different objects. Models
+are promoted through `ModelRegistry` + `GateCriteria`; discovered strategies are
+promoted through `scalping.discovery.archive.DiscoveryArchive`, which already
+holds the candidate's canonical spec, its trials and its lineage. `run_discovery`
+records `rejected`/`no_change`/`no_trade` and never promotes; promotion is an
+explicit governance call.
+
+| Call | Purpose |
+|---|---|
+| `promote(candidate_id, *, scope, reason, force=False, metric="expectancy_r")` | make a candidate the champion of a scope, recording the numbers and a `promoted` decision |
+| `champion(scope)` | current candidate, canonical spec, newest accepted metrics, promotion id/time/reason |
+| `champion_history(scope)` | every promotion and rollback of the scope, oldest first |
+| `compare_to_champion(candidate_id, scope, metric)` | candidate value, champion value, delta, `better` |
+| `rollback(scope, *, to_candidate_id, reason)` | restore a previous champion, recording `rolled_back` |
+
+A **scope** is conventionally `<symbol>:<timeframe>`
+(`scalping.discovery.champion.scope_for`), and one scope has exactly one champion
+(`PRIMARY KEY (scope)`). A trial belongs to a scope when its `dataset_id`
+contains every scope token. Each promotion and rollback runs in
+`BEGIN IMMEDIATE` and writes the pointer, the history row and the decision in one
+transaction, so the live champion and the audit trail cannot disagree.
+
+Promotion refuses, writing nothing: an unknown candidate, a candidate with no
+trial on the scope's dataset, a candidate with no **accepted** trial there, and —
+unless `force` — a candidate without a measured metric or without a strict
+improvement over the champion's newest accepted value. The evidence gate is not
+forceable: `force` overrides the comparison only, requires a reason, and prefixes
+the stored reason with `forced: `. Rollback only restores a candidate that was
+champion of that scope before; a candidate that never won is promoted instead.
+
+`scalping.discovery.champion.ChampionProvider` reads the champion and returns a
+`StrategySpec` that has passed `validate()` and whose recomputed hash still
+matches the archived id. `NoChampionError` and `InvalidChampionSpec` are raised
+instead of falling back to a hand-written strategy. The module imports the
+archive and the DSL only; `scalping.paper` is never imported from
+`scalping.discovery`.
+
+### Honest limits
+
+- The compared numbers come from validation trials. No walk-forward, untouched
+  test-slice or cost-stress rule is part of `promote`; if the search touched the
+  validation split, the promotion inherits that data-snooping risk.
+- One metric, higher is better. A lower-is-better metric such as drawdown must
+  not be passed to `promote`.
+- Promotion is policy, not proof: passing one comparison rule says the candidate
+  beat the incumbent on one metric in one dataset.
+- Drift and decay monitoring is not automatic. Nothing re-tests the champion on a
+  schedule or rolls back on its own; `compare_to_champion` and `rollback` are
+  tools a human or a later orchestrator slice has to call.
+- The audit trail survives a restart and a crash (WAL, one transaction), but an
+  OS-level power loss can still drop the newest committed transaction.
 
 ## Drift diagnostics
 
@@ -121,7 +177,8 @@ anything by themselves.
 ## Not in this slice
 
 - Scheduler and job cancellation, one-heavy-job enforcement, RAM budget.
-- Champion-vs-candidate metric comparison inside the gate.
+- Champion-vs-candidate metric comparison inside the *model* gate; the strategy
+  counterpart lives in `scalping.discovery.archive` (previous section).
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels

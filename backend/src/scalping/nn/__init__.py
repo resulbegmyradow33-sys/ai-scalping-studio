@@ -8,6 +8,7 @@ and shared evaluator arrive in later slices.
 
 from __future__ import annotations
 
+from scalping.nn.benchmark import BenchmarkRow, benchmark_models
 from scalping.nn.data import WindowConfig, WindowedDataset, WindowError, build_windowed_dataset
 from scalping.nn.evaluate import (
     ClassificationMetrics,
@@ -38,6 +39,7 @@ from scalping.nn.train import (
 
 __all__ = [
     "MODEL_NAMES",
+    "BenchmarkRow",
     "CausalTCN",
     "ClassificationMetrics",
     "JobControl",
@@ -49,6 +51,7 @@ __all__ = [
     "WindowConfig",
     "WindowError",
     "WindowedDataset",
+    "benchmark_models",
     "build_model",
     "build_windowed_dataset",
     "classification_metrics",

@@ -5,6 +5,47 @@ Companion to `docs/architecture-audit.md` and
 resource-bounded. No phase starts until its predecessors' exit criteria are
 met.
 
+## Current execution order — 2026-11-24
+
+The autonomous core is now the critical path. This section takes precedence
+when older phase prose suggests adding more model families before the learning
+loop is connected.
+
+1. **Evidence before promotion.** Extend discovery from one validation slice to
+   chronological walk-forward folds with purge/embargo, an inaccessible locked
+   OOS set, realistic costs/risk and stability reporting. Track every attempted
+   candidate and address multiple-testing/data-snooping bias.
+2. **Fail-closed champion governance.** Require mandatory evidence, compare the
+   candidate and incumbent on identical windows, keep immutable lineage, reject
+   missing evidence, and test rollback. Validation-only #109 is a foundation,
+   not a production gate.
+3. **Wire autonomy.** Register real handlers in the persistent orchestrator;
+   add a scheduler/daemon, new-data/document/paper-completion triggers,
+   eligibility/deduplication policies, measured RAM/CPU/disk limits and
+   isolation between paper replay and training failures.
+4. **Connect research to discovery.** Preserve document provenance, parse
+   supported sources honestly, route source-linked hypotheses to quantitative
+   experiments, and never let prose create orders or bypass validation.
+5. **Close the paper loop.** Load only a validated DSL champion, run it over
+   appended market data, persist immutable decisions/fills/outcomes, wait for
+   matured outcomes, analyse them, and enqueue the next eligible experiment.
+   Missing/invalid champion means NO TRADE, not legacy fallback.
+6. **Accept on target hardware.** Run reproducible end-to-end XAUUSD acceptance
+   on the M2 8 GB machine under measured memory/disk budgets. Keep real-money
+   execution disabled.
+7. **Only then expand models/UI.** Merge the optional benchmark work when
+   rebased and green, but defer TFT/SAC/TD3/DQN/Mamba/GNN or dashboard expansion
+   unless an experiment justifies it.
+
+### Immediate PR triage
+
+- #107: rebase onto current main; review deterministic classification as
+  heuristic triage, not semantic understanding.
+- #109: merged champion-history/provider/rollback foundation; upgrade its
+  validation-only promotion limits with mandatory OOS/walk-forward evidence.
+- #105: merged optional benchmark; do not let further model-zoo work displace
+  autonomous evidence and handler integration.
+
 Working rules for every phase:
 
 1. State the intended change and the files affected.
