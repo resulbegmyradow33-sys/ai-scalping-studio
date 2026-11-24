@@ -78,6 +78,8 @@ class SearchConfig:
 
     dataset_id: str
     code_version: str
+    dataset_checksum: str | None = None
+    settings_digest: str | None = None
     population: int = 32
     generations: int = 10
     mutation_rate: float = 0.3
@@ -396,6 +398,8 @@ def evolve(
                 dataset_id=config.dataset_id,
                 code_version=config.code_version,
                 seed=trial_seed,
+                dataset_checksum=config.dataset_checksum,
+                settings_digest=config.settings_digest,
             )
             known.add(record.candidate_id)
             recorded += 1

@@ -149,14 +149,18 @@ correctly, never that the candidate has an edge.
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
 no losses) is rejected rather than clamped: the fold has no loss evidence. The
 identity is part of the checksum, so a stale dataset, dataset checksum, spec,
-code version or execution settings is detectable before a policy reads a
-metric. The schema version is stored and must equal the module's current
-version.
+code version or execution-settings digest is detectable before a policy reads a
+metric. `settings_digest` hashes the contract, risk and cost blocks, because
+settings are not in the dataset manifest and two bundles priced differently must
+not share identity.
+
+The schema version is stored and must equal the module's current version.
 
 ### Fold geometry
 
@@ -225,14 +229,23 @@ later extension, not silently assumed.
 
 - **The locked final OOS call.** This slice never reads the test split, so the
   final holdout is still untouched; evaluating it once is a later, explicit
-  decision that must not be used for tuning.
+  decision that must not be used for tuning. The production policy sets
+  `require_locked_oos=True`, so every bundle without a valid `LockedOOSEvidence`
+  field rejects with `missing_locked_oos`. That rejection is honest and expected,
+  not a bug: the holdout slice attaches the section.
 - **Multiple-testing correction.** Trial count and search budget are recorded,
-  but no deflated metric, false-discovery control or complexity penalty is
-  applied here. Those belong to the promotion policy.
+  and `scalping.discovery.promotion.PROMOTION_V1` caps both and limits how many
+  folds may overlap the validation/selection window, but no deflated metric or
+  false-discovery control is applied here. A policy pass bounds the exposure; it
+  does not undo it.
 - **Parameter-neighbourhood and cross-symbol stability.** One spec on one
   dataset build is measured; a sensitivity sweep is not.
 - **Benchmark and champion comparison on identical windows.** `hold`, `ret_5`,
-  the legacy incumbent and the current champion are not run by this module.
+  the legacy incumbent and the current champion are not run by this module. The
+  promotion policy compares a candidate with a champion *bundle* only when both
+  name the same dataset id/checksum, settings digest, code version, split
+  boundaries and full fold geometry; it cannot fill in a missing champion
+  measurement.
 - **A block bootstrap.** Iid intervals are stated as a simplification.
 - **Any paper or live claim.** The bundle contains historical simulation
   evidence only.

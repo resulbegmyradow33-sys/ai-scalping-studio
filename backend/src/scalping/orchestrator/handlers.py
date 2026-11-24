@@ -64,6 +64,7 @@ from scalping.discovery.champion import (
     ChampionProvider,
     InvalidChampionSpec,
     NoChampionError,
+    NoEvidenceChampion,
     scope_for,
 )
 from scalping.discovery.run import (
@@ -943,6 +944,14 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
                     bars=request.bars,
                     reason=str(exc),
                     reason_class="no_champion",
+                )
+            except NoEvidenceChampion as exc:
+                return _no_trade(
+                    job_context,
+                    scope=scope,
+                    bars=request.bars,
+                    reason=str(exc),
+                    reason_class="no_evidence_champion",
                 )
             except InvalidChampionSpec as exc:
                 return _no_trade(

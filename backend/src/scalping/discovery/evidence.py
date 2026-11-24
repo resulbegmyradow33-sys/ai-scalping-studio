@@ -96,17 +96,21 @@ __all__ = [
     "EvidenceError",
     "EvidencePolicy",
     "FoldEvidence",
+    "LockedOOSEvidence",
     "RegimeEvidence",
     "SplitBoundaries",
     "StressEvidence",
     "bootstrap_ci",
     "build_evidence",
+    "evidence_checksum",
+    "evidence_from_dict",
+    "locked_oos_checksum",
     "settings_digest",
     "verify_evidence",
 ]
 
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
-EVIDENCE_SCHEMA_VERSION: Final[int] = 2
+EVIDENCE_SCHEMA_VERSION: Final[int] = 3
 
 #: A promotion policy needs at least three folds to say anything about stability.
 MIN_EVIDENCE_FOLDS: Final[int] = 3
@@ -239,6 +243,15 @@ class EvidencePolicy:
     bootstrap_confidence: float
     window: int
 
+    def __post_init__(self) -> None:
+        # A bundle decoded from stored JSON has lists where the dataclass has
+        # tuples; normalise so a round-trip compares equal and the checksum is
+        # stable regardless of the source.
+        if isinstance(self.cost_stress, list):
+            object.__setattr__(
+                self, "cost_stress", tuple(float(value) for value in self.cost_stress)
+            )
+
 
 @dataclass(frozen=True, slots=True)
 class RegimeEvidence:
@@ -346,6 +359,127 @@ class SplitBoundaries:
 
 
 @dataclass(frozen=True, slots=True)
+class LockedOOSEvidence:
+    """The single authorised result of spending the locked final holdout.
+
+    The section is a real dataclass field on :class:`CandidateEvidence`, not a
+    dictionary a subclass can inject through ``to_dict``. Its own ``checksum``
+    covers every field, and the promotion policy additionally requires its
+    identity, policy and test-row range to match the bundle.
+    """
+
+    checksum: str
+    evidence_checksum: str
+    dataset_id: str
+    dataset_checksum: str
+    symbol: str
+    timeframe: str
+    spec_hash: str
+    spec_version: int
+    complexity: int
+    code_version: str
+    settings_digest: str
+    policy_id: str
+    policy_version: int
+    test_start_row: int
+    test_end_row: int
+    test_rows: int
+    test_start_ts: str
+    test_end_ts: str
+    trades: int
+    net_profit: float
+    profit_factor: float
+    win_rate: float
+    expectancy_r: float
+    total_r: float
+    max_drawdown: float
+    expectancy_r_ci95_low: float
+    expectancy_r_ci95_high: float
+    total_r_ci95_low: float
+    total_r_ci95_high: float
+    bootstrap_samples: int
+    bootstrap_confidence: float
+    bootstrap_method: str
+    regime_coverage: float
+    regimes: tuple[RegimeEvidence, ...] = ()
+    stress: tuple[StressEvidence, ...] = ()
+    created_at: str = ""
+    schema_version: int = 1
+
+    def __post_init__(self) -> None:
+        for name in (
+            "checksum",
+            "evidence_checksum",
+            "dataset_id",
+            "dataset_checksum",
+            "symbol",
+            "timeframe",
+            "spec_hash",
+            "code_version",
+            "settings_digest",
+            "policy_id",
+            "test_start_ts",
+            "test_end_ts",
+            "bootstrap_method",
+            "created_at",
+        ):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{name} must be a non-empty str")
+        for name in ("checksum", "evidence_checksum"):
+            text = getattr(self, name)
+            if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+                raise ValueError(f"{name} must be a lowercase sha256 hex digest")
+        for name in (
+            "spec_version",
+            "complexity",
+            "policy_version",
+            "test_start_row",
+            "test_end_row",
+            "test_rows",
+            "trades",
+            "bootstrap_samples",
+            "schema_version",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int")
+            if value < 0:
+                raise ValueError(f"{name} must be >= 0")
+        if self.trades < 1:
+            raise ValueError("a locked holdout must report at least one trade")
+        if self.policy_version < 1 or self.schema_version < 1:
+            raise ValueError("policy_version and schema_version must be >= 1")
+        if self.test_end_row <= self.test_start_row:
+            raise ValueError("locked holdout test range must be non-empty")
+        for name in (
+            "net_profit",
+            "profit_factor",
+            "win_rate",
+            "expectancy_r",
+            "total_r",
+            "max_drawdown",
+            "expectancy_r_ci95_low",
+            "expectancy_r_ci95_high",
+            "total_r_ci95_low",
+            "total_r_ci95_high",
+            "bootstrap_confidence",
+            "regime_coverage",
+        ):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise TypeError(f"{name} must be a number")
+            if not math.isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+        for name in ("win_rate", "regime_coverage"):
+            value = float(getattr(self, name))
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must be a fraction in [0, 1]")
+        if not 0.0 < float(self.bootstrap_confidence) < 1.0:
+            raise ValueError("bootstrap_confidence must be in (0, 1)")
+
+
+@dataclass(frozen=True, slots=True)
 class CandidateEvidence:
     """Immutable evidence bundle for one candidate on one dataset build.
 
@@ -376,6 +510,7 @@ class CandidateEvidence:
     checksum: str
     created_at: str
     schema_version: int = EVIDENCE_SCHEMA_VERSION
+    locked_oos: LockedOOSEvidence | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe nested payload; the checksum is computed over this minus stamps."""
@@ -856,6 +991,232 @@ def _checksum_payload(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 
+def evidence_checksum(evidence: CandidateEvidence) -> str:
+    """Recompute the canonical checksum of ``evidence`` without trusting its stamp.
+
+    The promotion policy uses this to re-derive the identity before reading a
+    metric, so a bundle whose stored ``checksum`` was overwritten is caught
+    instead of being believed. ``verify_evidence`` uses the same function.
+    """
+    if type(evidence) is not CandidateEvidence:
+        raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
+    return _checksum_payload(evidence.to_dict())
+
+
+def locked_oos_checksum(section: LockedOOSEvidence) -> str:
+    """Canonical sha256 of a locked-OOS section, excluding ``checksum``.
+
+    ``created_at`` is excluded too, matching the holdout ledger's
+    ``_result_checksum``: the same measured section can be re-serialised with a
+    new creation stamp without becoming a different result. Every other field,
+    including the metrics, intervals, regimes, stress and identity, is covered.
+    """
+    if type(section) is not LockedOOSEvidence:
+        raise TypeError(
+            f"section must be a LockedOOSEvidence, got {type(section).__name__}"
+        )
+    payload = asdict(section)
+    payload.pop("checksum", None)
+    payload.pop("created_at", None)
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _nested(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    value = mapping.get(key)
+    if not isinstance(value, Mapping):
+        raise EvidenceError("missing_section", f"{key} must be a JSON object")
+    return value
+
+
+def _nested_list(mapping: Mapping[str, Any], key: str) -> Sequence[Any]:
+    value = mapping.get(key)
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise EvidenceError("missing_section", f"{key} must be a JSON array")
+    return value
+
+
+def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
+    """Rebuild a typed bundle from :meth:`CandidateEvidence.to_dict` output.
+
+    The archive stores the canonical JSON of the bundle that justified a
+    promotion. A later champion comparison needs the same typed object, not a
+    bag of dictionaries, so this is the one place that knows the nested shape.
+    Every missing or mistyped section raises :class:`EvidenceError`; the caller
+    must still re-derive the checksum before trusting the result.
+    """
+    if not isinstance(payload, Mapping):
+        raise TypeError(f"payload must be a mapping, got {type(payload).__name__}")
+    try:
+        policy = EvidencePolicy(**_nested(payload, "policy"))
+        splits = SplitBoundaries(**_nested(payload, "splits"))
+        folds = tuple(
+            FoldEvidence(
+                fold=int(row["fold"]),
+                train_start_row=int(row["train_start_row"]),
+                train_end_row=int(row["train_end_row"]),
+                test_start_row=int(row["test_start_row"]),
+                test_end_row=int(row["test_end_row"]),
+                train_rows=int(row["train_rows"]),
+                test_rows=int(row["test_rows"]),
+                train_start_ts=str(row["train_start_ts"]),
+                train_end_ts=str(row["train_end_ts"]),
+                test_start_ts=str(row["test_start_ts"]),
+                test_end_ts=str(row["test_end_ts"]),
+                purge_bars=int(row["purge_bars"]),
+                embargo_bars=int(row["embargo_bars"]),
+                trades=int(row["trades"]),
+                net_profit=float(row["net_profit"]),
+                profit_factor=float(row["profit_factor"]),
+                win_rate=float(row["win_rate"]),
+                expectancy_r=float(row["expectancy_r"]),
+                max_drawdown=float(row["max_drawdown"]),
+                regimes=tuple(
+                    RegimeEvidence(
+                        regime=str(regime["regime"]),
+                        trades=int(regime["trades"]),
+                        net_profit=float(regime["net_profit"]),
+                        win_rate=float(regime["win_rate"]),
+                        expectancy_r=float(regime["expectancy_r"]),
+                        total_r=float(regime["total_r"]),
+                    )
+                    for regime in _nested_list(row, "regimes")
+                ),
+                stress=tuple(
+                    StressEvidence(
+                        multiplier=float(stress["multiplier"]),
+                        trades=int(stress["trades"]),
+                        net_profit=float(stress["net_profit"]),
+                        profit_factor=float(stress["profit_factor"]),
+                        max_drawdown=float(stress["max_drawdown"]),
+                        expectancy_r=float(stress["expectancy_r"]),
+                    )
+                    for stress in _nested_list(row, "stress")
+                ),
+            )
+            for row in _nested_list(payload, "folds")
+        )
+        aggregate = _nested(payload, "aggregate")
+        summary = AggregateEvidence(
+            total_trades=int(aggregate["total_trades"]),
+            total_r=float(aggregate["total_r"]),
+            expectancy_r=float(aggregate["expectancy_r"]),
+            profit_factor=float(aggregate["profit_factor"]),
+            max_drawdown=float(aggregate["max_drawdown"]),
+            positive_folds=int(aggregate["positive_folds"]),
+            positive_fold_fraction=float(aggregate["positive_fold_fraction"]),
+            expectancy_r_ci95_low=float(aggregate["expectancy_r_ci95_low"]),
+            expectancy_r_ci95_high=float(aggregate["expectancy_r_ci95_high"]),
+            total_r_ci95_low=float(aggregate["total_r_ci95_low"]),
+            total_r_ci95_high=float(aggregate["total_r_ci95_high"]),
+            bootstrap_samples=int(aggregate["bootstrap_samples"]),
+            bootstrap_confidence=float(aggregate["bootstrap_confidence"]),
+            bootstrap_method=str(aggregate["bootstrap_method"]),
+            regime_coverage=float(aggregate["regime_coverage"]),
+            regime_trades=tuple(
+                RegimeEvidence(
+                    regime=str(regime["regime"]),
+                    trades=int(regime["trades"]),
+                    net_profit=float(regime["net_profit"]),
+                    win_rate=float(regime["win_rate"]),
+                    expectancy_r=float(regime["expectancy_r"]),
+                    total_r=float(regime["total_r"]),
+                )
+                for regime in _nested_list(aggregate, "regime_trades")
+            ),
+        )
+        locked_raw = payload.get("locked_oos")
+        if locked_raw is None:
+            locked = None
+        else:
+            if not isinstance(locked_raw, Mapping):
+                raise EvidenceError("missing_section", "locked_oos must be a JSON object")
+            locked = LockedOOSEvidence(
+                checksum=str(locked_raw["checksum"]),
+                evidence_checksum=str(locked_raw["evidence_checksum"]),
+                dataset_id=str(locked_raw["dataset_id"]),
+                dataset_checksum=str(locked_raw["dataset_checksum"]),
+                symbol=str(locked_raw["symbol"]),
+                timeframe=str(locked_raw["timeframe"]),
+                spec_hash=str(locked_raw["spec_hash"]),
+                spec_version=int(locked_raw["spec_version"]),
+                complexity=int(locked_raw["complexity"]),
+                code_version=str(locked_raw["code_version"]),
+                settings_digest=str(locked_raw["settings_digest"]),
+                policy_id=str(locked_raw["policy_id"]),
+                policy_version=int(locked_raw["policy_version"]),
+                test_start_row=int(locked_raw["test_start_row"]),
+                test_end_row=int(locked_raw["test_end_row"]),
+                test_rows=int(locked_raw["test_rows"]),
+                test_start_ts=str(locked_raw["test_start_ts"]),
+                test_end_ts=str(locked_raw["test_end_ts"]),
+                trades=int(locked_raw["trades"]),
+                net_profit=float(locked_raw["net_profit"]),
+                profit_factor=float(locked_raw["profit_factor"]),
+                win_rate=float(locked_raw["win_rate"]),
+                expectancy_r=float(locked_raw["expectancy_r"]),
+                total_r=float(locked_raw["total_r"]),
+                max_drawdown=float(locked_raw["max_drawdown"]),
+                expectancy_r_ci95_low=float(locked_raw["expectancy_r_ci95_low"]),
+                expectancy_r_ci95_high=float(locked_raw["expectancy_r_ci95_high"]),
+                total_r_ci95_low=float(locked_raw["total_r_ci95_low"]),
+                total_r_ci95_high=float(locked_raw["total_r_ci95_high"]),
+                bootstrap_samples=int(locked_raw["bootstrap_samples"]),
+                bootstrap_confidence=float(locked_raw["bootstrap_confidence"]),
+                bootstrap_method=str(locked_raw["bootstrap_method"]),
+                regime_coverage=float(locked_raw["regime_coverage"]),
+                regimes=tuple(
+                    RegimeEvidence(
+                        regime=str(regime["regime"]),
+                        trades=int(regime["trades"]),
+                        net_profit=float(regime["net_profit"]),
+                        win_rate=float(regime["win_rate"]),
+                        expectancy_r=float(regime["expectancy_r"]),
+                        total_r=float(regime["total_r"]),
+                    )
+                    for regime in _nested_list(locked_raw, "regimes")
+                ),
+                stress=tuple(
+                    StressEvidence(
+                        multiplier=float(stress["multiplier"]),
+                        trades=int(stress["trades"]),
+                        net_profit=float(stress["net_profit"]),
+                        profit_factor=float(stress["profit_factor"]),
+                        max_drawdown=float(stress["max_drawdown"]),
+                        expectancy_r=float(stress["expectancy_r"]),
+                    )
+                    for stress in _nested_list(locked_raw, "stress")
+                ),
+                created_at=str(locked_raw.get("created_at", "")),
+                schema_version=int(locked_raw.get("schema_version", 1)),
+            )
+        return CandidateEvidence(
+            spec_hash=str(payload["spec_hash"]),
+            spec_version=int(payload["spec_version"]),
+            complexity=int(payload["complexity"]),
+            dataset_id=str(payload["dataset_id"]),
+            dataset_checksum=str(payload["dataset_checksum"]),
+            symbol=str(payload["symbol"]),
+            timeframe=str(payload["timeframe"]),
+            code_version=str(payload["code_version"]),
+            settings_digest=str(payload["settings_digest"]),
+            seed=int(payload["seed"]),
+            trial_count=int(payload["trial_count"]),
+            search_budget=int(payload["search_budget"]),
+            splits=splits,
+            policy=policy,
+            folds=folds,
+            aggregate=summary,
+            checksum=str(payload["checksum"]),
+            created_at=str(payload["created_at"]),
+            schema_version=int(payload.get("schema_version", EVIDENCE_SCHEMA_VERSION)),
+            locked_oos=locked,
+        )
+    except EvidenceError:
+        raise
+    except (KeyError, TypeError, ValueError) as exc:
+        raise EvidenceError("missing_section", f"cannot rebuild evidence: {exc}") from exc
+
+
 def verify_evidence(
     evidence: CandidateEvidence,
     *,
@@ -872,7 +1233,7 @@ def verify_evidence(
     Every failure is a typed :class:`EvidenceError` with a stable code; a caller
     must not catch and ignore one.
     """
-    if not isinstance(evidence, CandidateEvidence):
+    if type(evidence) is not CandidateEvidence:
         raise TypeError(f"evidence must be a CandidateEvidence, got {type(evidence).__name__}")
     if evidence.dataset_id != dataset_id:
         raise EvidenceError(
@@ -898,8 +1259,7 @@ def verify_evidence(
     if evidence.settings_digest != settings_digest:
         raise EvidenceError(
             "stale_settings",
-            f"bundle was built with settings {evidence.settings_digest!r}, "
-            f"not {settings_digest!r}",
+            f"bundle was built with settings {evidence.settings_digest!r}, not {settings_digest!r}",
         )
     if evidence.schema_version != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceError(

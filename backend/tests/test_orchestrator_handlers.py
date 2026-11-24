@@ -16,17 +16,20 @@ ledger. The properties pinned here are the ones a queue depends on:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from promotion_evidence import evidence_for
+from promotion_support import promote_for_tests, registered_test_policies
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
 from scalping.discovery.champion import scope_for
+from scalping.discovery.promotion import PROMOTION_V1, EvidenceIdentity
 from scalping.discovery.protocols import TrialResult
 from scalping.knowledge.index import KnowledgeIndex
 from scalping.orchestrator import JobStore, Orchestrator
@@ -54,6 +57,19 @@ SYMBOL = "XAUUSD"
 TIMEFRAME = "M1"
 START = datetime(2026, 1, 5, tzinfo=UTC)
 END = START + timedelta(days=1)
+DATASET_CHECKSUM = "c1" * 32
+SETTINGS_DIGEST = "c2" * 32
+TEST_POLICY = replace(
+    PROMOTION_V1,
+    policy_id="handler-test-policy",
+    require_locked_oos=False,
+)
+
+
+@pytest.fixture(autouse=True)
+def _register_handler_test_policy():
+    with registered_test_policies(TEST_POLICY):
+        yield
 
 
 # --------------------------------------------------------------------------- fixtures
@@ -153,8 +169,34 @@ def seed_champion(context: HandlerContext) -> StrategySpec:
             dataset_id=dataset_id,
             code_version="test",
             seed=0,
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
         )
-        archive.promote(record.candidate_id, scope=scope, reason="unit test promotion")
+        # Seed through the evidence API: the paper provider only accepts an
+        # evidence-mode champion. This is a test policy, not PROMOTION_V1.
+        evidence = evidence_for(
+            spec_hash=record.candidate_id,
+            dataset_id=dataset_id,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            code_version="test",
+            dataset_checksum=DATASET_CHECKSUM,
+            settings_digest=SETTINGS_DIGEST,
+            expectancy_r=0.5,
+        )
+        promote_for_tests(
+            archive,
+            record.candidate_id,
+            evidence,
+            TEST_POLICY,
+            scope=scope,
+            reason="unit test promotion",
+            expected_identity=EvidenceIdentity(
+                code_version="test",
+                dataset_checksum=DATASET_CHECKSUM,
+                settings_digest=SETTINGS_DIGEST,
+            ),
+        )
         champion = archive.champion(scope)
     assert champion is not None and champion.candidate.candidate_id == spec.canonical_hash()
     return spec
@@ -348,6 +390,32 @@ def test_paper_advance_without_a_champion_is_no_trade_and_writes_nothing(
     assert data["reason"]
     assert not harness.context.paper_ledger_path.exists()
     assert not harness.context.discovery_archive_path.exists()
+
+
+def test_paper_advance_with_a_non_evidence_champion_is_no_trade(
+    harness: Harness,
+) -> None:
+    seed_champion(harness.context)
+    with DiscoveryArchive(harness.context.discovery_archive_path) as archive:
+        archive.connection.execute(
+            """
+            UPDATE champions SET mode = 'exploratory', policy_id = NULL,
+                policy_version = NULL, policy_digest = NULL, evidence_checksum = NULL
+            """
+        )
+
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 20},
+        dedupe="paper-non-evidence-champion",
+    )
+
+    assert outcome.status == "succeeded"
+    data = data_of(row)
+    assert data["action"] == "no_trade"
+    assert data["reason_class"] == "no_evidence_champion"
+    assert data["touched"] is False
+    assert not harness.context.paper_ledger_path.exists()
 
 
 def test_paper_advance_runs_the_governed_champion_and_dedupes(

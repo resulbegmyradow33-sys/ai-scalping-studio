@@ -65,6 +65,7 @@ from scalping.data.store import ParquetStore
 from scalping.datasets.builder import DatasetBundle, SplitRange, build_dataset
 from scalping.discovery.archive import DECISIONS, DiscoveryArchive
 from scalping.discovery.evaluate import DslEvaluator
+from scalping.discovery.evidence import settings_digest
 from scalping.discovery.protocols import Factory
 from scalping.discovery.search import SearchConfig, SearchResult, evolve
 from scalping.features.build import FEATURE_COLUMNS, FeatureFrame
@@ -556,10 +557,19 @@ def decide(
 # --- the run ------------------------------------------------------------------
 
 
-def _search_config(config: DiscoveryRunConfig, dataset_id: str, version: str) -> SearchConfig:
+def _search_config(
+    config: DiscoveryRunConfig,
+    dataset_id: str,
+    version: str,
+    *,
+    dataset_checksum: str,
+    settings_hash: str,
+) -> SearchConfig:
     return SearchConfig(
         dataset_id=dataset_id,
         code_version=version,
+        dataset_checksum=dataset_checksum,
+        settings_digest=settings_hash,
         population=config.population,
         generations=config.generations,
         mutation_rate=config.mutation_rate,
@@ -664,7 +674,13 @@ def run_discovery(
         stress=cfg.stress,
         max_steps=len(frame.ts),
     )
-    search_config = _search_config(cfg, dataset_id, version)
+    search_config = _search_config(
+        cfg,
+        dataset_id,
+        version,
+        dataset_checksum=bundle.manifest.checksum,
+        settings_hash=settings_digest(settings),
+    )
     # Structural protocols take ``Candidate``/``Factory``; this run only ever
     # produces ``StrategySpec``, so the narrower factory satisfies the loop at
     # runtime and the cast records that invariant for the type checker.

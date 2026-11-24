@@ -600,13 +600,14 @@ must not consume attempts.
 
 `discovery.run` cannot write a `promoted` decision: `run_discovery` refuses it
 and `DiscoveryRunResult` raises if asked. The handler also checks the returned
-decision before storing its result. Promotion and rollback stay in
-`DiscoveryArchive.promote/rollback`, reached by a separate reviewed path.
-`paper.advance` selects the champion of `symbol:timeframe` through
-`ChampionProvider`. If the archive is absent, has no champion, or the stored
-payload fails DSL validation or hashes inconsistently, the job records NO TRADE
-and the handler opens no ledger, writes no order and never falls back to the
-legacy `flow_momentum` rule.
+decision before storing its result. Promotion stays an explicit, reviewed call:
+`promote_with_evidence` for production, `promote_exploratory` for research, and
+`rollback` to restore a previous champion. `paper.advance` selects the champion of
+`symbol:timeframe` through `ChampionProvider`. If the archive is absent, has no
+champion, the champion is exploratory/manual (`NoEvidenceChampion`), or the
+stored payload fails DSL validation or hashes inconsistently, the job records NO
+TRADE and the handler opens no ledger, writes no order and never falls back to
+the legacy `flow_momentum` rule.
 
 ### Outcome attribution
 
