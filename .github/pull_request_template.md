@@ -2,6 +2,15 @@
 
 What changed and why. Link the issue or phase.
 
+## Master objective alignment
+
+- Master-prompt section(s):
+- Does this advance strategy-independent discovery / evidence / closed-loop paper learning?
+- Does it preserve the rule that owner-supplied strategies are optional baselines only?
+- Which existing interfaces and open PRs were checked for overlap?
+- Legacy components touched (if any) and why they remain necessary:
+- Acceptance test proving the end-to-end behaviour (not just a unit placeholder):
+
 ## Phase / area
 
 - [ ] Data pipeline
@@ -39,6 +48,9 @@ cd frontend && npm test
 - [ ] No data stores, `runs/`, model weights, secrets or `.env` committed.
 - [ ] Docs updated (`STATUS.md`, relevant `docs/*`).
 - [ ] No real-money execution path enabled.
+- [ ] No hard-coded strategy menu or owner-authored entry/exit recipe was added to the core learner.
+- [ ] Missing OOS/cost/regime/provenance evidence fails closed; no validation-only champion promotion.
+- [ ] Root AGENTS.md and canonical master prompt were followed.
 - [ ] Claimed results are reproducible from the stated commit and dataset.
 
 ## Risk and rollback

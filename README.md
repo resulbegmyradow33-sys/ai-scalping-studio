@@ -3,18 +3,28 @@
 [![CI](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml)
 
-Local research and paper-trading studio for XAUUSD. Everything runs on one
-machine: no paid AI APIs, no cloud services, no real money.
+Local-first, zero-mandatory-cost XAUUSD research and paper-trading studio.
+Real-money execution is disabled.
 
-The project grew out of a simple question: can a reinforcement-learning agent
-learn a gold scalping edge from tick data? The honest answer so far is **no, but
-a small rule with signed order-flow does have a measured edge**. The live panel
-therefore replays that rule; PPO stays in the research lab.
+The target is a strategy-independent autonomous research learner: discover
+hypotheses from market data and source-linked research, generate candidate
+policies without owner-authored entry/exit rules, test them with realistic costs
+and independent validation, and paper-trade only a governed DSL champion.
+That complete closed loop is not yet finished; see the dated audit and task
+board before interpreting any module as autonomous.
+
+The existing flow_momentum card is a legacy incumbent with historical
+forward-test evidence. The current panel still contains that older runtime
+path; it is retained for compatibility and baseline comparison, not as the
+strategy-discovery engine. PPO/behaviour cloning and the fixed five-family
+LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
 - [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing.
-- [`docs/architecture-audit.md`](docs/architecture-audit.md) — evidence-based audit.
+- [docs/autonomous-system-audit-2026-11-24.md](docs/autonomous-system-audit-2026-11-24.md) — current autonomous-system audit and ordered gaps.
+- [AGENTS.md](AGENTS.md) — mandatory instructions for every human/AI contributor.
+- [docs/architecture-audit.md](docs/architecture-audit.md) — historical 2026-11-22 snapshot.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
 - [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
@@ -38,9 +48,9 @@ history, conversation resolution, no force push or deletion. CodeQL and secret
 scanning run on the public repository. `make hooks` adds a local pre-push guard
 on top of the server rules.
 
-## What is validated
+## Legacy incumbent evidence (not the autonomous learner)
 
-`flow_momentum`, H1, card `backend/config/strategy_card.json`:
+flow_momentum, H1, card backend/config/strategy_card.json:
 
 - momentum signal (EMA20 + 5-bar displacement + ATR expansion),
 - entry only when `|flow|` exceeds the causal trailing 15th-percentile threshold
@@ -53,8 +63,10 @@ on top of the server rules.
 | Forward, Jun–Nov 2026 (card unchanged) | 24 | +0.502 R | 2.15 | 2.4% |
 | Forward, momentum only (ablation) | 58 | −0.128 R | 0.79 | 6.5% |
 
-The forward sample is small (95% CI still includes zero). The ablation is the
-useful part: without the signed-flow gate the same momentum signal loses money.
+The forward sample is small (95% CI still includes zero); it is historical
+baseline evidence, not a guarantee and not evidence that the new DSL discovery
+system has found a profitable strategy. The ablation is useful evidence about
+this specific legacy rule only.
 
 RL result: imitation + PPO is stable but weaker than the rule (+0.012 R and
 +0.020 R on two splits). See `docs/rl-imitation.md`.
@@ -125,9 +137,10 @@ make forward-test        # rerun the current forward store only
 
 See `docs/forward-test.md` for coverage, results and caveats.
 
-## The learning loop
+## Legacy experiment loops (not the autonomous orchestrator)
 
-Two background jobs keep the system honest:
+These older jobs remain for reproducibility and comparison; they are not yet
+wired into the new persistent orchestrator:
 
 - `scripts/nightly_calibrate.py` re-selects the rule's free parameters on the
   training slice, gates the winner on a holdout, and replaces the card only
