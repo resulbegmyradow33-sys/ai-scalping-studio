@@ -51,7 +51,7 @@ from scalping.orchestrator.core import (
     STATE_SAFE_MODE,
     Orchestrator,
 )
-from scalping.orchestrator.store import JobStore, StoreError
+from scalping.orchestrator.store import SCHEMA_VERSION, JobStore, StoreError
 
 __all__ = ["ACTOR_DEFAULT", "router"]
 
@@ -226,6 +226,24 @@ def _open_writable(request: Request) -> JobStore:
     path = Path(request.app.state.orchestrator_db_path)
     if not path.is_file():
         raise _unavailable()
+    # JobStore initialises/migrates its schema on construction. This endpoint
+    # must not turn an empty, stale or unrelated SQLite file into an orchestrator
+    # database as a side effect of a control request. Validate the existing
+    # schema through a read-only connection before opening the writer.
+    with _read_only(path) as conn:
+        if conn is None:
+            raise _unavailable()
+        tables = _tables(conn)
+        required = {"schema_version", "jobs", "events", "state"}
+        if not required <= tables:
+            raise _unavailable()
+        try:
+            row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        except sqlite3.Error as exc:
+            raise _unavailable() from exc
+        version = None if row is None else row[0]
+        if version != SCHEMA_VERSION:
+            raise _unavailable()
     try:
         return JobStore(path)
     except (OSError, ValueError, sqlite3.Error, StoreError) as exc:
