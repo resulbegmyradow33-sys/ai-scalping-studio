@@ -199,7 +199,9 @@ branches; cite them as evidence, not as repository files.
 - [ ] DQN evaluation.
 - [ ] A2C baseline.
 - [ ] Seed ensembles / policy averaging.
-- [ ] Execution-delay assumption in the environment.
+- [ ] PARTIAL: entry latency (`execution_delay=1`: BUY/SELL fill at the
+      next bar's close, CLOSE immediate, protective exits never delayed);
+      delayed closes and next-open fills are still open.
 - [ ] Reward ablation report.
 - [x] `docs/reinforcement-learning.md`.
 

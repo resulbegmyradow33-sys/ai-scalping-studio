@@ -81,6 +81,7 @@ def run_id(
     policy_name: str = "",
     session: str = "",
     mask_actions: bool = False,
+    execution_delay: int = 0,
 ) -> str:
     """First 12 hex chars of the run's sha256; identical inputs give identical ids.
 
@@ -97,6 +98,8 @@ def run_id(
         "session": str(session),
         "mask_actions": bool(mask_actions),
     }
+    if execution_delay:
+        payload["execution_delay"] = int(execution_delay)
     return hashlib.sha256(_canonical(payload)).hexdigest()[:12]
 
 
@@ -151,6 +154,7 @@ def run_backtest(
     flow_obs: bool = False,
     symbol: str | None = None,
     mask_actions: bool = False,
+    execution_delay: int = 0,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -167,7 +171,9 @@ def run_backtest(
     matching older callers and custom frames. ``mask_actions`` maps every action
     the simulator's mask forbids to HOLD before stepping, so an evaluation
     rollout records what the loop would execute instead of rejected orders; the
-    flag is part of the run id.
+    flag is part of the run id. ``execution_delay=1`` queues BUY/SELL decisions
+    for the next bar's close (entry latency only); CLOSE stays immediate and
+    protective exits are never delayed. A non-zero delay is part of the run id.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -187,6 +193,7 @@ def run_backtest(
         flow_thr=flow_thr,
         flow_obs=flow_obs,
         session=session,
+        execution_delay=execution_delay,
     )
     obs = sim.reset(_SEED)
 
@@ -209,7 +216,12 @@ def run_backtest(
     digest = data_hash(features)
     session_label = "" if session is None else session.label
     config_hash = run_id(
-        settings, _SEED, digest, session=session_label, mask_actions=mask_actions
+        settings,
+        _SEED,
+        digest,
+        session=session_label,
+        mask_actions=mask_actions,
+        execution_delay=execution_delay,
     )
     return BacktestResult(
         run_id=run_id(
@@ -219,6 +231,7 @@ def run_backtest(
             policy_name=identity,
             session=session_label,
             mask_actions=mask_actions,
+            execution_delay=execution_delay,
         ),
         metrics=compute(
             trades,

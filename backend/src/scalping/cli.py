@@ -973,6 +973,7 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         policy_name=label,
         symbol=args.symbol,
         mask_actions=args.mask_actions,
+        execution_delay=args.execution_delay,
     )
 
     out = Path(args.out)
@@ -1014,6 +1015,7 @@ def _cmd_backtest_montecarlo(args: argparse.Namespace) -> None:
         policy_name=label,
         symbol=args.symbol,
         mask_actions=getattr(args, "mask_actions", False),
+        execution_delay=getattr(args, "execution_delay", 0),
     )
     levels = _floats(args.confidence, flag="--confidence")
     try:
@@ -1650,6 +1652,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--mask-actions",
         action="store_true",
         help="map actions the simulator mask forbids to HOLD",
+    )
+    backtest.add_argument(
+        "--execution-delay",
+        type=int,
+        choices=(0, 1),
+        default=0,
+        help="1 queues BUY/SELL for the next bar's close (entry latency)",
     )
     backtest.set_defaults(handler=_cmd_backtest)
 

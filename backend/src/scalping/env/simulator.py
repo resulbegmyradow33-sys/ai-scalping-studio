@@ -202,6 +202,15 @@ class _BarPrep(NamedTuple):
     paused_until: datetime | None
 
 
+class _PendingEntry(NamedTuple):
+    """A BUY/SELL decided on one bar and filled on the next, when enabled."""
+
+    action: int
+    decision_bar: int
+    strategy: str
+    arm: int
+
+
 class Simulator:
     """Single-account backtest loop over a :class:`FeatureFrame`.
 
@@ -258,8 +267,15 @@ class Simulator:
         flow_thr: np.ndarray | None = None,
         flow_obs: bool = False,
         session: SessionSpec | None = None,
+        execution_delay: int = 0,
     ) -> None:
+        if isinstance(execution_delay, bool) or not isinstance(execution_delay, int):
+            raise TypeError(f"execution_delay must be an int, got {type(execution_delay).__name__}")
+        if execution_delay not in (0, 1):
+            raise ValueError(f"execution_delay must be 0 or 1, got {execution_delay!r}")
         self.features = features
+        self.execution_delay = execution_delay
+        self._pending_entry: _PendingEntry | None = None
         self.session_spec = session
         self.settings = settings
         self.max_steps = MAX_STEPS if max_steps is None else int(max_steps)
@@ -401,6 +417,16 @@ class Simulator:
         """Whether the current decision bar's data is usable for an entry."""
         return self._data_quality_at(self._i)
 
+    @property
+    def pending_action(self) -> int | None:
+        """The queued BUY/SELL that fills on the next step, or ``None``.
+
+        Only used when ``execution_delay=1``; the pending intent is never a
+        position and is cleared by ``reset`` and by terminal steps.
+        """
+        return None if self._pending_entry is None else self._pending_entry.action
+
+
     def _prepare_bar_state(self, bar: Bar) -> _BarPrep:
         """Project the rolls ``step`` performs before an entry, without mutating.
 
@@ -485,7 +511,13 @@ class Simulator:
         mask[_SELL] = self._entry_reason(_SELL) is None
         return mask
 
-    def _entry_reason(self, action: int) -> str | None:
+    def _entry_reason(
+        self,
+        action: int,
+        *,
+        arm: int | None = None,
+        signal_index: int | None = None,
+    ) -> str | None:
         """The reason an entry is blocked right now, or ``None`` when it may open.
 
         Shared by :meth:`action_masks` and :meth:`_apply` so the mask and the
@@ -505,7 +537,7 @@ class Simulator:
             return reason or "risk_blocked"
         if self.broker.position is not None:  # only reachable with max_positions > 1
             return "position_open"
-        gate_reason = self._gate_reason(action)
+        gate_reason = self._gate_reason(action, arm=arm, signal_index=signal_index)
         if gate_reason is not None:
             return gate_reason
         atr = self._atr(self._i)
@@ -524,6 +556,7 @@ class Simulator:
 
     def reset(self, seed: int | None = None) -> np.ndarray:
         """Restart the episode and return the first observation."""
+        self._pending_entry = None
         self.seed = seed
         self._i = self._first_index
         if self.random_start and self._last_index >= self._first_index:
@@ -584,6 +617,8 @@ class Simulator:
         if action not in _ACTIONS:
             raise ValueError(f"action must be 0, 1, 2 or 3, got {action!r}")
         decision_bar = self._i
+        decision_strategy = self.strategy
+        decision_arm = self._arm
 
         bar = self._bar(self._i)
         self.broker.atr = self._atr(self._i)
@@ -597,7 +632,15 @@ class Simulator:
         self.week_start_equity = prep.week_start_equity
         self._equity_before = prep.equity_now
 
-        trade, opened, blocked = self._apply(action, bar)
+        if self.execution_delay:
+            trade, opened, blocked = self._fill_pending(bar)
+            if action == _CLOSE:
+                close_trade, close_opened, close_blocked = self._apply(_CLOSE, bar)
+                trade = close_trade if close_trade is not None else trade
+                opened = opened if opened is not None else close_opened
+                blocked = blocked if blocked is not None else close_blocked
+        else:
+            trade, opened, blocked = self._apply(action, bar)
 
         if self._i >= self._last_index:
             # No next bar to price the exit: bill an open position at this one.
@@ -680,6 +723,18 @@ class Simulator:
         self._done = self._terminated or truncated
         self._reason = reason
         self._equity_value = equity
+        if self.execution_delay:
+            if not self._done and action in (_BUY, _SELL):
+                self._pending_entry = _PendingEntry(
+                    action=action,
+                    decision_bar=decision_bar,
+                    strategy=decision_strategy,
+                    arm=decision_arm,
+                )
+            elif self._pending_entry is not None and not self._done:
+                pass  # a pending entry queued earlier stays; it was not filled
+            else:
+                self._pending_entry = None
 
         # The returned observation describes the bar just advanced to, so pick
         # that bar's arm now. A step that could not advance (data end) keeps the
@@ -713,11 +768,19 @@ class Simulator:
 
     # --- actions -----------------------------------------------------------
 
-    def _signal_for_arm(self) -> int:
-        """The selected arm's signal on the current bar, 0 when unknown."""
-        if self._strategy_signals is None or self._arm < 0:
+    def _signal_for_arm(
+        self, arm: int | None = None, signal_index: int | None = None
+    ) -> int:
+        """The selected arm's signal, 0 when unknown.
+
+        A delayed fill passes the arm and bar frozen at decision time; the flow
+        gate still reads the fill bar.
+        """
+        chosen = self._arm if arm is None else arm
+        index = self._i if signal_index is None else signal_index
+        if self._strategy_signals is None or chosen < 0:
             return 0
-        return int(self._strategy_signals[self._i, int(self._arm)])
+        return int(self._strategy_signals[index, int(chosen)])
 
     def _flow_gate_blocked(self) -> bool:
         """True when the flow gate is active and this bar's imbalance is too weak.
@@ -733,10 +796,16 @@ class Simulator:
         threshold = float(self._flow_thr[self._i])
         return not (isfinite(value) and isfinite(threshold)) or abs(value) <= threshold
 
-    def _gate_reason(self, action: int) -> str | None:
+    def _gate_reason(
+        self,
+        action: int,
+        *,
+        arm: int | None = None,
+        signal_index: int | None = None,
+    ) -> str | None:
         """The reason this entry is blocked, or ``None`` when it may proceed."""
-        if self.gate_signals and not self._signals_unknown():
-            signal = self._signal_for_arm()
+        if self.gate_signals and not self._signals_unknown(arm=arm):
+            signal = self._signal_for_arm(arm=arm, signal_index=signal_index)
             if signal == 0:
                 return "no_signal"
             if (action == _BUY and signal < 0) or (action == _SELL and signal > 0):
@@ -745,10 +814,33 @@ class Simulator:
             return "no_flow"
         return None
 
-    def _signals_unknown(self) -> bool:
-        return self._strategy_signals is None or self._arm < 0
+    def _signals_unknown(self, arm: int | None = None) -> bool:
+        chosen = self._arm if arm is None else arm
+        return self._strategy_signals is None or chosen < 0
 
-    def _apply(self, action: int, bar: Bar) -> tuple[Trade | None, Position | None, str | None]:
+    def _fill_pending(self, bar: Bar) -> tuple[Trade | None, Position | None, str | None]:
+        """Fill the queued BUY/SELL at this bar, if any."""
+        pending = self._pending_entry
+        self._pending_entry = None
+        if pending is None:
+            return None, None, None
+        return self._apply(
+            pending.action,
+            bar,
+            strategy=pending.strategy,
+            arm=pending.arm,
+            signal_index=pending.decision_bar,
+        )
+
+    def _apply(
+        self,
+        action: int,
+        bar: Bar,
+        *,
+        strategy: str | None = None,
+        arm: int | None = None,
+        signal_index: int | None = None,
+    ) -> tuple[Trade | None, Position | None, str | None]:
         """Execute ``action`` at ``bar``; return ``(trade, opened, blocked)``.
 
         ``opened`` is the :class:`Position` this call created, or ``None``. It
@@ -760,7 +852,7 @@ class Simulator:
         opened: Position | None = None
 
         if action in (_BUY, _SELL):
-            blocked = self._entry_reason(action)
+            blocked = self._entry_reason(action, arm=arm, signal_index=signal_index)
             if blocked is None:
                 account = self._account()
                 atr = self._atr(self._i)
@@ -777,7 +869,7 @@ class Simulator:
                     bar.ask_close,
                     sl,
                     tp,
-                    self.strategy,
+                    self.strategy if strategy is None else strategy,
                 )
                 opened = self.broker.position
         elif action == _CLOSE:
