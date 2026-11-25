@@ -118,9 +118,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] PatchTST-style patching.
 - [x] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
-- [x] Config guard (d_model/layers/heads/sequence/batch).
-- [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.
-- [ ] Same evaluator/registry.
+- [x] Config guard (hidden/heads/layers/sequence).
+- [x] Memory smoke test and measured benchmark (parameters, latency, throughput, RSS).
+- [x] Same evaluator.
+- [ ] PARTIAL: shared model registry is Phase 10 work.
 - [x] `docs/transformer-models.md`.
 
 ## Phase 8 — Reinforcement learning expansion
@@ -128,11 +129,12 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] PPO with Gymnasium environment.
 - [x] Behavior-cloning warm start.
 - [x] VecNormalize, random starts, checkpoints, pause/resume.
-- [x] Rule, hold and random baselines.
-- [ ] PARTIAL: mask now covers flow/signal, session, daily/weekly loss, drawdown,
-      kill switches, consecutive losses, spread, ATR and lot-size gates, and
-      `run_backtest(mask_actions=True)` / `backtest --mask-actions` enforce it in
-      evaluation. Training still uses plain PPO (no MaskablePPO dependency).
+- [x] Hold baseline in the RL run (`baseline_hold_net_profit`).
+- [ ] PARTIAL: rule baseline exists in backtest/evaluator; random baseline and
+      both in the RL run manifest are open.
+- [ ] PARTIAL: flow mask (#76) is merged; full risk/session/spread/ATR/lot mask
+      and evaluation wiring is #181 (open, fixes a stale-state bug). Training
+      still uses plain PPO (no MaskablePPO dependency).
 - [ ] REDUCE position action.
 - [ ] SAC evaluation.
 - [ ] TD3 evaluation.
@@ -314,8 +316,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] PARTIAL: TXT/MD/HTML/DOCX var; PDF kasten desteklenmiyor (opsiyonel parser).
 - [x] Preserve originals, checksums, source metadata, parser versions and
       page/section references.
-- [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı PR #119'da açık
-      (henüz merge değil), OCR yok.
+- [ ] PARTIAL: metin, DOCX ve tablo yapısı var (#119 merged); PDF/OCR yok.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
 - [x] Classify claims, concepts, examples, opinions and empirical observations
       (deterministic heuristic triage, #107; not semantic reading).
@@ -414,7 +415,7 @@ the current merged mainline. Detailed evidence and limitations are in
    dataset artifact it needs (#136 open).
 5. **Knowledge extraction is heuristic; routing is audited.** #106/#107 merged,
    #123 routes hypotheses to experiment proposals (#132 hardens provenance).
-   Table structure is open PR #119. Proposals do not become discovery runs.
+   Table structure is implemented (#119). Proposals do not become discovery runs.
 6. **Orchestration is assembled, not one pipeline.** Queue/events/controls, five
    handlers (#115), measured guard (#112), daemon with `m2_8gb` default (#118),
    paper-outcome trigger (#122) and integration tests (#129) exist; the bare
