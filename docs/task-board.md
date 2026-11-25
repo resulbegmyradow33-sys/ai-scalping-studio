@@ -302,7 +302,7 @@ branches; cite them as evidence, not as repository files.
       general RAM budget manager for every job kind and PPO does not.
 - [ ] MPS benchmark and fallback policy.
 - [ ] Torch thread pinning and memory profiling.
-- [ ] Chunked dataset loading.
+- [x] Chunked dataset loading (`LazyWindowedDataset` batches).
 - [ ] Benchmark table: LightGBM, GRU, TCN, small Transformer, PPO.
 - [ ] Cancellation/resume under memory pressure.
 - [x] `docs/mac-mini-optimization.md` exists; its measurements are partial

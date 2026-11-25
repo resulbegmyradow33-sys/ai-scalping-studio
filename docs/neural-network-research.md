@@ -271,6 +271,26 @@ The benchmark does not rank models by accuracy. Prediction metrics come from
 `nn evaluate` (shared evaluator), and trading claims still require the
 simulator plus cost stress.
 
+## 10. Lazy windowed loading
+
+`scalping.nn.lazy.LazyWindowedDataset` keeps the raw feature matrix and yields
+window batches instead of materialising every window (Phase 14 chunked loading):
+
+```python
+from scalping.nn.lazy import LazyWindowedDataset
+
+lazy = LazyWindowedDataset(bundle, WindowConfig(window=60))
+for X_batch, y_batch, ts_batch in lazy.iter_batches("train", batch_size=1024):
+    ...
+```
+
+- Same contract as the materialised dataset: train-only normalisation, whole
+  window inside its split, purged rows excluded, identical counts/labels.
+- Memory is the raw rows plus one normalised batch, not
+  `windows × window × features`.
+- Chronological order; `batch_size` only controls memory, not shuffling.
+- `materialise(split)` exists for small splits and equivalence tests.
+
 ## 10. Limits and next slices
 
 - Windows are materialised; M1 history needs H1/M15, a smaller window or a lazy
