@@ -555,6 +555,66 @@ The exact replay of a producer-written bundle is also exercised end to end by
 `tests/test_discovery_persist.py`: save, load, `reproduce_bundle`, equal
 checksums.
 
+## Search exposure from the archive (discovery)
+
+`scalping.discovery.exposure` turns the archive into the authority on how many
+trials a search actually spent. A bundle's `trial_count` is written by its
+caller, and the bundle checksum only proves the file was not edited afterwards;
+it cannot prove the number was true when it was written. Self-declared counts
+are therefore insufficient for the promotion caps and for any multiple-testing
+correction: a candidate can claim one trial after a search scored hundreds, and
+every downstream guard then reads the smaller number.
+
+The rule is: **the archive's `trials` table is the denominator, and a claim
+below it is refused.** The derivation is read-only; no table, index or trigger
+is added.
+
+```python
+from scalping.discovery.exposure import apply_to_evidence, exposure_for
+
+exposure = exposure_for(
+    archive,
+    evidence.spec_hash,
+    evidence.dataset_id,
+    evidence.code_version,
+)
+evidence = apply_to_evidence(evidence, exposure)   # new checksummed bundle
+```
+
+`archive.trial_stats(spec_hash, dataset_id=..., code_version=...)` counts every
+trial row in the archive for the same dataset and code version, not only the
+anchor candidate's rows:
+`total_attempts`, `accepted`, `rejected`, `distinct_candidates`, `deduped`
+(repeated `(candidate, dataset, code version)` rows), `per_dataset`, and the
+anchor's own share as `spec_attempts`. An unknown spec is an
+`UnknownCandidateError`; a known spec with no matching rows reports zeros.
+
+`exposure_for` refuses with `missing_trial_evidence` when the anchor itself has
+no trial on that dataset and code version, so another candidate's trials are
+never borrowed as its evidence. The returned `SearchExposure` carries the
+observed `trial_count`, `search_budget` (the archive proves at least this many
+attempts; it stores no declared cap), `distinct_candidates` and the
+accepted/rejected split.
+
+`apply_to_evidence` replaces the bundle's `trial_count` with the archive count
+and recomputes the checksum, leaving the input bundle untouched. It refuses a
+claim **lower** than the archive count with `trial_count_understated`: quietly
+lowering the claim to the truth would hide that the caller lied, and accepting
+it would leave the multiple-testing guard reading a number the archive
+disproves. A claim at or above the archive count is reduced to the archive count
+because the archive is the evidence; a `search_budget` below that count is
+raised so the bundle stays internally consistent. Identity mismatches
+(`exposure_mismatch`) and a bundle whose stored checksum does not match its
+contents (`checksum_mismatch`) are refused before the bundle can be re-signed.
+
+Honest limits: the archive only sees what was written to it, so the derived
+count is a floor, never a ceiling. Trials run without an archive, deleted rows
+or a search that changed code mid-run remain invisible. Grouping by
+`(dataset_id, code_version)` also counts unrelated runs that share both, which
+can only overstate exposure, the safe direction for a multiple-testing guard.
+The rewrite does not promote anything; the versioned promotion policy still owns
+every threshold and refusal.
+
 ## Multiple-testing and data-snooping control (discovery)
 
 `scalping.discovery.selection` answers one narrow question: after a search
