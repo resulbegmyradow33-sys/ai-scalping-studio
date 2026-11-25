@@ -40,6 +40,7 @@ REASON_EXIT_LONG: Final[str] = "exit_long"
 REASON_EXIT_SHORT: Final[str] = "exit_short"
 REASON_ENTRY_LONG: Final[str] = "entry_long"
 REASON_ENTRY_SHORT: Final[str] = "entry_short"
+REASON_OOD: Final[str] = "out_of_distribution"
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,12 +168,14 @@ class DecisionEngine:
         position: Position | None = None,
         ts: str | datetime | None = None,
         model_version: str | None = None,
+        unknown: bool = False,
     ) -> Decision:
         """Return one decision; never emits a decision without a reason.
 
         ``disagreement`` is required. A default of zero would let a caller who
         forgot the ensemble score silently bypass the cap and write a false
-        ``0.0`` into the decision log.
+        ``0.0`` into the decision log. ``unknown`` is the OOD flag: it blocks a
+        new entry but never forces an exit on an open position.
         """
         if position not in (None, "long", "short"):
             raise ValueError(f"unknown position {position!r}; choose long, short or None")
@@ -205,6 +208,8 @@ class DecisionEngine:
                 return emit("HOLD", REASON_HOLD_LONG if held == 1 else REASON_HOLD_SHORT)
             return emit("NO_TRADE", REASON_EXIT_LONG if held == 1 else REASON_EXIT_SHORT)
 
+        if unknown:
+            return emit("NO_TRADE", REASON_OOD)
         if score > self.max_disagreement:
             return emit("NO_TRADE", REASON_DISAGREEMENT)
 

@@ -19,7 +19,8 @@ Members are combined only on out-of-fold predictions. The module provides:
   distribution and a disagreement score to ``BUY``, ``SELL``, ``HOLD`` or
   ``NO_TRADE`` with an explicit reason.
 
-Not in this slice: temperature scaling, drift/OOD scoring and persistence.
+OOD scoring lives in :mod:`scalping.ensemble.ood`; drift monitoring and
+persistence are later phases.
 Prediction metrics are not a trading edge; the simulator and cost gate still
 decide that.
 """
@@ -41,6 +42,7 @@ from scalping.ensemble.core import (
     fit_oof,
 )
 from scalping.ensemble.decision import Action, Decision, DecisionEngine, Position
+from scalping.ensemble.ood import OODConfig, OODDetector
 from scalping.ensemble.regime import (
     RegimeSelectionConfig,
     RegimeWeightedEnsemble,
@@ -60,6 +62,8 @@ __all__ = [
     "EnsembleConfig",
     "HardVotingEnsemble",
     "MemberFactory",
+    "OODConfig",
+    "OODDetector",
     "OOFResult",
     "Position",
     "RegimeSelectionConfig",
