@@ -682,6 +682,58 @@ def test_paper_advance_refuses_a_bar_gap_with_a_typed_reason(tmp_path: Path) -> 
         assert len(ledger.signals(first["session_id"])) == first["bars_processed"]
 
 
+def test_paper_advance_can_opt_into_audited_session_aware_gaps(tmp_path: Path) -> None:
+    bars = synthetic_bars()
+    harness = make_harness(tmp_path, bars.head(1000))
+    seed_champion(harness.context)
+    payload = {
+        "symbol": SYMBOL,
+        "timeframe": TIMEFRAME,
+        "bars": 10,
+        "gap_policy": "session_aware",
+    }
+
+    _, first_outcome, first_row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-session-aware-1"
+    )
+    assert first_outcome.status == "succeeded"
+    first = data_of(first_row)
+    assert first["gap_policy"] == "session_aware"
+    assert first["gaps_recorded"] == 0
+
+    appended = bars.slice(1000, 40)
+    holed = pl.concat([appended.head(10), appended.slice(11)])
+    assert ParquetStore(harness.context.data_root).write(SYMBOL, TIMEFRAME, holed) == 39
+
+    _, gap_outcome, gap_row = harness.run(
+        KIND_PAPER_ADVANCE, payload, dedupe="paper-session-aware-2"
+    )
+    assert gap_outcome.status == "succeeded"
+    result = data_of(gap_row)
+    assert result["gap_policy"] == "session_aware"
+    assert result["gaps_skipped"] == 1
+    assert result["missing_bars"] == 1
+    assert result["gaps_recorded"] == 1
+    assert result["bars_advanced"] > 0
+
+    with PaperLedger.open_reader(harness.context.paper_ledger_path) as ledger:
+        gaps = ledger.gaps(first["session_id"])
+        assert len(gaps) == 1
+        assert gaps[0].policy == "session_aware"
+        assert gaps[0].missing_bars == 1
+
+
+def test_paper_advance_rejects_an_unknown_gap_policy(harness: Harness) -> None:
+    _, outcome, row = harness.run(
+        KIND_PAPER_ADVANCE,
+        {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 10, "gap_policy": "ignore"},
+        dedupe="paper-invalid-gap-policy",
+    )
+    assert outcome.status == "failed"
+    assert "invalid payload" in (row.error or "")
+    assert "gap_policy" in (row.error or "")
+
+
 def test_paper_advance_refuses_duplicate_bars_permanently(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
