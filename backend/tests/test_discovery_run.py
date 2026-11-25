@@ -481,6 +481,30 @@ def test_decide_covers_every_outcome_without_promoting() -> None:
     )
     assert unmeasured[0] == "no_change"
 
+    # The public decision function must not trust a caller-supplied best id
+    # when the evaluator omitted the trade count: no trade evidence, no edge.
+    missing_trade_count = decide(
+        metric="net_profit",
+        trials=3,
+        accepted=1,
+        best_id="e" * 64,
+        best_metrics={"net_profit": 50.0},
+        baselines=baselines,
+    )
+    assert missing_trade_count[0] == "no_trade"
+    assert "trade-count evidence" in missing_trade_count[1]
+
+    invalid_trade_count = decide(
+        metric="net_profit",
+        trials=3,
+        accepted=1,
+        best_id="f" * 64,
+        best_metrics={"net_profit": 50.0, "trades": 1.5},
+        baselines=baselines,
+    )
+    assert invalid_trade_count[0] == "no_trade"
+    assert "trade-count evidence" in invalid_trade_count[1]
+
     for decision, _reason in (
         no_tradable,
         flat,
