@@ -259,7 +259,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Monte Carlo trade-sequence analysis (shuffle + block bootstrap, ruin, DD).
 - [x] Parameter sensitivity (one-axis spread/slippage/commission grid).
 - [ ] Ablation runner.
-- [ ] Regime-specific reports.
+- [x] Regime-specific reports (`regime_metrics` per regime for one run).
 - [ ] Execution delay and rejected-order assumptions.
 - [ ] Partial fills only where data supports them.
 - [x] `docs/risk-management.md`, `docs/backtesting-methodology.md`.

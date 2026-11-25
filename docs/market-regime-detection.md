@@ -158,6 +158,19 @@ not two strategies in different regimes with different sample sizes. A cell with
 a handful of trades is noise; report `trades` next to every average. The table
 is descriptive evidence, not a promotion gate.
 
+
+### One-run regime report
+
+`regime_metrics(trades, labels)` is the single-run counterpart of the strategy
+table: it groups one backtest's closed trades by the regime at entry and reports
+`trades`, `wins`, `win_rate`, `expectancy_r`, `total_r`, `total_pnl`,
+`profit_factor` and `avg_hold_minutes`. `profit_factor` is `null` for a bucket
+with wins but no losses; trades before the first label stay in `unknown`.
+
+Use it to answer "how did *this* run behave in each regime", then compare the
+strategy table across runs. Both are descriptive and trade-count-aware; neither
+promotes a strategy.
+
 ## 8. API
 
 `GET /api/regime?symbol=XAUUSD&timeframe=M1&limit=500`
