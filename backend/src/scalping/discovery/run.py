@@ -555,19 +555,27 @@ def decide(
         # A missing, malformed, fractional or non-finite count is not evidence
         # that a candidate actually traded. Keep this public decision boundary
         # fail-closed even when called outside evolve() with hand-built metrics.
+        if trades is None:
+            return (
+                "no_trade",
+                (
+                    f"no tradable candidate: {candidate} has missing trade-count evidence; "
+                    f"at least {min_best_trades} closed trade(s) are required; "
+                    "NO TRADE is the recorded result"
+                ),
+            )
         try:
             closed = float(trades)
         except (TypeError, ValueError):
             closed = math.nan
         if (
-            trades is None
-            or not math.isfinite(closed)
+            not math.isfinite(closed)
             or closed < min_best_trades
             or not closed.is_integer()
         ):
             detail = (
-                "missing or invalid trade-count evidence"
-                if trades is None or not math.isfinite(closed) or not closed.is_integer()
+                "invalid trade-count evidence"
+                if not math.isfinite(closed) or not closed.is_integer()
                 else f"only {closed:g} closed trade(s)"
             )
             return (
