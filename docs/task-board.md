@@ -141,7 +141,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Seed ensembles / policy averaging.
 - [ ] Execution-delay assumption in the environment.
 - [ ] Reward ablation report.
-- [ ] `docs/reinforcement-learning.md`.
+- [x] `docs/reinforcement-learning.md`.
 
 ## Phase 9 — Ensemble and confidence
 
