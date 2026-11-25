@@ -279,7 +279,10 @@ def _is_tradable(metrics: Mapping[str, float], min_trades: int) -> bool:
     if min_trades == 0:
         return True
     trades = metrics.get("trades")
-    return trades is not None and float(trades) >= float(min_trades)
+    if trades is None:
+        return False
+    count = float(trades)
+    return math.isfinite(count) and count.is_integer() and count >= float(min_trades)
 
 
 def _precedes(a: tuple[float, str], b: tuple[float, str], *, minimize: bool) -> bool:
