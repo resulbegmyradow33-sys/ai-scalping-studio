@@ -114,6 +114,28 @@ Reported results (H1, real spread, sequential simulator; see
 Interpretation: imitation makes PPO stable, but it does not beat the rule. The
 sample is small and split-dependent; no promotion is justified.
 
+## 5b. Policy averaging
+
+`rl.ensemble` combines members by averaging their **action distributions**
+before the argmax, not by majority-voting actions:
+
+```python
+from scalping.rl.ensemble import PolicyEnsemble
+
+ensemble = PolicyEnsemble([policy_a, policy_b], weights=[0.6, 0.4])
+action = ensemble.act(observation)
+```
+
+- Members must return equal-length, finite, non-negative distributions; they are
+  normalised before averaging.
+- Weights are optional, non-negative, length-matched and normalised; ties on the
+  argmax go to the lowest action index.
+- Averaging keeps uncertainty proportional; a single confident member cannot be
+  outvoted 2-to-1 by two unsure ones as easily as with hard voting.
+
+Training N seeds, loading their run directories and comparing the ensemble to
+each member on the simulator is the open evaluation slice.
+
 ## 6. Registry and artefacts
 
 `rl/registry.py` writes one directory per run:

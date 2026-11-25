@@ -198,7 +198,7 @@ holdout spend, champion, paper run.
 - [ ] TD3 evaluation.
 - [ ] DQN evaluation.
 - [ ] A2C baseline.
-- [ ] Seed ensembles / policy averaging.
+- [ ] PARTIAL: policy averaging + `PolicyEnsemble` implemented; training N seeds, loading and simulator comparison open.
 - [ ] Execution-delay assumption in the environment.
 - [ ] Reward ablation report.
 - [x] `docs/reinforcement-learning.md`.
