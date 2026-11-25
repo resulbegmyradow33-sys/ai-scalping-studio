@@ -19,14 +19,14 @@ export const BANDIT_STRATEGIES = ["momentum", "reversal", "sweep", "fvg", "trend
 
 /**
  * Newest run by `created_at`. The list is not sorted by the contract, and a
- * malformed timestamp sorts last instead of poisoning the comparison.
+ * malformed or missing timestamp sorts last instead of poisoning the comparison.
  */
 export function pickLatestRun(runs: readonly RunSummary[]): RunSummary | null {
   let latest: RunSummary | null = null;
   let latestTime = Number.NEGATIVE_INFINITY;
 
   for (const run of runs) {
-    const parsed = Date.parse(run.created_at);
+    const parsed = run.created_at === null ? Number.NaN : Date.parse(run.created_at);
     const time = Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
     if (latest === null || time > latestTime) {
       latest = run;
