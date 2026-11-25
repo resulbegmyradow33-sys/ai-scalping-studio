@@ -412,6 +412,16 @@ class PaperAdvanceScheduler:
                 f"paper ledger at {self.ledger_path} exists but cannot be read",
             )
             return
+        if ledger.last_signal_ts is None and ledger.signals > 0:
+            # A recorded signal we cannot parse would look like a cold start and
+            # could re-advance the session. Refuse instead of guessing.
+            self._note(
+                cursor,
+                scope,
+                REASON_LEDGER_UNAVAILABLE,
+                "session records signals but no readable timestamp",
+            )
+            return
 
         decision = self._decision_bar(symbol, timeframe, ledger, cursor, scope)
         if decision is None:
@@ -485,7 +495,7 @@ class PaperAdvanceScheduler:
                 if cursor_ts is None
                 else self._store.read(symbol, timeframe, start=cursor_ts)
             )
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, pl.exceptions.PolarsError) as exc:
             self._note(
                 cursor,
                 scope,

@@ -244,6 +244,9 @@ def test_new_decision_bar_enqueues_exactly_one_advance(tmp_path: Path) -> None:
     again = scan_once(Orchestrator(batch.store), [batch])
     assert again.queued == () and again.duplicates == ()
     assert len(jobs(batch.store)) == 1
+    # A cold start (no ledger at all) still enqueues: the first advance is what
+    # creates the ledger. The scheduler never writes it.
+    assert not (tmp_path / "archive" / "paper.sqlite").exists()
     assert session_id_for(champion_id)  # the id the handler will use
 
 
@@ -396,6 +399,22 @@ def test_unreadable_ledger_is_refused_not_guessed(tmp_path: Path) -> None:
     ledger_path = tmp_path / "archive" / "paper.sqlite"
     ledger_path.parent.mkdir(parents=True)
     ledger_path.write_bytes(b"this is not a sqlite database")
+    batch = scheduler(tmp_path)
+
+    outcome = scan_once(Orchestrator(batch.store), [batch])
+
+    assert outcome.queued == () and len(jobs(batch.store)) == 0
+    assert event_details(batch.store, EVENT_REFUSED)[-1]["reason"] == REASON_LEDGER_UNAVAILABLE
+
+
+def test_unparseable_ledger_cursor_is_refused(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    write_bars(data_root)
+    champion_id = seed_archive(archive_path(tmp_path))
+    ledger_path = tmp_path / "archive" / "paper.sqlite"
+    seed_ledger(ledger_path, session_id_for(champion_id), last_decidable_ts(data_root))
+    with PaperLedger(ledger_path) as ledger:
+        ledger.connection.execute("UPDATE signals SET ts = 'not-a-timestamp'")
     batch = scheduler(tmp_path)
 
     outcome = scan_once(Orchestrator(batch.store), [batch])

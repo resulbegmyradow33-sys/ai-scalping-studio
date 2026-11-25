@@ -216,7 +216,7 @@ only when `--watch-paper-ledger` names it.
 | `--schedule-paper` | no | off | Bind one `PaperAdvanceScheduler`; each evidence champion with a new decidable stored bar enqueues `paper.advance` | `--no-scan` |
 | `--watch-paper-ledger PATH` | yes | none | Bind one `PaperOutcomeTriggerSource` per path and register the proposal-only `paper.outcomes` handler | `--no-scan` |
 | `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
-| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag |
+| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper` |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
 and the queue is filled by another process. `--watch-kind` defaults to
@@ -1418,6 +1418,7 @@ uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
   tests/test_orchestrator_cancel.py tests/test_orchestrator_handlers.py \
   tests/test_orchestrator_resources.py tests/test_orchestrator_daemon.py \
+  tests/test_paper_scheduler.py tests/test_paper_outcome_cli.py \
   tests/test_orchestrator_integration.py -q
 uv run pytest
 ```
@@ -1561,7 +1562,15 @@ paper seam: one source per repeatable `--watch-paper-ledger`, a proposal-only
 result with no discovery job, default synthetic refusal plus the explicit
 opt-in on both source and handler, cursor and store-key dedupe across a CLI
 restart, no source without the flag (even at `<archive-root>/paper.sqlite`) and
-no HTTP binding.
+no HTTP binding. `test_paper_scheduler.py` pins the other paper seam: an
+evidence champion with a new decidable stored bar enqueues exactly one
+`paper.advance`; the same bar is not requeued across a poll, a restart or a
+crash between `scan` and `seen`; the ledger cursor and the provisional tail
+gate the next advance; exploratory/manual/no-champion scopes, an invalid scope,
+a missing archive and an unreadable ledger are audited refusals with no job and
+no legacy fallback; the payload is exactly the handler's three fields so the
+gap policy cannot be bypassed; the warm-up window is respected; and the
+`--schedule-paper` CLI flag enqueues the job without ever reading a feed.
 
 ### Integration coverage (Phase 18)
 
