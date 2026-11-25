@@ -22,7 +22,8 @@ LinUCB selector are research baselines, not the required autonomous learner.
 ## Project status
 
 - [`docs/runbook.md`](docs/runbook.md) — operator runbook: install, daily flows,
-  orchestrator, troubleshooting and safety rules.
+  orchestrator, audited local controls, legacy-fallback switch, troubleshooting
+  and safety rules.
 - [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
   the exact commands that reproduce each claim.
 - [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
@@ -107,7 +108,9 @@ npm run dev -- -p 3001
 ```
 
 Open `http://127.0.0.1:3001`. Without a strategy card the panel replays the
-legacy M1 momentum rule; the data screen can generate synthetic bars.
+legacy M1 momentum rule by default during migration. To make the interactive
+replay fail closed instead, start the API with `--no-legacy-fallback`; this
+switch does not change the autonomous paper path. See the runbook for details.
 
 To use the validated rule, copy the seed card and start with a flow store:
 
