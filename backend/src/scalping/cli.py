@@ -1007,7 +1007,14 @@ def _cmd_backtest_montecarlo(args: argparse.Namespace) -> None:
     """Resample one backtest's trades and report the path distribution."""
     settings, features = _backtest_inputs(args)
     policy, label = _select_policy(args.policy)
-    result = run_backtest(policy, features, settings, policy_name=label, symbol=args.symbol)
+    result = run_backtest(
+        policy,
+        features,
+        settings,
+        policy_name=label,
+        symbol=args.symbol,
+        mask_actions=getattr(args, "mask_actions", False),
+    )
     levels = _floats(args.confidence, flag="--confidence")
     try:
         config = MonteCarloConfig(

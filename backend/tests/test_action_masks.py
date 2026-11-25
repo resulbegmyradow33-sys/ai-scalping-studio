@@ -368,3 +368,70 @@ def test_masked_evaluation_is_part_of_the_run_identity():
     assert run_id(Settings(), 0, data_hash(frame)) != run_id(
         Settings(), 0, data_hash(frame), mask_actions=True
     )
+
+
+def spread_frame(spreads: list[float], start: str = "2026-01-05T00:00") -> FeatureFrame:
+    frame = flat_frame(n=len(spreads))
+    return FeatureFrame(
+        X=frame.X,
+        ts=(np.datetime64(start, "us") + np.arange(len(spreads)).astype("timedelta64[m]")).astype(
+            "datetime64[us]"
+        ),
+        ohlc=frame.ohlc,
+        spread=np.asarray(spreads, dtype=np.float64),
+        atr=frame.atr,
+        valid_from=frame.valid_from,
+        columns=frame.columns,
+    )
+
+
+def test_mask_uses_the_current_bar_spread_not_the_previous_one():
+    from scalping.config import RiskConfig
+
+    spreads = [0.2] * 121
+    spreads[120] = 1.0  # 1000 points, above the 500-point limit
+    sim = Simulator(
+        spread_frame(spreads),
+        Settings(risk=RiskConfig(max_spread_points=500)),
+    )
+    sim.reset(seed=1)
+
+    assert sim.action_masks().tolist() == [True, True, True, False]
+    sim.step(HOLD_)
+
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    assert sim.step(BUY).info["blocked"] == "max_spread"
+
+
+def test_mask_does_not_hide_an_entry_after_a_spread_drops():
+    from scalping.config import RiskConfig
+
+    spreads = [0.2] * 121
+    spreads[119] = 1.0  # the bar the episode starts on is too wide
+    sim = Simulator(
+        spread_frame(spreads),
+        Settings(risk=RiskConfig(max_spread_points=500)),
+    )
+    sim.reset(seed=1)
+    assert sim.action_masks().tolist() == [True, False, False, False]
+
+    sim.step(HOLD_)
+
+    assert sim.action_masks().tolist() == [True, True, True, False]
+    assert sim.step(BUY).info["opened"] is not None
+
+
+def test_mask_sees_the_17_utc_daily_reset():
+    frame = spread_frame([0.2] * 300, start="2026-01-05T15:00")
+    sim = Simulator(frame, Settings())
+    sim.reset(seed=1)
+    assert frame.ts[119].astype("datetime64[h]").astype(int) % 24 == 16  # 16:59
+    sim.balance = 9_000.0
+    sim.day_start_equity = 10_000.0  # 10% down, beyond the 3% daily limit
+
+    assert sim.action_masks().tolist() == [True, False, False, False]
+    sim.step(HOLD_)  # 16:59 -> 17:00; the daily anchor rolls at the next step
+
+    assert int(frame.ts[120].astype("datetime64[h]").astype(int) % 24) == 17
+    assert sim.action_masks().tolist() == [True, True, True, False]
+    assert sim.step(BUY).info["opened"] is not None
