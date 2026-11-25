@@ -3,8 +3,10 @@
 Phase 17, slice 1 added local, offline ingestion of research documents with
 provenance, deterministic text extraction, a searchable SQLite index and
 structured hypothesis records. Slice 2 adds structural table preservation for
-DOCX, HTML and Markdown (schema version 2) without OCR, a model or a new
-dependency.
+DOCX, HTML and Markdown (schema version 2) without OCR or a model. PDF text
+extraction is an optional extra: the core install stays unchanged and a PDF is
+reported as unsupported until `pypdf` is installed explicitly. OCR is still
+absent in every format.
 
 The code lives in `backend/src/scalping/knowledge/`:
 
@@ -24,16 +26,51 @@ The code lives in `backend/src/scalping/knowledge/`:
 | `.md`, `.markdown` | `markdown` | `stdlib-markdown` | `2` | ATX headings define sections; fenced code is not scanned; pipe tables are extracted |
 | `.html`, `.htm` | `html` | `html.parser` | `2` | scripts, styles, templates and titles are dropped; `h1`–`h6` define sections; `<table>` is extracted |
 | `.docx` | `docx` | `zipfile+ElementTree` | `2` | paragraph text and `w:tbl` tables from `word/document.xml`; heading styles define sections |
-| `.pdf` | `pdf` | none | n/a | `status="unsupported"`: an optional parser must be installed explicitly |
+| `.pdf` | `pdf` | `pypdf` | `2` | one section per page with text, labelled `page <n>`; needs the optional `pdf` extra, otherwise `status="unsupported"` |
 
 Version 2 adds table records; the paragraph text produced by every parser is
 unchanged from version 1.
 
-No dependency was added. PDF text extraction needs an optional parser and an
-implementation of the `TextExtractor` protocol; until then the ingestor returns
-`status="unsupported"` with an error that says so. It never silently reads a
-PDF as plain bytes or invents text. Scanned PDFs would additionally need OCR,
-which is not implemented.
+No core dependency was added. PDF text extraction is behind an optional extra:
+
+```sh
+cd backend
+uv sync --extra pdf        # installs pypdf>=5; core install is unchanged
+```
+
+The package metadata is `[project.optional-dependencies] pdf = ["pypdf>=5"]`, so
+an installed distribution accepts `pip install 'scalping[pdf]'`. Without the
+extra the ingestor returns `status="unsupported"` with an error naming
+`uv sync --extra pdf`; it never reads a PDF as plain bytes or invents text.
+
+### PDF page semantics (optional extra)
+
+When `pypdf` is importable:
+
+- Each page is read with `extract_text()` and normalised like HTML text
+  (horizontal whitespace collapsed, blank lines dropped). One section is stored
+  per page that produced text, with `label = "page <n>"` and an empty heading.
+  `<n>` is the 1-based physical page index in the file, not a printed page
+  number from the document's own pagination.
+- A page that yields no text is **reported, not filled in**. It stays out of
+  the sections (so a citation can never resolve to invented text) and the
+  document record carries one warning per empty page: `PDF page <n> has no
+  extractable text (scanned image or blank page); OCR is not implemented`.
+  The orchestrator ingest result includes those warnings.
+- A PDF where no page yields text is `status="extraction_failed"` with the
+  page numbers and the OCR limitation in the error. A corrupt, unreadable or
+  encrypted PDF is also `extraction_failed`; an encrypted file is not decrypted.
+- The original is copied and checksummed **before** parsing, exactly as for
+  other formats. A parser failure keeps the byte-identical original at
+  `<root>/sources/<sha256>/<filename>` and preserves `doc_id == checksum`.
+- PDF tables are not extracted: there is no structural table reader for PDF.
+  Text inside a table may still appear in the page text. Page text is not
+  appended to the table search index as a table record.
+- No outline, bookmark or heading structure is used to build heading paths;
+  page labels are the only page-level provenance.
+
+`extract(path)` (the strict variant) returns the same page sections and raises
+`ExtractionError` for a PDF without text instead of returning an empty list.
 
 A DOCX whose `word/document.xml` exceeds 32 MiB is refused before parsing, so a
 zip bomb is a recorded extraction failure rather than an out-of-memory crash.
@@ -76,9 +113,9 @@ Statuses:
 
 | Status | Meaning |
 |---|---|
-| `indexed` | text was extracted and sections are available |
-| `extraction_failed` | a supported parser failed; original is preserved, reason recorded |
-| `unsupported` | no approved parser for the format (currently PDF) |
+| `indexed` | text was extracted and sections are available; PDF warnings may still name no-text pages |
+| `extraction_failed` | a supported parser failed (including corrupt/encrypted/no-text PDFs); original is preserved, reason recorded |
+| `unsupported` | no approved parser for the format (PDF without the optional extra, or an unknown extension) |
 
 ## Index schema
 
@@ -573,9 +610,14 @@ refusal vocabulary and honest limits are in
 - **Tables are structure, not interpretation.** A table record reproduces
   cells and their positions; it does not classify, score or trust them, and a
   merged-cell placeholder is metadata rather than data.
-- **No LLM.** Parsing is deterministic stdlib code. The system does not claim to
-  understand a book like a human, to have trained on a PDF, or to have language
-  model embeddings. Ingestion is not training.
+- **No LLM.** Parsing is deterministic code (`pypdf` is an optional text
+  extractor, not a model). The system does not claim to understand a book like
+  a human, to have trained on a PDF, or to have language model embeddings.
+  Ingestion is not training.
+- **Document text is not an order and not a trained LLM.** A PDF page section is
+  inert text with page provenance. It cannot place an order, cannot become a
+  strategy without a separate experiment, and is not model weights or an
+  embedding.
 - **No cloud.** No network, credential or model-provider import exists in the
   package. The index is a local file.
 - **No invented content.** If extraction fails, the record says so. Scanned
@@ -587,9 +629,13 @@ refusal vocabulary and honest limits are in
 ## Tests
 
 `backend/tests/test_knowledge_ingest.py` covers txt/md/html/docx extraction,
-checksum and duplicate handling, byte-identical preservation, PDF reporting,
-recorded failures, path traversal, and the absence of network imports,
-`eval`/`exec` and trading imports.
+checksum and duplicate handling, byte-identical preservation, PDF unsupported
+reporting with the install hint, recorded failures, path traversal, and the
+absence of network imports, `eval`/`exec` and trading imports. PDF-present tests
+(skipped when `pypdf` is absent) cover page-labelled sections, per-page text,
+no-text page warnings without invented text, the all-empty OCR failure, a
+corrupt PDF failure with the original preserved, the strict extract path, and
+that `pypdf` stays an optional extra rather than a core dependency.
 
 `backend/tests/test_knowledge_index.py` covers schema idempotency, exact
 section/chunk offsets, FTS5 and LIKE search with limits, duplicate documents,
@@ -642,9 +688,22 @@ uv run mypy src
 
 ## Limitations
 
-- PDF is unsupported until an optional parser is explicitly installed and
-  registered. Scanned documents need OCR, which is absent. There is no OCR for
-  table images in any format.
+- PDF is `unsupported` until the optional `pdf` extra is installed. Without it
+  there is no PDF text at all. With it, extraction is text-only: scanned pages
+  are reported as no-text and need OCR, which is absent in every format. There
+  is no OCR for table images either.
+- PDF extraction produces page sections, not document headings, tables or
+  reading order. A multi-column layout or a text layer in a non-standard
+  encoding can produce jumbled or missing text. `pypdf` version changes can
+  change the extracted text; `parser` is recorded as `pypdf` and
+  `parser_version` is this module's extraction version, not the library
+  version.
+- PDF warnings live on the ingestion record and the orchestrator ingest result;
+  the SQLite index stores documents, sections and tables, not warning strings.
+  A later `index.documents` read cannot reconstruct which pages were empty, so
+  re-ingest the file (a duplicate import re-extracts) if that detail matters.
+- A PDF whose text layer is empty is an extraction failure, not an empty
+  indexed document. It never becomes a source for hypothesis citations.
 - Table extraction is structural, not semantic: complex layouts (nested DOCX
   tables, floating/positioned tables, multi-page tables, vertical merges that
   also carry content) may flatten or lose a cell. DOCX nested tables are not

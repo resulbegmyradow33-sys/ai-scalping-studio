@@ -723,7 +723,7 @@ the stored range.
 
 | Class | Example | Queue behaviour |
 |---|---|---|
-| Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
+| Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported format or unreadable PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
 | Permanent advance refusal (`paper.advance`) | `bar_order:` duplicate/unsorted stored bars, `session_conflict:` incompatible or unreplayable ledger session, `continuous_refused:` finished or inconsistent session | `failed` on the first attempt with the typed prefix in `jobs.error` |
 | Retryable advance refusal (`paper.advance`) | `bar_gap:` a bar is missing in the pending range | retryable with backoff; a later ingestion may close the gap |
 | Retryable (any other exception) | SQLite busy, I/O error, unexpected bug | bounded retry with exponential backoff |
