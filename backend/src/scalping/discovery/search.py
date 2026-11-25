@@ -281,7 +281,10 @@ def _is_tradable(metrics: Mapping[str, float], min_trades: int) -> bool:
     trades = metrics.get("trades")
     if trades is None:
         return False
-    count = float(trades)
+    try:
+        count = float(trades)
+    except (TypeError, ValueError, OverflowError):
+        return False
     return math.isfinite(count) and count.is_integer() and count >= float(min_trades)
 
 
