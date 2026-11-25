@@ -1,4 +1,4 @@
-"""Ensemble combination and the decision engine (Phase 9, slice 1).
+"""Ensemble combination, regime selection and the decision engine (Phase 9).
 
 Members are combined only on out-of-fold predictions. The module provides:
 
@@ -10,13 +10,18 @@ Members are combined only on out-of-fold predictions. The module provides:
   :class:`~scalping.ensemble.core.StackedEnsemble`;
 - :func:`~scalping.ensemble.core.disagreement` and
   :func:`~scalping.ensemble.core.compare_to_best_member` for evidence;
+- :func:`~scalping.ensemble.regime.fit_regime_weights`,
+  :class:`~scalping.ensemble.regime.RegimeWeightedEnsemble`,
+  :func:`~scalping.ensemble.regime.align_regime_labels` and
+  :func:`~scalping.ensemble.regime.regime_selection_report` for
+  regime-dependent weights, again from OOF rows only;
 - :class:`~scalping.ensemble.decision.DecisionEngine`, which maps a probability
   distribution and a disagreement score to ``BUY``, ``SELL``, ``HOLD`` or
   ``NO_TRADE`` with an explicit reason.
 
-Not in this slice: regime-dependent member selection, temperature scaling,
-drift/OOD scoring and persistence. Prediction metrics are not a trading edge;
-the simulator and cost gate still decide that.
+Not in this slice: temperature scaling, drift/OOD scoring and persistence.
+Prediction metrics are not a trading edge; the simulator and cost gate still
+decide that.
 """
 
 from __future__ import annotations
@@ -36,6 +41,16 @@ from scalping.ensemble.core import (
     fit_oof,
 )
 from scalping.ensemble.decision import Action, Decision, DecisionEngine, Position
+from scalping.ensemble.regime import (
+    RegimeSelectionConfig,
+    RegimeWeightedEnsemble,
+    RegimeWeights,
+    RegimeWeightTable,
+    WeightSource,
+    align_regime_labels,
+    fit_regime_weights,
+    regime_selection_report,
+)
 
 __all__ = [
     "Action",
@@ -47,11 +62,19 @@ __all__ = [
     "MemberFactory",
     "OOFResult",
     "Position",
+    "RegimeSelectionConfig",
+    "RegimeWeightTable",
+    "RegimeWeightedEnsemble",
+    "RegimeWeights",
     "SoftVotingEnsemble",
     "StackedEnsemble",
+    "WeightSource",
     "WeightedVotingEnsemble",
     "WeightingMode",
+    "align_regime_labels",
     "compare_to_best_member",
     "disagreement",
     "fit_oof",
+    "fit_regime_weights",
+    "regime_selection_report",
 ]
