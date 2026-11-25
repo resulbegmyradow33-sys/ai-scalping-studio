@@ -18,6 +18,7 @@ part of the normalised matrix.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from math import tau
 
@@ -77,6 +78,15 @@ _SESSION_ROLL_HOUR: int = 17
 # ``rsi_14`` and the M5/M15 RSI columns are divided by 100.
 # HTF columns come from the last closed 5m/15m bucket; ``htf_bos`` is the M5
 #   BOS state and ``htf_fvg_dist`` the M15 FVG distance.
+# The optional ``htf`` group appends M30/H4 context *after* the 59 defaults,
+#   only when requested, under the same closed-bucket rule. ``*_trend`` is the
+#   structure state on that timeframe, ``*_ret`` the one-bucket simple return
+#   and ``h4_atr_frac`` the H4 ATR(14) divided by close.
+
+#: Resample rule behind each optional feature group, keyed by the ``htf_context``
+#: keyword. Only ``htf`` exists today; the table avoids hard-coding one group
+#: name in two places.
+_OPTIONAL_FRAMES: dict[str, dict[str, str]] = {"htf": {"m30": "30m", "h4": "4h"}}
 
 #: Column order of :attr:`FeatureFrame.X`. One entry per feature.
 FEATURE_COLUMNS: tuple[str, ...] = (
@@ -307,9 +317,7 @@ def _feature_exprs() -> list[pl.Expr]:
         close / pl.col("_ema60") - 1.0,
         _scaled(atr14, close),
         _guarded(pl.col("_atr60") > 0.0, atr14 / pl.col("_atr60"), 1.0),
-        _scaled(
-            pl.col("volume").cast(pl.Float64) - pl.col("_vol_mean"), pl.col("_vol_std")
-        ),
+        _scaled(pl.col("volume").cast(pl.Float64) - pl.col("_vol_mean"), pl.col("_vol_std")),
         _scaled(pl.col("volume").cast(pl.Float64), pl.col("_vol_mean")),
         _scaled(pl.col("spread"), atr14),
         _scaled(pl.col("spread") - pl.col("_spread_mean"), pl.col("_spread_std")),
@@ -363,19 +371,24 @@ def _equal_extreme(price: pl.Expr, rolling: pl.Expr) -> pl.Expr:
     return pl.when((price - prior).abs() <= _EQUAL_EXTREME_TOLERANCE).then(1.0).otherwise(0.0)
 
 
-def _empty_frame() -> FeatureFrame:
+def _empty_frame(columns: tuple[str, ...] = FEATURE_COLUMNS) -> FeatureFrame:
     return FeatureFrame(
-        X=np.zeros((0, len(FEATURE_COLUMNS)), dtype=np.float32),
+        X=np.zeros((0, len(columns)), dtype=np.float32),
         ts=np.zeros(0, dtype="datetime64[us]"),
         ohlc=np.zeros((0, 4), dtype=np.float64),
         spread=np.zeros(0, dtype=np.float64),
         atr=np.zeros(0, dtype=np.float64),
         valid_from=0,
-        columns=list(FEATURE_COLUMNS),
+        columns=list(columns),
     )
 
 
-def build_features(df: pl.DataFrame, costs: CostConfig | None = None) -> FeatureFrame:
+def build_features(
+    df: pl.DataFrame,
+    costs: CostConfig | None = None,
+    *,
+    groups: Iterable[str] | None = None,
+) -> FeatureFrame:
     """Build the causal feature frame for M1 ``df``.
 
     ``df`` is normalised with :func:`~scalping.data.base.conform_bars` and sorted
@@ -384,16 +397,25 @@ def build_features(df: pl.DataFrame, costs: CostConfig | None = None) -> Feature
     :func:`~scalping.features.prepare.prepare_bars` with ``costs`` (default
     :class:`~scalping.types.CostConfig`), so the matrix stays finite.
 
+    ``groups=None`` keeps the historical 59-column matrix exactly. Naming an
+    optional group (``groups=("htf",)``) appends its columns after the defaults.
+    Base groups may be named too, but they do not change the built matrix: the
+    59 defaults are always present, so existing positional indices never move.
+
     ``X[valid_from:]`` is guaranteed finite. A non-finite value raises
     :class:`ValueError` naming the offending columns, so a data problem fails at
     ingestion instead of deep inside an episode reset.
     """
+    # Imported lazily: the registry imports FEATURE_COLUMNS from this module.
+    from scalping.features.registry import build_columns, optional_groups
+
+    columns = build_columns(groups)
+    extra_groups = optional_groups(groups)
+
     frame = conform_bars(df).sort("ts")
     if frame.is_empty():
-        return _empty_frame()
-    frame = prepare_bars(
-        frame, CostConfig() if costs is None else costs, atr(frame, 14).to_numpy()
-    )
+        return _empty_frame(columns)
+    frame = prepare_bars(frame, CostConfig() if costs is None else costs, atr(frame, 14).to_numpy())
 
     structure = market_structure(frame, 2).rename(
         {
@@ -412,26 +434,26 @@ def build_features(df: pl.DataFrame, costs: CostConfig | None = None) -> Feature
     sessions = session_flags(frame["ts"]).rename(
         {"asia": "_asia", "london": "_london", "ny": "_ny", "ny_open_30": "_ny_open_30"}
     )
-    context = htf_context(frame, resample(frame, "5m"), resample(frame, "15m"))
+    optional_frames = {
+        keyword: resample(frame, rule)
+        for name in extra_groups
+        for keyword, rule in _OPTIONAL_FRAMES.get(name, {}).items()
+    }
+    context = htf_context(frame, resample(frame, "5m"), resample(frame, "15m"), **optional_frames)
     context = context.drop("ts").select(pl.all().forward_fill().fill_null(0.0))
 
-    work = pl.concat(
-        [_with_helpers(frame), structure, gaps, sessions, context], how="horizontal"
-    )
-    features = work.select(
-        [expr.alias(name) for expr, name in zip(_feature_exprs(), FEATURE_COLUMNS)]
-    )
-    if features.columns != list(FEATURE_COLUMNS):  # pragma: no cover - guard only
-        raise RuntimeError("feature column order drifted from FEATURE_COLUMNS")
+    work = pl.concat([_with_helpers(frame), structure, gaps, sessions, context], how="horizontal")
+    expressions = _feature_exprs() + [pl.col(name) for name in columns[len(FEATURE_COLUMNS) :]]
+    features = work.select([expr.alias(name) for expr, name in zip(expressions, columns)])
+    if features.columns != list(columns):  # pragma: no cover - guard only
+        raise RuntimeError("feature column order drifted from the registry")
 
     X = features.cast(pl.Float32).to_numpy().copy(order="C")
     valid_from = min(WARMUP, frame.height)
     tail = X[valid_from:]
     if tail.size and not np.isfinite(tail).all():
         names = [
-            name
-            for index, name in enumerate(FEATURE_COLUMNS)
-            if not np.isfinite(tail[:, index]).all()
+            name for index, name in enumerate(columns) if not np.isfinite(tail[:, index]).all()
         ]
         raise ValueError(f"non-finite feature columns: {names}")
 
@@ -442,5 +464,5 @@ def build_features(df: pl.DataFrame, costs: CostConfig | None = None) -> Feature
         spread=frame["spread"].to_numpy(),
         atr=work["_atr14"].to_numpy().astype(np.float64, copy=True),
         valid_from=valid_from,
-        columns=list(FEATURE_COLUMNS),
+        columns=list(columns),
     )

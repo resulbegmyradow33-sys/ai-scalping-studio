@@ -24,7 +24,7 @@ from typing import Any, Final
 import numpy as np
 
 from scalping.features.availability import Capabilities, ensure_columns_available
-from scalping.features.build import FeatureFrame
+from scalping.features.build import FEATURE_COLUMNS, FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS, columns_for, indices_for
 
 __all__ = [
@@ -176,6 +176,18 @@ def build_dataset(
 
     indices = indices_for(groups)
     columns = columns_for(groups)
+    available = tuple(features.columns)
+    if available and len(available) != int(features.X.shape[1]):
+        raise ValueError(
+            f"feature frame names {len(available)} columns but X has "
+            f"{features.X.shape[1]}; columns and matrix disagree"
+        )
+    missing = [column for column in columns if column not in (available or FEATURE_COLUMNS)]
+    if missing:
+        raise ValueError(
+            f"feature frame does not provide {missing}; build it with the optional "
+            "groups included (e.g. build_features(..., groups=('htf',)))"
+        )
     if capabilities is not None:
         ensure_columns_available(columns, capabilities)
     X = np.ascontiguousarray(features.X[start:end][:, indices], dtype=np.float32)
@@ -235,9 +247,7 @@ def save_manifest(path: str | Path, bundle: DatasetBundle) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     temp = target.with_suffix(target.suffix + ".tmp")
     payload = bundle.manifest.to_dict()
-    payload["split_counts"] = {
-        name: bundle.rows(name) for name in SPLIT_NAMES
-    }
+    payload["split_counts"] = {name: bundle.rows(name) for name in SPLIT_NAMES}
     payload["purged_rows"] = int((bundle.split == -1).sum())
     temp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     os.replace(temp, target)

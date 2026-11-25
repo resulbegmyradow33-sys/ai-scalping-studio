@@ -332,7 +332,14 @@ class MLRunner:
         self._lock = threading.Lock()
         self._runs: dict[str, MLRunState] = {}
 
-    def _features(self, frame: pl.DataFrame, symbol: str, timeframe: str) -> FeatureFrame:
+    def _features(
+        self,
+        frame: pl.DataFrame,
+        symbol: str,
+        timeframe: str,
+        *,
+        groups: tuple[str, ...] | None = None,
+    ) -> FeatureFrame:
         """The shared feature-matrix path: cache hit, else build and store."""
         return cached_build_features(
             self.cache,
@@ -340,6 +347,7 @@ class MLRunner:
             timeframe=timeframe,
             frame=frame,
             settings=self.settings,
+            groups=groups,
         )
 
     # -- start -----------------------------------------------------------
@@ -369,7 +377,9 @@ class MLRunner:
                     f"refusing {frame.height} bars: the API limit is {MAX_BARS}; "
                     "narrow the stored history"
                 )
-            features = self._features(frame, request.symbol, request.timeframe)
+            features = self._features(
+                frame, request.symbol, request.timeframe, groups=request.spec.groups
+            )
             if features.X.shape[1] > MAX_FEATURES:  # pragma: no cover - registry guard
                 raise MLError(
                     f"{features.X.shape[1]} feature columns exceeds the limit of {MAX_FEATURES}"

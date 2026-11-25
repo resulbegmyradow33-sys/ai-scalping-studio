@@ -632,6 +632,7 @@ def persist_evidence_run(
         timeframe=timeframe,
         frame=bars,
         settings=run_settings,
+        groups=groups,
     )
 
     try:

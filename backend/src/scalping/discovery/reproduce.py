@@ -1076,7 +1076,7 @@ def reproduce_bundle(
             f"no {evidence.symbol} {evidence.timeframe} bars under {store_root}",
         )
     try:
-        features = build_features(bars, costs=run_settings.costs)
+        features = build_features(bars, costs=run_settings.costs, groups=manifest.groups)
     except (TypeError, ValueError) as exc:
         raise ReproduceError("bars_invalid", str(exc)) from exc
 
