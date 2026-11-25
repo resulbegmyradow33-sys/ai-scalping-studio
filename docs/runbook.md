@@ -395,7 +395,61 @@ budget and seed.
 ### 3.3 Controls
 
 Controls are persisted rows in the queue's `state` table and are read on every
-iteration, so they survive a restart. There is no CLI for them:
+iteration, so they survive a restart. The current build exposes audited local
+owner controls through `GET` and `POST /api/orchestrator/control`; these
+requests change persisted flags only. They do not start/stop the daemon, enqueue
+jobs, cancel jobs, or promote a strategy.
+
+Start the API on loopback (the default):
+
+```bash
+uv run --project backend python -m scalping.cli serve --root data --host 127.0.0.1 --port 8000
+```
+
+Read the current state before changing it:
+
+```bash
+curl -s http://127.0.0.1:8000/api/orchestrator/control
+```
+
+Change one control at a time. A reason is required for `pause`,
+`safe_mode_on` and `safe_mode_off`; it is optional for `resume`,
+`disable_research` and `enable_research`:
+
+```bash
+# Stop claiming jobs; trigger scanning can continue.
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+  -H 'Content-Type: application/json' -d '{"action":"pause","reason":"maintenance"}'
+
+# Hard stop: the daemon claims no jobs.
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+  -H 'Content-Type: application/json' -d '{"action":"safe_mode_on","reason":"operator stop"}'
+
+# Resume claiming after checking the queue and evidence.
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+  -H 'Content-Type: application/json' -d '{"action":"resume"}'
+
+# Block dataset/discovery/paper research jobs while leaving ingestion possible.
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+  -H 'Content-Type: application/json' -d '{"action":"disable_research"}'
+```
+
+Allowed actions: `pause`, `resume`, `safe_mode_on`, `safe_mode_off`,
+`disable_research`, `enable_research`. The response reports
+`configured`, `readable`, `paused`, `safe_mode`, `research_disabled`
+and the latest `last_change` audit event. A missing database returns
+`configured: false, readable: false`; an existing but unreadable or
+uninitialised database returns `readable: false` rather than pretending all
+flags are off. POST returns `409` when the database is absent/unavailable and
+`422` for an unknown action, a missing required reason or an extra body field.
+Each accepted transition is appended to the audit event log.
+
+**Security boundary:** this API has no authentication/identity layer. Keep the
+server bound to `127.0.0.1`; do not expose it on a public interface or forward
+port 8000 to the internet. CORS is not authentication. The route uses the
+database path configured by the app and rejects arbitrary paths in the request.
+
+The Python API remains available for local scripts and tests:
 
 ```python
 from pathlib import Path
@@ -404,17 +458,18 @@ from scalping.orchestrator.store import JobStore
 
 store = JobStore(Path("runs/orchestrator.sqlite3"))
 orchestrator = Orchestrator(store)
-
-orchestrator.pause("maintenance")      # stop claiming; queue keeps growing
+orchestrator.pause("maintenance")
 orchestrator.resume()
-orchestrator.safe_mode(True, "stop")   # claims nothing at all
-orchestrator.disable_research(True)    # block dataset/discovery/paper kinds
-orchestrator.cancel(42, "superseded")  # one job
+orchestrator.safe_mode(True, "stop")
+orchestrator.disable_research(True)
+orchestrator.cancel(42, "superseded")  # job cancellation is Python-only
 store.close()
 ```
 
 `safe_mode` is the hard stop. `pause` stops claims but keeps scanning and
-recording new work. `disable_research` keeps ingestion possible.
+recording new work. `disable_research` keeps ingestion possible. A control
+change takes effect when the daemon next reads persisted state; it does not
+interrupt a handler already running.
 
 ### 3.4 Crash recovery
 
@@ -484,7 +539,16 @@ do not leave an unattended run on it.
    section. If you find yourself evaluating variants on test, stop.
 6. **Fail closed.** No champion, unreadable champion, invalid spec, missing
    evidence or missing archive means NO TRADE with a reason. Never add a fallback
-   to the legacy handwritten rule in the autonomous path.
+   to the legacy handwritten rule in the autonomous path. The interactive API
+   replay has a separate migration-only M1 momentum fallback enabled by default;
+   disable it explicitly when testing fail-closed UI behavior:
+
+   ```bash
+   uv run --project backend python -m scalping.cli serve --root data --no-legacy-fallback
+   ```
+
+   With this switch, a missing or unusable legacy card produces HOLD/NO TRADE;
+   it does not enable or disable autonomous paper trading.
 7. **One heavy job.** The guard profile and the queue's heavy-kind rule exist for
    an 8 GB machine. Do not run discovery, evidence and training at once.
 8. **Evidence vocabulary.** `implemented` means code and tests. `validated` means
@@ -509,6 +573,8 @@ do not leave an unattended run on it.
 | `orchestrator run --once` | one tick | `status`, `tick` |
 | `orchestrator run --forever` | supervised loop | `started` / `stopped` / `failed` + `daemon` |
 | `GET /api/autonomy/status` | read-only dashboard | `paper`, `orchestrator`, `champions`, `discoveries`, `data` |
+| `GET /api/orchestrator/control` | read persisted owner controls | `configured`, `readable`, `paused`, `safe_mode`, `research_disabled`, `last_change` |
+| `POST /api/orchestrator/control` | audited local control transition | same state fields; `409` unavailable DB, `422` invalid request |
 | `GET /api/autonomy/jobs` | queue window | `configured`, `readable`, `items[]`, `total` |
 | `GET /api/paper/sessions` | ledger sessions | `items[]`, `total`, `limit`, `offset` |
 
