@@ -1,0 +1,1711 @@
+{
+  "base_commit": "626409fede128f88b3f6dee01a0dbcb3014abe4d",
+  "branch": "feat/cachetune",
+  "cache_version": 1,
+  "call_loop": 10,
+  "cases": [
+    {
+      "call_loop": {
+        "calls": 10,
+        "cold_seconds": 0.372471,
+        "entries": 1,
+        "hit_ratio": 0.9,
+        "hits": 9,
+        "misses": 1,
+        "warm_seconds_max": 0.038391,
+        "warm_seconds_median": 0.014151,
+        "warm_seconds_min": 0.010314
+      },
+      "corruption": {
+        "corrupt_delta": 1,
+        "live_entries": 0,
+        "load_returns_none": true,
+        "miss_delta": 1,
+        "quarantined_files": 2
+      },
+      "derived": {
+        "fingerprint_share_of_build_plus_meta": 0.0078,
+        "hit_speedup_vs_build": 24.01,
+        "key_total_share_of_build_plus_meta": 0.0079,
+        "load_to_build_ratio": 0.0416,
+        "meta_to_build_ratio": 0.0079,
+        "save_to_build_ratio": 0.0336
+      },
+      "entry": {
+        "array_bytes": 5840000,
+        "entry_bytes": 5843032,
+        "manifest_bytes": 1818,
+        "npz_bytes": 5841214,
+        "x_bytes": 4720000
+      },
+      "fingerprint_chars": 40,
+      "first_ts": "2021-05-24T00:00:00+00:00",
+      "invalidation": {
+        "data_change_misses": true,
+        "data_key_differs": true,
+        "entries": 3,
+        "first_call_miss": true,
+        "same_arrays": true,
+        "second_call_hits": true,
+        "settings_change_misses": true,
+        "settings_key_differs": true
+      },
+      "key": "dfa54d2593e35ad7eebc886b76c0d9b0e2c6dfc8054645ed56b39aeeb8b4ebe3",
+      "label": "m1_20k",
+      "last_ts": "2021-06-11T15:22:00+00:00",
+      "load_average_at_case_start": "36.60 32.38 21.88",
+      "rows": 20000,
+      "rows_available": 1773331,
+      "stages": {
+        "build_features": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.021929,
+            "total_median": 0.18997,
+            "user_median": 0.166728
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "build_features",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 20000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.021698,
+              "cpu_total_seconds": 0.188426,
+              "cpu_user_seconds": 0.166728,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.30109
+            },
+            {
+              "cpu_system_seconds": 0.025261,
+              "cpu_total_seconds": 0.208103,
+              "cpu_user_seconds": 0.182842,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.344556
+            },
+            {
+              "cpu_system_seconds": 0.02032,
+              "cpu_total_seconds": 0.191764,
+              "cpu_user_seconds": 0.171444,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.299865
+            },
+            {
+              "cpu_system_seconds": 0.027926,
+              "cpu_total_seconds": 0.18997,
+              "cpu_user_seconds": 0.162044,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.385473
+            },
+            {
+              "cpu_system_seconds": 0.021929,
+              "cpu_total_seconds": 0.185559,
+              "cpu_user_seconds": 0.16363,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.363346
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.385473,
+            "median": 0.344556,
+            "min": 0.299865
+          },
+          "warmup": 1
+        },
+        "frame_meta": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 4.4e-05,
+            "total_median": 0.002354,
+            "user_median": 0.002303
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "frame_meta",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 20000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 5.1e-05,
+              "cpu_total_seconds": 0.002354,
+              "cpu_user_seconds": 0.002303,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.002409
+            },
+            {
+              "cpu_system_seconds": 2.8e-05,
+              "cpu_total_seconds": 0.001734,
+              "cpu_user_seconds": 0.001706,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.001957
+            },
+            {
+              "cpu_system_seconds": 4.5e-05,
+              "cpu_total_seconds": 0.002717,
+              "cpu_user_seconds": 0.002672,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.00272
+            },
+            {
+              "cpu_system_seconds": 4.4e-05,
+              "cpu_total_seconds": 0.002311,
+              "cpu_user_seconds": 0.002267,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.00384
+            },
+            {
+              "cpu_system_seconds": 3.5e-05,
+              "cpu_total_seconds": 0.002632,
+              "cpu_user_seconds": 0.002597,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.003191
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.00384,
+            "median": 0.00272,
+            "min": 0.001957
+          },
+          "warmup": 1
+        },
+        "key_for": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 4e-06,
+            "total_median": 4.4e-05,
+            "user_median": 4e-05
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "key_for",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 20000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 8e-06,
+              "cpu_total_seconds": 7.7e-05,
+              "cpu_user_seconds": 6.9e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 7.6e-05
+            },
+            {
+              "cpu_system_seconds": 1.4e-05,
+              "cpu_total_seconds": 6e-05,
+              "cpu_user_seconds": 4.6e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 4.7e-05
+            },
+            {
+              "cpu_system_seconds": 4e-06,
+              "cpu_total_seconds": 4.4e-05,
+              "cpu_user_seconds": 4e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 3.7e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 3.6e-05,
+              "cpu_user_seconds": 3.6e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 3.4e-05
+            },
+            {
+              "cpu_system_seconds": 1e-06,
+              "cpu_total_seconds": 3.3e-05,
+              "cpu_user_seconds": 3.2e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 3.1e-05
+            }
+          ],
+          "wall_seconds": {
+            "max": 7.6e-05,
+            "median": 3.7e-05,
+            "min": 3.1e-05
+          },
+          "warmup": 1
+        },
+        "load": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.001139,
+            "total_median": 0.010607,
+            "user_median": 0.009036
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "load",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 20000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.000963,
+              "cpu_total_seconds": 0.010607,
+              "cpu_user_seconds": 0.009644,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.02728
+            },
+            {
+              "cpu_system_seconds": 0.001791,
+              "cpu_total_seconds": 0.010827,
+              "cpu_user_seconds": 0.009036,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.014348
+            },
+            {
+              "cpu_system_seconds": 0.00095,
+              "cpu_total_seconds": 0.009683,
+              "cpu_user_seconds": 0.008733,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.018606
+            },
+            {
+              "cpu_system_seconds": 0.00163,
+              "cpu_total_seconds": 0.011118,
+              "cpu_user_seconds": 0.009488,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.013526
+            },
+            {
+              "cpu_system_seconds": 0.001139,
+              "cpu_total_seconds": 0.008909,
+              "cpu_user_seconds": 0.00777,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.009428
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.02728,
+            "median": 0.014348,
+            "min": 0.009428
+          },
+          "warmup": 1
+        },
+        "save": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.001884,
+            "total_median": 0.010176,
+            "user_median": 0.008176
+          },
+          "disk_delta_mb": 0.0,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "save",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 20000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.001884,
+              "cpu_total_seconds": 0.010926,
+              "cpu_user_seconds": 0.009042,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 5.57235,
+              "disk_start_mb": 5.57235,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.014509
+            },
+            {
+              "cpu_system_seconds": 0.001929,
+              "cpu_total_seconds": 0.009173,
+              "cpu_user_seconds": 0.007244,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 5.57235,
+              "disk_start_mb": 5.57235,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.009368
+            },
+            {
+              "cpu_system_seconds": 0.001511,
+              "cpu_total_seconds": 0.009687,
+              "cpu_user_seconds": 0.008176,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 5.57235,
+              "disk_start_mb": 5.57235,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.010721
+            },
+            {
+              "cpu_system_seconds": 0.001763,
+              "cpu_total_seconds": 0.013169,
+              "cpu_user_seconds": 0.011406,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 5.57235,
+              "disk_start_mb": 5.57235,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.016956
+            },
+            {
+              "cpu_system_seconds": 0.002101,
+              "cpu_total_seconds": 0.010176,
+              "cpu_user_seconds": 0.008075,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 5.57235,
+              "disk_start_mb": 5.57235,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.011571
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.016956,
+            "median": 0.011571,
+            "min": 0.009368
+          },
+          "warmup": 1
+        }
+      },
+      "store_read_seconds": 0.906281,
+      "store_root": "../../../data-ticks5-store",
+      "symbol": "XAUUSD",
+      "timeframe": "M1",
+      "version": {
+        "bumped_key_differs": true,
+        "old_entry_rejected": true,
+        "version": 1
+      }
+    },
+    {
+      "call_loop": {
+        "calls": 10,
+        "cold_seconds": 3.054714,
+        "entries": 1,
+        "hit_ratio": 0.9,
+        "hits": 9,
+        "misses": 1,
+        "warm_seconds_max": 0.320068,
+        "warm_seconds_median": 0.223656,
+        "warm_seconds_min": 0.141835
+      },
+      "corruption": {
+        "corrupt_delta": 1,
+        "live_entries": 0,
+        "load_returns_none": true,
+        "miss_delta": 1,
+        "quarantined_files": 2
+      },
+      "derived": {
+        "fingerprint_share_of_build_plus_meta": 0.0108,
+        "hit_speedup_vs_build": 12.68,
+        "key_total_share_of_build_plus_meta": 0.0108,
+        "load_to_build_ratio": 0.0789,
+        "meta_to_build_ratio": 0.0109,
+        "save_to_build_ratio": 0.0718
+      },
+      "entry": {
+        "array_bytes": 58400000,
+        "entry_bytes": 58403038,
+        "manifest_bytes": 1824,
+        "npz_bytes": 58401214,
+        "x_bytes": 47200000
+      },
+      "fingerprint_chars": 40,
+      "first_ts": "2021-05-24T00:00:00+00:00",
+      "invalidation": {
+        "data_change_misses": true,
+        "data_key_differs": true,
+        "entries": 3,
+        "first_call_miss": true,
+        "same_arrays": true,
+        "second_call_hits": true,
+        "settings_change_misses": true,
+        "settings_key_differs": true
+      },
+      "key": "b7b29f93f31b495533a716ca48cd4da611239cc0831fa121798541249ce2b001",
+      "label": "m1_200k",
+      "last_ts": "2021-12-13T19:15:00+00:00",
+      "load_average_at_case_start": "35.99 32.32 21.92",
+      "rows": 200000,
+      "rows_available": 1773331,
+      "stages": {
+        "build_features": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.195828,
+            "total_median": 1.70047,
+            "user_median": 1.504642
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "build_features",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 200000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.165459,
+              "cpu_total_seconds": 1.650737,
+              "cpu_user_seconds": 1.485278,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.376147
+            },
+            {
+              "cpu_system_seconds": 0.23067,
+              "cpu_total_seconds": 1.788492,
+              "cpu_user_seconds": 1.557822,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 3.47975
+            },
+            {
+              "cpu_system_seconds": 0.234934,
+              "cpu_total_seconds": 1.833842,
+              "cpu_user_seconds": 1.598908,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 3.595022
+            },
+            {
+              "cpu_system_seconds": 0.195828,
+              "cpu_total_seconds": 1.70047,
+              "cpu_user_seconds": 1.504642,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.941684
+            },
+            {
+              "cpu_system_seconds": 0.190675,
+              "cpu_total_seconds": 1.671496,
+              "cpu_user_seconds": 1.480821,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.678799
+            }
+          ],
+          "wall_seconds": {
+            "max": 3.595022,
+            "median": 2.941684,
+            "min": 2.376147
+          },
+          "warmup": 1
+        },
+        "frame_meta": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.000425,
+            "total_median": 0.020019,
+            "user_median": 0.019594
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "frame_meta",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 200000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.000324,
+              "cpu_total_seconds": 0.018799,
+              "cpu_user_seconds": 0.018475,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.024422
+            },
+            {
+              "cpu_system_seconds": 0.000625,
+              "cpu_total_seconds": 0.022575,
+              "cpu_user_seconds": 0.02195,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.032871
+            },
+            {
+              "cpu_system_seconds": 0.000664,
+              "cpu_total_seconds": 0.01774,
+              "cpu_user_seconds": 0.017076,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.032493
+            },
+            {
+              "cpu_system_seconds": 0.000425,
+              "cpu_total_seconds": 0.020019,
+              "cpu_user_seconds": 0.019594,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.023452
+            },
+            {
+              "cpu_system_seconds": 0.000375,
+              "cpu_total_seconds": 0.021798,
+              "cpu_user_seconds": 0.021423,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.032008
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.032871,
+            "median": 0.032008,
+            "min": 0.023452
+          },
+          "warmup": 1
+        },
+        "key_for": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 2e-06,
+            "total_median": 2.8e-05,
+            "user_median": 2.6e-05
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "key_for",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 200000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 5e-06,
+              "cpu_total_seconds": 3.1e-05,
+              "cpu_user_seconds": 2.6e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.3e-05
+            },
+            {
+              "cpu_system_seconds": 7e-06,
+              "cpu_total_seconds": 2.4e-05,
+              "cpu_user_seconds": 1.7e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 1.5e-05
+            },
+            {
+              "cpu_system_seconds": 2e-06,
+              "cpu_total_seconds": 2.8e-05,
+              "cpu_user_seconds": 2.6e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.9e-05
+            },
+            {
+              "cpu_system_seconds": 1e-06,
+              "cpu_total_seconds": 2.9e-05,
+              "cpu_user_seconds": 2.8e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 2.7e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 1.6e-05,
+              "cpu_user_seconds": 1.6e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 1.6e-05
+            }
+          ],
+          "wall_seconds": {
+            "max": 2.9e-05,
+            "median": 2.3e-05,
+            "min": 1.5e-05
+          },
+          "warmup": 1
+        },
+        "load": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.013693,
+            "total_median": 0.106256,
+            "user_median": 0.09189
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "load",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 200000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.014472,
+              "cpu_total_seconds": 0.106256,
+              "cpu_user_seconds": 0.091784,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.264552
+            },
+            {
+              "cpu_system_seconds": 0.013693,
+              "cpu_total_seconds": 0.110565,
+              "cpu_user_seconds": 0.096872,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.232081
+            },
+            {
+              "cpu_system_seconds": 0.01396,
+              "cpu_total_seconds": 0.112407,
+              "cpu_user_seconds": 0.098447,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.218221
+            },
+            {
+              "cpu_system_seconds": 0.009975,
+              "cpu_total_seconds": 0.101725,
+              "cpu_user_seconds": 0.09175,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.213255
+            },
+            {
+              "cpu_system_seconds": 0.00959,
+              "cpu_total_seconds": 0.10148,
+              "cpu_user_seconds": 0.09189,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.274233
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.274233,
+            "median": 0.232081,
+            "min": 0.213255
+          },
+          "warmup": 1
+        },
+        "save": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.020534,
+            "total_median": 0.103177,
+            "user_median": 0.085128
+          },
+          "disk_delta_mb": 0.0,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "save",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 200000,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 502.796875,
+            "start": 502.796875
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.020534,
+              "cpu_total_seconds": 0.117391,
+              "cpu_user_seconds": 0.096857,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 55.697477,
+              "disk_start_mb": 55.697477,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.240537
+            },
+            {
+              "cpu_system_seconds": 0.014733,
+              "cpu_total_seconds": 0.099816,
+              "cpu_user_seconds": 0.085083,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 55.697477,
+              "disk_start_mb": 55.697477,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.230731
+            },
+            {
+              "cpu_system_seconds": 0.021105,
+              "cpu_total_seconds": 0.100262,
+              "cpu_user_seconds": 0.079157,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 55.697477,
+              "disk_start_mb": 55.697477,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.176754
+            },
+            {
+              "cpu_system_seconds": 0.01527,
+              "cpu_total_seconds": 0.103177,
+              "cpu_user_seconds": 0.087907,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 55.697477,
+              "disk_start_mb": 55.697477,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.164208
+            },
+            {
+              "cpu_system_seconds": 0.0233,
+              "cpu_total_seconds": 0.108428,
+              "cpu_user_seconds": 0.085128,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 55.697477,
+              "disk_start_mb": 55.697477,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 502.796875,
+              "rss_start_mb": 502.796875,
+              "wall_seconds": 0.211324
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.240537,
+            "median": 0.211324,
+            "min": 0.164208
+          },
+          "warmup": 1
+        }
+      },
+      "store_read_seconds": 1.061619,
+      "store_root": "../../../data-ticks5-store",
+      "symbol": "XAUUSD",
+      "timeframe": "M1",
+      "version": {
+        "bumped_key_differs": true,
+        "old_entry_rejected": true,
+        "version": 1
+      }
+    },
+    {
+      "call_loop": {
+        "calls": 10,
+        "cold_seconds": 2.373119,
+        "entries": 1,
+        "hit_ratio": 0.9,
+        "hits": 9,
+        "misses": 1,
+        "warm_seconds_max": 0.185035,
+        "warm_seconds_median": 0.123228,
+        "warm_seconds_min": 0.072748
+      },
+      "corruption": {
+        "corrupt_delta": 1,
+        "live_entries": 0,
+        "load_returns_none": true,
+        "miss_delta": 1,
+        "quarantined_files": 2
+      },
+      "derived": {
+        "fingerprint_share_of_build_plus_meta": 0.012,
+        "hit_speedup_vs_build": 28.75,
+        "key_total_share_of_build_plus_meta": 0.012,
+        "load_to_build_ratio": 0.0348,
+        "meta_to_build_ratio": 0.0121,
+        "save_to_build_ratio": 0.0575
+      },
+      "entry": {
+        "array_bytes": 29224236,
+        "entry_bytes": 29227274,
+        "manifest_bytes": 1824,
+        "npz_bytes": 29225450,
+        "x_bytes": 23619588
+      },
+      "fingerprint_chars": 40,
+      "first_ts": "2009-03-15T21:00:00+00:00",
+      "invalidation": {
+        "data_change_misses": true,
+        "data_key_differs": true,
+        "entries": 3,
+        "first_call_miss": true,
+        "same_arrays": true,
+        "second_call_hits": true,
+        "settings_change_misses": true,
+        "settings_key_differs": true
+      },
+      "key": "b54e3fe833ff51d7307797d64b86e10203d37a28ecb422e6c9a426e0eed05d1b",
+      "label": "h1_full",
+      "last_ts": "2026-01-09T21:00:00+00:00",
+      "load_average_at_case_start": "32.95 31.96 22.26",
+      "rows": 100083,
+      "rows_available": 100083,
+      "stages": {
+        "build_features": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.057932,
+            "total_median": 1.056191,
+            "user_median": 0.976222
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "build_features",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 100083,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 592.0,
+            "start": 592.0
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.042017,
+              "cpu_total_seconds": 1.005168,
+              "cpu_user_seconds": 0.963151,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.352765
+            },
+            {
+              "cpu_system_seconds": 0.057932,
+              "cpu_total_seconds": 1.034154,
+              "cpu_user_seconds": 0.976222,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.234977
+            },
+            {
+              "cpu_system_seconds": 0.055543,
+              "cpu_total_seconds": 1.056191,
+              "cpu_user_seconds": 1.000648,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.600616
+            },
+            {
+              "cpu_system_seconds": 0.095472,
+              "cpu_total_seconds": 1.11301,
+              "cpu_user_seconds": 1.017538,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.701093
+            },
+            {
+              "cpu_system_seconds": 0.120614,
+              "cpu_total_seconds": 1.094501,
+              "cpu_user_seconds": 0.973887,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.882733
+            }
+          ],
+          "wall_seconds": {
+            "max": 1.882733,
+            "median": 1.600616,
+            "min": 1.234977
+          },
+          "warmup": 1
+        },
+        "frame_meta": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.000445,
+            "total_median": 0.011458,
+            "user_median": 0.011013
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "frame_meta",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 100083,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 592.0,
+            "start": 592.0
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 5.7e-05,
+              "cpu_total_seconds": 0.009446,
+              "cpu_user_seconds": 0.009389,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.009876
+            },
+            {
+              "cpu_system_seconds": 0.000533,
+              "cpu_total_seconds": 0.0132,
+              "cpu_user_seconds": 0.012667,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.020108
+            },
+            {
+              "cpu_system_seconds": 0.000694,
+              "cpu_total_seconds": 0.01259,
+              "cpu_user_seconds": 0.011896,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.019379
+            },
+            {
+              "cpu_system_seconds": 0.000445,
+              "cpu_total_seconds": 0.011458,
+              "cpu_user_seconds": 0.011013,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.023228
+            },
+            {
+              "cpu_system_seconds": 0.000312,
+              "cpu_total_seconds": 0.010956,
+              "cpu_user_seconds": 0.010644,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.01545
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.023228,
+            "median": 0.019379,
+            "min": 0.009876
+          },
+          "warmup": 1
+        },
+        "key_for": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.0,
+            "total_median": 1.5e-05,
+            "user_median": 1.5e-05
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "key_for",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 100083,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 592.0,
+            "start": 592.0
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 2.7e-05,
+              "cpu_user_seconds": 2.7e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 2.4e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 1.8e-05,
+              "cpu_user_seconds": 1.8e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.7e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 1.5e-05,
+              "cpu_user_seconds": 1.5e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.4e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 1.3e-05,
+              "cpu_user_seconds": 1.3e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.3e-05
+            },
+            {
+              "cpu_system_seconds": 0.0,
+              "cpu_total_seconds": 1.3e-05,
+              "cpu_user_seconds": 1.3e-05,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 1.3e-05
+            }
+          ],
+          "wall_seconds": {
+            "max": 2.4e-05,
+            "median": 1.4e-05,
+            "min": 1.3e-05
+          },
+          "warmup": 1
+        },
+        "load": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.004253,
+            "total_median": 0.045673,
+            "user_median": 0.04142
+          },
+          "disk_delta_mb": null,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "load",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 100083,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 592.0,
+            "start": 592.0
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.004253,
+              "cpu_total_seconds": 0.045673,
+              "cpu_user_seconds": 0.04142,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.049959
+            },
+            {
+              "cpu_system_seconds": 0.004149,
+              "cpu_total_seconds": 0.048879,
+              "cpu_user_seconds": 0.04473,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.055669
+            },
+            {
+              "cpu_system_seconds": 0.004691,
+              "cpu_total_seconds": 0.044404,
+              "cpu_user_seconds": 0.039713,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.048098
+            },
+            {
+              "cpu_system_seconds": 0.003967,
+              "cpu_total_seconds": 0.042897,
+              "cpu_user_seconds": 0.03893,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.070349
+            },
+            {
+              "cpu_system_seconds": 0.005103,
+              "cpu_total_seconds": 0.05112,
+              "cpu_user_seconds": 0.046017,
+              "disk_delta_mb": null,
+              "disk_end_mb": null,
+              "disk_start_mb": null,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.0709
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.0709,
+            "median": 0.055669,
+            "min": 0.048098
+          },
+          "warmup": 1
+        },
+        "save": {
+          "bytes": null,
+          "cpu_seconds": {
+            "system_median": 0.008881,
+            "total_median": 0.04864,
+            "user_median": 0.039911
+          },
+          "disk_delta_mb": 0.0,
+          "error": "",
+          "measured_repeats": 5,
+          "name": "save",
+          "ok": true,
+          "probe_error": "",
+          "repeats": 5,
+          "rows": 100083,
+          "rss_mb": {
+            "delta": 0.0,
+            "peak": 592.0,
+            "start": 592.0
+          },
+          "runs": [
+            {
+              "cpu_system_seconds": 0.008881,
+              "cpu_total_seconds": 0.04864,
+              "cpu_user_seconds": 0.039759,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 27.873301,
+              "disk_start_mb": 27.873301,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.092106
+            },
+            {
+              "cpu_system_seconds": 0.009852,
+              "cpu_total_seconds": 0.049763,
+              "cpu_user_seconds": 0.039911,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 27.873301,
+              "disk_start_mb": 27.873301,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.12737
+            },
+            {
+              "cpu_system_seconds": 0.021444,
+              "cpu_total_seconds": 0.065173,
+              "cpu_user_seconds": 0.043729,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 27.873301,
+              "disk_start_mb": 27.873301,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.199063
+            },
+            {
+              "cpu_system_seconds": 0.006749,
+              "cpu_total_seconds": 0.047064,
+              "cpu_user_seconds": 0.040315,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 27.873301,
+              "disk_start_mb": 27.873301,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.054769
+            },
+            {
+              "cpu_system_seconds": 0.006926,
+              "cpu_total_seconds": 0.046286,
+              "cpu_user_seconds": 0.03936,
+              "disk_delta_mb": 0.0,
+              "disk_end_mb": 27.873301,
+              "disk_start_mb": 27.873301,
+              "error": "",
+              "ok": true,
+              "rss_delta_mb": 0.0,
+              "rss_end_mb": 592.0,
+              "rss_start_mb": 592.0,
+              "wall_seconds": 0.059209
+            }
+          ],
+          "wall_seconds": {
+            "max": 0.199063,
+            "median": 0.092106,
+            "min": 0.054769
+          },
+          "warmup": 1
+        }
+      },
+      "store_read_seconds": 1.206583,
+      "store_root": "../../../data-real-store",
+      "symbol": "XAUUSD",
+      "timeframe": "H1",
+      "version": {
+        "bumped_key_differs": true,
+        "old_entry_rejected": true,
+        "version": 1
+      }
+    }
+  ],
+  "claims": {
+    "data_sources": [
+      "real_store"
+    ],
+    "kind": "local_measurement",
+    "m2_acceptance": false,
+    "profitability": false,
+    "schema": "scalping.bench.claims/1",
+    "text": "These are local wall/CPU/RSS/disk measurements on one machine at one time. They do not validate a strategy, prove profitability or satisfy M2 acceptance. Load, thermal state, cache warmth and other processes change the numbers; compare runs on the same idle machine instead.",
+    "validation": false
+  },
+  "generated_at": "2026-11-24T17:54:46+00:00",
+  "host": {
+    "cpu_count": 8,
+    "implementation": "CPython",
+    "load_average_at_start": "36.60 32.38 21.88",
+    "machine": "arm64",
+    "note": "local measurements on one machine at one time, from a real parquet store; load_average_at_start and load_average_at_case_start are recorded because other processes change wall time. When load is high, compare same-process ratios and the min/CPU columns before absolute seconds. One heavy job at a time is the intended condition.",
+    "platform": "macOS-27.2.1-arm64-arm-64bit",
+    "processor": "arm",
+    "python": "3.12.13",
+    "total_ram_mb": 8192.0
+  },
+  "repeats": 5,
+  "schema": "scalping.bench.cache/1",
+  "warmup": 1
+}
