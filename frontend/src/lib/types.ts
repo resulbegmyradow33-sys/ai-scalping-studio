@@ -217,13 +217,35 @@ export interface Metrics {
   avg_bars: number;
 }
 
-/** One entry of `GET /api/runs`. */
+/** One entry of `GET /api/runs`; `created_at` is null when the manifest lacks it. */
 export interface RunSummary {
   run_id: string;
   status: string;
-  created_at: string;
+  created_at: string | null;
   steps: number;
   reward_mean: number | null;
+  reward_mean_normalized?: number | null;
+  degenerate?: boolean | null;
+  baseline_hold_net_profit?: number | null;
+}
+
+/** `POST /api/backtest`; the server accepts only these two fields. */
+export interface BacktestRequest {
+  run_id: string;
+  symbol: string;
+}
+
+/**
+ * `POST /api/backtest`: the report path and the run metrics.
+ *
+ * `equity` is optional because the current backend does not send it; the page
+ * renders a curve only when a response actually carries a finite array. The
+ * metrics themselves are `Metrics` with non-finite values serialised as null.
+ */
+export interface BacktestResponse {
+  report_path: string;
+  metrics: Metrics;
+  equity?: number[];
 }
 
 /** One checkpoint of a training curve; `step` is the x axis. */
