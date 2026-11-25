@@ -16,6 +16,7 @@ from scalping.discovery import (
     TrialResult,
     evolve,
 )
+from scalping.discovery.search import _is_tradable
 
 DATASET_ID = "validation:XAUUSD:M5:abcd1234"
 CODE_VERSION = "test-2026-11-23"
@@ -67,6 +68,63 @@ class _BrokenFactory:
 
     def validate(self, candidate: ToyCandidate) -> None:
         raise ValueError("node 9 is outside the toy grammar")
+
+
+class _SequenceFactory:
+    """Proposes a fixed sequence, then repeats the last candidate."""
+
+    def __init__(self, candidates: tuple[ToyCandidate, ...]) -> None:
+        if not candidates:
+            raise ValueError("candidates must not be empty")
+        self._candidates = candidates
+        self._index = 0
+
+    def _next(self) -> ToyCandidate:
+        candidate = self._candidates[min(self._index, len(self._candidates) - 1)]
+        self._index += 1
+        return candidate
+
+    def random(self, rng: np.random.Generator) -> ToyCandidate:
+        return self._next()
+
+    def mutate(self, candidate: ToyCandidate, rng: np.random.Generator) -> ToyCandidate:
+        return self._next()
+
+    def crossover(
+        self, a: ToyCandidate, b: ToyCandidate, rng: np.random.Generator
+    ) -> ToyCandidate | None:
+        return self._next()
+
+    def validate(self, candidate: ToyCandidate) -> None:
+        return None
+
+
+class _TradeCountEvaluator:
+    """Flat candidate scores 0; every other candidate loses what it trades.
+
+    ``ToyCandidate((0,))`` reports zero trades and net profit 0, the exact shape
+    an empty gate used to rank first. Any candidate with a positive node sum
+    reports that many trades and a negative net profit.
+    """
+
+    def evaluate(
+        self,
+        candidate: ToyCandidate,
+        *,
+        dataset_id: str,
+        code_version: str,
+        budget: int,
+    ) -> TrialResult:
+        trades = float(sum(candidate.nodes))
+        return TrialResult(metrics={"net_profit": -trades, "trades": trades}, accepted=True)
+
+
+_FLAT_THEN_LOSING = (
+    ToyCandidate((0,)),
+    ToyCandidate((1,)),
+    ToyCandidate((2,)),
+    ToyCandidate((3,)),
+)
 
 
 def test_search_is_deterministic(tmp_path: Path) -> None:
@@ -250,6 +308,109 @@ def test_minimize_ranks_the_lowest_metric(tmp_path: Path) -> None:
         assert result.accepted == result.trials
 
 
+def test_a_flat_candidate_never_wins_while_others_lose(tmp_path: Path) -> None:
+    config = _config(population=4, generations=1, max_trials=4, patience=None)
+    with _open(tmp_path, "archive") as archive:
+        result = evolve(
+            _SequenceFactory(_FLAT_THEN_LOSING), _TradeCountEvaluator(), archive, config
+        )
+
+    assert result.accepted == 4
+    assert result.tradable == result.accepted - 1, "the zero-trade candidate is ineligible"
+    assert result.best is not None
+    assert result.best_metrics is not None
+    assert result.best_metrics["trades"] == 1.0
+    assert result.best_metrics["net_profit"] == -1.0
+
+
+def test_min_best_trades_is_a_threshold_not_a_zero_check(tmp_path: Path) -> None:
+    config = _config(
+        population=4,
+        generations=1,
+        max_trials=4,
+        patience=None,
+        min_best_trades=2,
+    )
+    with _open(tmp_path, "archive") as archive:
+        result = evolve(
+            _SequenceFactory(_FLAT_THEN_LOSING), _TradeCountEvaluator(), archive, config
+        )
+
+    assert result.tradable == 2, "(1,) trades once and is not eligible either"
+    assert result.best_metrics is not None
+    assert result.best_metrics["trades"] == 2.0
+    assert result.best_metrics["net_profit"] == -2.0
+
+
+def test_fractional_trade_count_is_not_tradable(tmp_path: Path) -> None:
+    class FractionalTradeCountEvaluator:
+        def evaluate(self, candidate, *, dataset_id, code_version, budget):
+            return TrialResult(
+                metrics={"net_profit": 99.0, "trades": 1.5},
+                accepted=True,
+            )
+
+    config = _config(population=2, generations=1, max_trials=2, min_best_trades=1)
+    with _open(tmp_path, "archive") as archive:
+        result = evolve(
+            _SequenceFactory((ToyCandidate((1,)), ToyCandidate((2,)))),
+            FractionalTradeCountEvaluator(),
+            archive,
+            config,
+        )
+
+    assert result.accepted == 2
+    assert result.tradable == 0
+    assert result.best is None
+
+
+@pytest.mark.parametrize("trade_count", [float("nan"), float("inf"), "not-a-number", None])
+def test_tradability_gate_rejects_malformed_counts(trade_count: object) -> None:
+    assert not _is_tradable({"trades": trade_count}, min_trades=1)  # type: ignore[dict-item]
+
+
+def test_min_best_trades_zero_restores_the_flat_best(tmp_path: Path) -> None:
+    config = _config(
+        population=4,
+        generations=1,
+        max_trials=4,
+        patience=None,
+        min_best_trades=0,
+    )
+    with _open(tmp_path, "archive") as archive:
+        result = evolve(
+            _SequenceFactory(_FLAT_THEN_LOSING), _TradeCountEvaluator(), archive, config
+        )
+
+    assert result.tradable == result.accepted, "0 disables the eligibility rule"
+    assert result.best is not None
+    assert result.best_metrics is not None
+    assert result.best_metrics["trades"] == 0.0
+    assert result.best_metrics["net_profit"] == 0.0
+
+
+def test_min_best_trades_leaves_budget_and_dedup_untouched(tmp_path: Path) -> None:
+    """The eligibility rule changes best selection, not attempts or identity."""
+    base = _config(population=4, generations=3, max_trials=20)
+    strict = _config(population=4, generations=3, max_trials=20, min_best_trades=1)
+
+    with _open(tmp_path, "loose") as archive:
+        loose_result = evolve(ToyFactory(), ToyEvaluator(threshold=0.0), archive, base)
+        loose_trials = _trials(archive)
+    with _open(tmp_path, "strict") as archive:
+        strict_result = evolve(ToyFactory(), ToyEvaluator(threshold=0.0), archive, strict)
+        strict_trials = _trials(archive)
+
+    assert (strict_result.trials, strict_result.skipped, strict_result.accepted) == (
+        loose_result.trials,
+        loose_result.skipped,
+        loose_result.accepted,
+    )
+    assert strict_result.tradable == strict_result.accepted
+    assert strict_trials == loose_trials
+    assert strict_result.best_id == loose_result.best_id
+
+
 def test_evaluator_crash_propagates(tmp_path: Path) -> None:
     config = _config(population=2, generations=2, max_trials=10)
     with (
@@ -279,6 +440,16 @@ def test_search_result_rejects_inconsistent_counts() -> None:
             skipped=0,
             accepted=2,
         )
+    with pytest.raises(ValueError, match="tradable cannot exceed accepted"):
+        SearchResult(
+            dataset_id=DATASET_ID,
+            code_version=CODE_VERSION,
+            seed=1,
+            trials=1,
+            skipped=0,
+            accepted=1,
+            tradable=2,
+        )
     with pytest.raises(ValueError, match="stop_reason"):
         SearchResult(
             dataset_id=DATASET_ID,
@@ -302,6 +473,10 @@ def test_config_validation() -> None:
         _config(selection_metric='net"profit')
     with pytest.raises(ValueError, match="max_trials"):
         _config(max_trials=0)
+    with pytest.raises(ValueError, match="min_best_trades"):
+        _config(min_best_trades=-1)
+    with pytest.raises(TypeError, match="min_best_trades"):
+        _config(min_best_trades=True)
 
 
 def test_trial_result_invariants() -> None:

@@ -596,6 +596,40 @@ The docs table in `docs/autonomous-system-audit-2026-11-24.md:185-192` already
 labels five of these correctly; the panel and the two API payloads are the
 remaining user-facing gaps.
 
+### 6.1 Status after issue #139
+
+The user-facing gaps 1–10 and 13 are implemented on `fix/legacylabels`; the
+analysis above is kept as the before-state.
+
+| Gap | Now |
+|---|---|
+| 1, 2 | `frontend/src/components/strategy-card.tsx` heading is "Strateji kartı" with a visible `legacy baseline` badge (`legacy-badge.tsx`). The state chip says `legacy fallback` and maps `legacy_fallback: false` to `NO TRADE`. |
+| 3 | The no-card hint names the legacy fallback and the NO TRADE case; it never calls the path validated. |
+| 4 | `frontend/src/app/page.tsx` passes `hint="legacy baseline"` to the strategy stat when `isLegacyStrategy` matches (`lib/strategy-labels.ts`). |
+| 5 | `frontend/src/app/training/page.tsx` badges the bandit heading and the table caption. |
+| 6 | `frontend/src/app/paper/page.tsx` renders the badge for legacy session labels in both the table and the detail fact. |
+| 7 | `SimulationRunner.strategy_card` (`backend/src/scalping/api/runner.py`) now returns `classification` (`legacy`/`fallback`), `validation: "legacy-heuristic"`, `active_rule`, `legacy_fallback` and a safe `fallback_reason`; a card that cannot be built reports `active: false` with `strategy_card_not_buildable`. |
+| 8 | Decision messages carry `classification`; the disabled fallback adds `no_trade: true` and `reason: "legacy_fallback_disabled"`. |
+| 9 | Not changed in #139: `PaperSessionCreate.strategy` still accepts any string. The UI labels known legacy values instead of validating them. |
+| 10 | `frontend/src/lib/types.ts` documents the legacy rule and adds the classification/fallback fields to `StrategyCard`. |
+| 13 | `docs/live-strategy.md` is retitled "Legacy baseline: …" and documents the classification contract, the `--no-legacy-fallback` flag and the audit log. |
+
+Also in #139:
+
+- `backend/src/scalping/strategy/card.py` writes `classification: "legacy"` into
+  every saved card, so a stored artifact labels itself.
+- `POST /api/strategy/calibrate` appends `runs/strategy_calibration_audit.jsonl`
+  (`at`, `actor`, `dry_run`, `result`, `card_written`, `classification`) through
+  `strategy.calibrate.record_calibration`; `backend/scripts/nightly_calibrate.py`
+  calls the same helper.
+- The 5-bar M1 fallback sits behind `SimulationRunner(allow_legacy_fallback=...)`
+  / `serve --legacy-fallback|--no-legacy-fallback`, default on. Legacy modules
+  are untouched; the flag only decides whether the fallback may trade.
+
+Still open from this table: row 9 (session `strategy` validation), row 11/12
+(script report labels), 14/15 (older architecture/paper docs). They are outside
+the #139 scope.
+
 ---
 
 ## 7. Unverified items

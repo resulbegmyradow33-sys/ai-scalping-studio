@@ -86,6 +86,54 @@ Validation reports:
 Accuracy alone is not accepted. A model that beats the baseline on log loss but
 loses money after costs is still rejected.
 
+## Temperature scaling (optional)
+
+`ml/calibration.py` can fit one multiclass temperature `T > 0` so that
+`p_T = softmax(log(p) / T)`. For `p = softmax(z)` this is exactly
+`softmax(z / T)`: `T > 1` softens an overconfident model, `T < 1` sharpens an
+underconfident one, and `T = 1` is the identity. The fit minimises multiclass
+log loss with a deterministic grid over `log T` plus a golden-section
+refinement; it uses no scipy and no random seed. The search range is
+`T ∈ [0.05, 20]`, and a flat objective keeps `T = 1` instead of drifting to a
+grid edge.
+
+```bash
+uv run python -m scalping.cli ml train ... --calibrate temperature
+```
+
+The fit runs on **validation rows only**. The test split is never used to fit
+and is not re-scored with the temperature, so `test_metrics` stays the raw
+model output. The report gains a `calibration` object:
+
+```json
+{
+  "method": "temperature",
+  "temperature": 1.42,
+  "fitted_on": "validation",
+  "rows": 4427,
+  "improved": true,
+  "before": {"log_loss": 0.694, "brier": 0.25, "ece": 0.043, "mce": 0.08},
+  "after":  {"log_loss": 0.691, "brier": 0.249, "ece": 0.021, "mce": 0.05}
+}
+```
+
+`before` and `after` are measured on the same validation rows that were used
+to fit `T`, so `after` is optimistic: it is an in-sample view of the
+calibration, not an out-of-sample validation of it. The honest check is to fit
+on one window and report on a later untouched window, which this slice does not
+do yet.
+
+The temperature optimises log loss, so `after.log_loss <= before.log_loss` by
+construction (the search includes `T = 1`). ECE, MCE and Brier usually improve
+but are not guaranteed to: a single number cannot fix a model whose ranking is
+wrong, and temperature scaling preserves the predicted class and the ranking of
+class probabilities. It cannot add information.
+
+Promotion evidence still reads the recorded probabilities and metrics. The
+headline `validation` and `test` blocks keep their raw numbers, and the
+`calibration` object is a separate diagnostic; a fitted temperature never
+substitutes for walk-forward, cost-stress or OOS evidence.
+
 ## Commands
 
 ```bash
@@ -285,8 +333,9 @@ net/PF/expectancy/drawdown/cost fields as every other strategy and a hold
 baseline, and repeats the run at the requested cost multipliers. The test split
 is available with `--split test`, but should be read once per candidate.
 
-Limitations of this first slice: no probability calibration gate and the
-threshold policy is not trained end-to-end as a trading objective.
+Limitations of this first slice: `--calibrate temperature` reports a fitted
+temperature but it is not a promotion gate, and the threshold policy is not
+trained end-to-end as a trading objective.
 
 ## Regime breakdown
 
@@ -437,7 +486,7 @@ The CLI writes:
 ```
 runs/ml/ml-<model>-<dataset-suffix>/
 ├── model.joblib   # estimator + classes + selected columns
-└── metrics.json   # dataset id, spec, metrics, baseline, split counts
+└── metrics.json   # dataset id, spec, metrics, baseline, split counts, calibration
 ```
 
 An API run owns a directory named by its opaque token and additionally keeps
@@ -517,3 +566,6 @@ log loss alone did not.
   real data; the gap must be measured per dataset.
 - Anomaly scores and their AUC against large moves are diagnostics. No anomaly
   run has been turned into a validated trading policy, and none may be promoted.
+- No out-of-sample calibration check: the temperature is fitted and reported
+  on the same validation rows. Calibration is not an edge and cannot repair a
+  model that has none.

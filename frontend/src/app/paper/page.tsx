@@ -16,8 +16,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
+import { LegacyBadge } from "@/components/legacy-badge";
 import { ApiError, api } from "@/lib/api";
 import { formatMoney, formatNumber, formatTs } from "@/lib/format";
+import { isLegacyStrategy } from "@/lib/strategy-labels";
 import type {
   PaperEquityPoint,
   PaperOrder,
@@ -112,7 +114,7 @@ function Fact({
   mono = false,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   testId?: string;
   mono?: boolean;
 }) {
@@ -639,7 +641,14 @@ export default function PaperPage() {
                     <td className="px-3 py-1.5 text-slate-300">
                       {item.symbol} / {item.timeframe}
                     </td>
-                    <td className="px-3 py-1.5 text-slate-300">{item.strategy}</td>
+                    <td className="px-3 py-1.5 text-slate-300">
+                      <span className="flex flex-wrap items-center gap-1">
+                        {item.strategy}
+                        {isLegacyStrategy(item.strategy) && (
+                          <LegacyBadge testId="paper-row-legacy" />
+                        )}
+                      </span>
+                    </td>
                     <td className="break-all px-3 py-1.5 font-mono text-slate-300">
                       {item.model_version ?? "—"}
                     </td>
@@ -858,7 +867,18 @@ export default function PaperPage() {
                     data-testid="paper-attribution"
                     className="grid grid-cols-1 gap-x-4 gap-y-1 text-xs"
                   >
-                    <Fact label="Strateji" value={summary.strategy} testId="paper-strategy" />
+                    <Fact
+                      label="Strateji"
+                      value={
+                        <span className="flex flex-wrap items-center gap-1">
+                          {summary.strategy}
+                          {isLegacyStrategy(summary.strategy) && (
+                            <LegacyBadge testId="paper-detail-legacy" />
+                          )}
+                        </span>
+                      }
+                      testId="paper-strategy"
+                    />
                     <Fact
                       label="Model sürümü"
                       value={summary.model_version ?? "—"}

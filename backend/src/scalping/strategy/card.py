@@ -23,6 +23,7 @@ from typing import Any
 import polars as pl
 
 __all__ = [
+    "CARD_CLASSIFICATION",
     "CARD_VERSION",
     "STRATEGY",
     "PolicyCard",
@@ -38,6 +39,10 @@ CARD_VERSION: int = 1
 
 #: The strategy the card describes.
 STRATEGY: str = "flow_momentum"
+
+#: Every card this module can load is a legacy incumbent (issue #139). The
+#: field is written into the card so a stored artifact says so on its own.
+CARD_CLASSIFICATION: str = "legacy"
 
 _TIMEFRAMES: frozenset[str] = frozenset({"M1", "M5", "M15", "M30", "H1", "H4", "D1"})
 
@@ -109,6 +114,7 @@ class PolicyCard:
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": self.version,
+            "classification": CARD_CLASSIFICATION,
             "strategy": self.strategy,
             "symbol": self.symbol,
             "params": asdict(self.params),

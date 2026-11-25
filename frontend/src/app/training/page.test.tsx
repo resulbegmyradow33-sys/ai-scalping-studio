@@ -129,6 +129,7 @@ describe("TrainingPage", () => {
     expect(state.getRun).toHaveBeenCalledWith("b");
     expect(container.querySelectorAll("polyline")).toHaveLength(4);
     expect(screen.getByTestId("bandit-weights").querySelectorAll("tbody tr")).toHaveLength(5);
+    expect(screen.getByTestId("bandit-legacy")).toHaveTextContent("legacy baseline");
 
     const runsRegion = screen.getByRole("region", { name: "Eğitim koşuları" });
     expect(runsRegion).toHaveAttribute("tabindex", "0");
