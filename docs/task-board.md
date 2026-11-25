@@ -90,7 +90,7 @@ branches; cite them as evidence, not as repository files.
 - [ ] Real providers for EURUSD, GBPUSD, USDJPY, AUDUSD, NAS100, US30, USOIL,
       BTCUSD. **BLOCKED on free sources/licences** (issue #15).
 - [x] Statistical outlier detection and cross-source reconciliation.
-- [ ] Tick table layer for querying ticks without pre-aggregation.
+- [x] Tick table layer for querying ticks without pre-aggregation (`TickStore`).
 - [ ] Data-quality report in the dashboard.
 - [x] Per-symbol sessions enforced in the simulator.
 - [x] Chunked CSV parse; frame still materialised (a 4 GB file still needs ~6 GB).
