@@ -5,8 +5,10 @@ Every command and flag was checked against the parser (top-level `--help` and
 `backend/src/scalping/cli.py`) and executed where the text says "verified".
 Anything not executed is marked **[UNVERIFIED]**.
 
-Snapshot: branch `feat/runbook2`, base `main` at `626409f` (2026-11-24).
-The system is paper-only. Real-money execution is disabled in code.
+Snapshot: branch `feat/finaldocs`, base `main` at `54eef5e` (2026-11-25,
+#220). Sections 2.6, 2.7 and 3.2 cover the runtime promotion command and the
+paper scheduler merged in #218/#220. The system is paper-only. Real-money
+execution is disabled in code.
 
 ## 1. Prerequisites and install
 
@@ -177,11 +179,18 @@ sidecar next to the bundle (`<bundle stem>.spec.json`).
 
 Expected keys: `persisted`, `symbol`, `timeframe`, `dataset_id`,
 `dataset_checksum`, `artifact`, `bundle`, `spec`, `evidence_checksum`,
-`schema_version`, `folds`, `validation_end_row`, `test_start_row`.
+`schema_version`, `source`, `synthetic`, `folds`, `validation_end_row`,
+`test_start_row`.
 
 The bundle itself contains `aggregate`, `folds[]`, `splits`, `policy`,
-`checksum`, `locked_oos`, `spec_hash`, `trial_count`, `search_budget` and
-identity fields. `locked_oos` is `null` until a real holdout is attached.
+`checksum`, `locked_oos`, `spec_hash`, `trial_count`, `search_budget`,
+`source`, `synthetic` and identity fields. `locked_oos` is `null` until a real
+holdout is attached. `source`/`synthetic` come from the dataset sidecar; a
+config/manifest disagreement is a `provenance_mismatch` refusal, and an unknown
+dataset is never silently recorded as real. From this point on, promotion
+refuses a bundle whose provenance is missing (`provenance_unknown`) or
+synthetic (`synthetic_data`). Evidence built before #216 is schema v3 and must
+be rebuilt; the strict reader refuses it rather than guessing provenance.
 
 `--stress ""` is refused: `missing_cost_stress: missing_cost_stress: at least
 one cost-stress multiplier must be greater than 1.0` (the prefix is duplicated
@@ -203,15 +212,28 @@ A tampered bundle is refused before recomputation with
 `{"error": "checksum_mismatch: bundle checksum '...' does not match '...'"}`,
 exit code `2`.
 
-### 2.6 Promotion: production policy versus test policy
+### 2.6 Promotion: the owner-approved runtime sequence
 
 `discovery promote` is the runtime call site for DSL evidence promotion. It is
 the only CLI path, and only a registered production policy may run it.
 `PROMOTION_V1` is the only entry in `PRODUCTION_POLICIES`. The legacy
 `/api/strategy/calibrate` path promotes the old card; it is not this path.
 
-Dry run first. It evaluates the policy and writes neither the archive nor the
-holdout ledger:
+Run the four steps in order. Step 3 is the only irreversible one.
+
+**Step 1 — persist evidence.** Complete §2.4 first and confirm the bundle
+records real provenance (`source` names the data, `synthetic` is `false`).
+`locked_oos: null` is expected here: the holdout is still sealed.
+
+```bash
+uv run --project backend python -m scalping.cli discovery evidence \
+  --root data --symbol XAUUSD --timeframe M1 \
+  --spec runs/candidate.spec.json \
+  --out runs/evidence.json
+```
+
+**Step 2 — dry run.** Evaluates `PROMOTION_V1` and writes neither the archive
+nor the holdout ledger. Always run this first.
 
 ```bash
 uv run --project backend python -m scalping.cli discovery promote \
@@ -223,13 +245,19 @@ uv run --project backend python -m scalping.cli discovery promote \
   --dry-run --out runs/promotion.dryrun.json
 ```
 
-A real promotion that needs the locked holdout is a **one-shot, owner-approved**
-act. The evidence must pass every non-holdout check first; the holdout is spent
-only when both flags below are present. The token is read from a file or an
-environment variable and is never printed:
+A dry run that is rejected, or that reports `missing_locked_oos`, is the
+expected outcome until step 3. **Do not run step 3 to "see what happens".**
+
+**Step 3 — the one-shot holdout spend.** This is a governance act, not a test.
+The evidence must pass every non-holdout check first; the holdout is spent only
+when `--spend-holdout` and a non-empty owner token are both present. The token
+is read from the environment or a `0600` file, checked only for
+non-emptiness, and never printed, stored or echoed:
 
 ```bash
-# token file: one line, chmod 600, never committed
+# owner supplies the token out of band; one line, chmod 600, never committed
+export SCALPING_APPROVAL_TOKEN="$(cat ~/.secrets/xauusd-approval.token)"
+
 uv run --project backend python -m scalping.cli discovery promote \
   --archive runs/discovery/discovery.sqlite \
   --candidate "<candidate_id from discovery run>" \
@@ -238,14 +266,45 @@ uv run --project backend python -m scalping.cli discovery promote \
   --scope XAUUSD:M1 \
   --reason "owner approved the one-shot holdout spend" \
   --spend-holdout \
-  --approval-token-file ~/.secrets/xauusd-approval.token \
+  --approval-token-env SCALPING_APPROVAL_TOKEN \
   --out runs/promotion.json
 ```
 
-or `--approval-token-env SCALPING_APPROVAL_TOKEN`. The ledger is
-`runs/discovery/holdout.sqlite`, beside the archive. A dataset build gets exactly
-one evaluation: a second attempt exits `2` with `holdout_spent`, and a failure
-after the unlock leaves the holdout spent with no result.
+`--approval-token-file ~/.secrets/xauusd-approval.token` is the equivalent
+file form; the two flags are mutually exclusive. The ledger is
+`runs/discovery/holdout.sqlite`, beside the archive.
+
+Safety warnings for step 3:
+
+- **One-shot.** One spend per `(dataset_id, dataset_checksum)`. A second
+  attempt exits `2` with `holdout_spent`, even if the first evaluation failed.
+  A failure after the unlock leaves the holdout spent with no result.
+- **No token logging.** Never pass the token as an argument, never `echo` it,
+  never commit it, and never add it to a log or the `--out` record. Prefer
+  `--approval-token-env`; delete the exported variable after the command
+  (`unset SCALPING_APPROVAL_TOKEN`) if the shell is shared.
+- **No retries.** Do not delete or edit the ledger, rebuild the dataset to get a
+  new checksum, or mint a second token to repeat a losing evaluation. That is
+  tampering, not a retry.
+- **No concurrency.** One promotion at a time; two processes over the same
+  archive and ledger are unsupported.
+
+**Step 4 — paper scheduler.** Only after step 3 accepted a champion. The
+scheduler reads the discovery archive and stored bars and enqueues one
+`paper.advance` per scope for the newest **decidable** bar. A repeat scan of the
+same bar is deduplicated; the ledger cursor is the idempotency boundary, so a
+restart cannot double-advance:
+
+```bash
+uv run --project backend python -m scalping.cli orchestrator run --forever \
+  --schedule-paper \
+  --db runs/orchestrator.sqlite3 --root data --runs-root runs --archive-root data
+```
+
+Without an evidence champion it records `paper.advance_refused` and enqueues
+nothing. It never reads a live feed or invents a bar: if the newest stored bar
+is the provisional tail, the scope waits for the next one. A gap still reaches
+the continuous runner unchanged under the default `strict` policy.
 
 Exit codes: `0` accepted, `1` rejected by the policy, `2` refused (non-production
 policy, missing approval, spent holdout, identity mismatch, missing dataset or
@@ -295,7 +354,11 @@ Rules enforced by the call, verified on the probe bundle:
 - the rejection list is returned in `PromotionRefused`, e.g.
   `min_positive_fold_fraction; min_expectancy_r; min_profit_factor;
   min_ci_lower_r; min_bootstrap_samples; cost_stress; stress_degradation;
-  missing_locked_oos`.
+  missing_locked_oos`;
+- a bundle with no provenance is rejected with `provenance_unknown`, and a
+  bundle measured on synthetic data with `synthetic_data`; a candidate whose
+  provenance differs from the incumbent is `champion_provenance_mismatch` (all
+  #216).
 
 A test policy is registered only through a private, test-only context manager.
 Operators cannot use one. "Test policy" in this repository means a weaker policy
@@ -312,7 +375,10 @@ governed champion for `(<symbol>, <timeframe>)` from
 `<runs-root>/discovery/discovery.sqlite`; with no champion or no archive it
 records NO TRADE and touches nothing.
 
-Enqueue (the only current way short of another process doing it):
+Two ways to produce the job: the scheduler reads stored bars and enqueues one
+advance per evidence champion when a new decidable bar exists (§2.6 step 4,
+`--schedule-paper`), or a caller enqueues one explicitly. The scheduler is the
+supported unattended path; the explicit enqueue is for a controlled probe.
 
 ```python
 from pathlib import Path
@@ -348,8 +414,13 @@ With a real champion the same job returns `action: "advanced"`, `session_id`,
 `new_trades`, `realized_pnl`, `balance`, `equity`, `position`, `last_bar_ts`,
 `done`. That path is **[UNVERIFIED]** here because no evidence champion exists.
 
-The HTTP API under `/api/paper/sessions` records a session row; it does not run
-or advance the engine. Creating a session is not paper trading.
+The scheduler refuses a scope with an audit event instead of a job. The reason
+is one of `no_archive`, `archive_unavailable`, `no_champion`,
+`no_evidence_champion`, `invalid_champion`, `invalid_scope`, `no_bars`,
+`bars_unavailable`, `ledger_unavailable`, `warming_up` or `awaiting_bar`.
+Exploratory and manual champions are specifically refused; there is no legacy
+fallback. The HTTP API under `/api/paper/sessions` records a session row; it
+does not run or advance the engine. Creating a session is not paper trading.
 
 ### 2.8 Autonomy status
 
@@ -428,6 +499,15 @@ uv run --project backend python -m scalping.cli orchestrator run --forever \
 # market-data root -> one dataset.build per <symbol>/<timeframe>
 uv run --project backend python -m scalping.cli orchestrator run --forever \
   --watch-data-dir data
+
+# evidence champions + stored bars -> one paper.advance per new decidable bar
+uv run --project backend python -m scalping.cli orchestrator run --forever \
+  --schedule-paper --db runs/orchestrator.sqlite3 \
+  --root data --runs-root runs --archive-root data
+
+# paper ledger -> matured-outcome proposal (no advance)
+uv run --project backend python -m scalping.cli orchestrator run --forever \
+  --watch-paper-ledger runs/paper.sqlite
 ```
 
 `--watch-data-dir` accepts only `<symbol>/<timeframe>/.../<file>.parquet|.csv`.
@@ -435,18 +515,20 @@ A file outside that layout is recorded as `data.trigger_refused` with
 `unknown_layout`, `invalid_symbol` or `unknown_timeframe`; it is not guessed.
 `--watch-dir` and `--watch-data-dir` are mutually exclusive, and
 `--watch-kind dataset.build` is rejected with a pointer to `--watch-data-dir`.
+`--schedule-paper` can be combined with either directory watcher and with
+`--watch-paper-ledger`; it is a CLI error with `--no-scan`.
 
 Data triggers never emit `discovery.run`: a filename cannot supply a gate,
-budget and seed.
+budget and seed. `--schedule-paper` never promotes and never calls a feed; it
+only turns an already-stored, already-decidable bar into a queued advance.
 
 ### 3.3 Controls
 
 Controls are persisted rows in the queue's `state` table and are read on every
-iteration, so they survive a restart. Open PR #175 adds audited local owner
-controls through `GET` and `POST /api/orchestrator/control`. The commands
-below apply after #175 is merged (or while testing its branch). These requests
-change persisted flags only: they do not start/stop the daemon, enqueue jobs,
-cancel jobs, or promote a strategy.
+iteration, so they survive a restart. Audited local owner controls are exposed
+through `GET` and `POST /api/orchestrator/control` (#175, merged). These
+requests change persisted flags only: they do not start/stop the daemon, enqueue
+jobs, cancel jobs, or promote a strategy.
 
 Start the API on loopback (the default):
 
@@ -558,6 +640,8 @@ daemon while the first is alive.
 | Promotion rejected | code `missing_locked_oos`; message `the policy requires a locked out-of-sample section and the bundle has none` | bundle built by `discovery evidence` has `locked_oos: null` | rerun `discovery promote` with `--spend-holdout` and an owner approval token; do not bypass the policy |
 | Promotion refuses to spend | code `approval_missing` or `holdout_not_spent` | no token file/env, or `--spend-holdout` omitted | supply both; the holdout is one-shot and owner-approved |
 | Promotion refused outright | `non_production_policy: only a registered production policy may promote; '<id>' v1 digest ... is not registered` | modified/copied policy, or a test policy | use `PROMOTION_V1` unchanged |
+| Promotion refuses provenance | code `provenance_unknown` or `synthetic_data` | bundle predates schema v4, or the dataset is synthetic | rebuild evidence on real bars; do not add an `allow_synthetic` production policy |
+| PDF import fails | `PDF text extraction needs the optional pypdf extra: run 'uv sync --extra pdf' ...` | extra not installed | `cd backend && uv sync --extra pdf`; the file is preserved either way |
 | Paper advance job fails as retryable | job error prefix `bar_gap:`; message `session '...': missing bar at <ts> before <ts>` | a bar is missing at the timeframe cadence | ingest the missing bar, then let the retry run. `bar_order`, `session_conflict`, `continuous_refused` are permanent |
 | Holdout cannot be spent twice | `holdout_spent: holdout was already spent at <ts>; a second spec cannot reuse it` | the one-shot ledger already spent this `(dataset_id, dataset_checksum)` | use a new dataset checksum; do not delete the ledger |
 | Autonomy page/API shows no numbers | `configured: true, readable: false` | wrong path, corrupt SQLite, missing schema/column | check the configured paths and file permissions; a missing store must not be read as zero |
@@ -575,11 +659,14 @@ do not leave an unattended run on it.
    execution model. Do not add a broker path.
 2. **Paper only.** Promotion selects a DSL champion for paper. There is no
    order route, no API key and no live adapter.
-3. **Synthetic provenance is recorded, not enforced.** Imports write
-   `synthetic: true|false` into `_meta/<symbol>/<timeframe>.json`. Verified gap:
-   the dataset artifact and evidence bundle carry no provenance field, and
-   promotion does not reject synthetic input. Treat "no promotion from synthetic
-   bars" as an operator rule until the code enforces it.
+3. **Synthetic provenance is enforced.** Imports write `synthetic: true|false`
+   into `_meta/<symbol>/<timeframe>.json`. Since #216 the dataset
+   manifest/artifact and the evidence bundle (schema v4) carry `source` and
+   `synthetic`; `PROMOTION_V1` refuses `provenance_unknown` and
+   `synthetic_data`, and a candidate cannot be compared with a champion of
+   different provenance. Do not build evidence on synthetic bars and call it
+   market evidence; the policy will refuse it, and a test policy that allows it
+   is not a promotion path.
 4. **Holdout is one-shot.** One spend per `(dataset_id, dataset_checksum)`, even
    if the evaluation fails. Deleting or editing the holdout ledger is
    tampering, not a retry.
@@ -589,9 +676,8 @@ do not leave an unattended run on it.
 6. **Fail closed.** No champion, unreadable champion, invalid spec, missing
    evidence or missing archive means NO TRADE with a reason. Never add a fallback
    to the legacy handwritten rule in the autonomous path. The interactive API
-   replay has a separate migration-only M1 momentum fallback enabled by default.
-   Open PR #177 adds an explicit switch for fail-closed UI testing; after it is
-   merged, use:
+   replay has a separate migration-only M1 momentum fallback. The explicit
+   fail-closed switch (#177, merged) is:
 
    ```bash
    uv run --project backend python -m scalping.cli serve --root data --no-legacy-fallback
@@ -618,20 +704,27 @@ do not leave an unattended run on it.
 | `discovery run` | bounded search + decision | `dataset_id`, `validation`, `trials`, `accepted`, `decision`, `reason`, `best`, `baseline`, `comparison`, `archive` |
 | `discovery evidence` | persist artifact + bundle | `persisted`, `dataset_checksum`, `artifact`, `bundle`, `spec`, `evidence_checksum`, `folds` |
 | `discovery reproduce` | checksum re-derivation | `reproduced`, `checksum`, `expected`, `mismatches` |
-| `discovery promote` | policy evaluation and governed champion | `status`, `accepted`, `codes`, `policy_digest`, `decision`, `holdout`, `champion` |
+| `discovery promote` | policy evaluation and governed champion | `status`, `accepted`, `dry_run`, `scope`, `codes`, `policy_digest`, `decision`, `holdout`, `champion`, `approval_source` |
 | `acceptance run` | synthetic end-to-end | `status`, `claims`, `stages[]`, `report`, `synthetic` |
 | `serve` | API | `status`, `host`, `port` |
 | `orchestrator run --once` | one tick | `status`, `tick` |
 | `orchestrator run --forever` | supervised loop | `started` / `stopped` / `failed` + `daemon` |
+| `orchestrator run --schedule-paper` | enqueue advances for evidence champions | `started` / `stopped`; per-scan refusals in `events` |
 | `GET /api/autonomy/status` | read-only dashboard | `paper`, `orchestrator`, `champions`, `discoveries`, `data` |
-| `GET /api/orchestrator/control` (PR #175) | read persisted owner controls | `configured`, `readable`, `paused`, `safe_mode`, `research_disabled`, `last_change` |
-| `POST /api/orchestrator/control` (PR #175) | audited local control transition | same state fields; `409` unavailable DB, `422` invalid request |
+| `GET /api/discovery/summary` | archive totals + champions | `configured`, `readable`, candidate/trial/decision totals, `champions[]` |
+| `GET /api/discovery/candidates` | bounded candidate list | `configured`, `readable`, `items[]`, `total` |
+| `GET /api/discovery/candidates/{id}` | one candidate + trials + lineage | `candidate`, `trials[]`, `lineage`, `decisions[]`; `404` unknown, `409` unreadable |
+| `GET /api/discovery/trials` | bounded trial window | `configured`, `readable`, `items[]`, `total` |
+| `GET /api/orchestrator/control` (#175) | read persisted owner controls | `configured`, `readable`, `paused`, `safe_mode`, `research_disabled`, `last_change` |
+| `POST /api/orchestrator/control` (#175) | audited local control transition | same state fields; `409` unavailable DB, `422` invalid request |
 | `GET /api/autonomy/jobs` | queue window | `configured`, `readable`, `items[]`, `total` |
 | `GET /api/paper/sessions` | ledger sessions | `items[]`, `total`, `limit`, `offset` |
 
 Job kinds handled by the daemon: `knowledge.ingest`, `dataset.build`,
 `discovery.run`, `paper.advance`, `paper.analyse`. There is no handler that
-promotes, rolls back, trains or sends an order.
+promotes, rolls back, trains or sends an order. Promotion stays an explicit CLI
+act (`discovery promote`); the scheduler only enqueues `paper.advance` for an
+already-governed evidence champion.
 
 ## 7. Do not do
 
@@ -648,6 +741,11 @@ promotes, rolls back, trains or sends an order.
 - **Do not delete failed experiments.** Failed runs are evidence; record them.
 - **Do not disable or weaken the promotion policy, the holdout ledger or the
   risk limits** to make a candidate pass.
+- **Do not spend the locked holdout without explicit owner approval.** One
+  `--spend-holdout` per `(dataset_id, dataset_checksum)`; a retry after a
+  failure is not a retry, it is tampering.
+- **Do not pass, echo, log or commit the approval token.** Use
+  `--approval-token-env` or a `0600` file; the decision record never carries it.
 - **Do not run two daemons on one queue database.**
 - **Do not use `--profile none` for an unattended run.**
 - **Do not treat synthetic acceptance as validation or profitability.**
@@ -657,6 +755,10 @@ promotes, rolls back, trains or sends an order.
 ## 8. Verification log
 
 Executed on this branch, from the repository root unless noted:
+
+The first block was captured against base `626409f` (2026-11-24). Commands added
+later (#215–#220) are documented from the parser definitions and their test
+modules; they were not executed end-to-end here and are marked accordingly.
 
 | Check | Result |
 |---|---|
@@ -681,5 +783,6 @@ Executed on this branch, from the repository root unless noted:
 
 Not executed or not reproducible here, marked in place: a real XAUUSD run, a
 successful promotion, a holdout spend/attach outside tests, paper advance with a
-real evidence champion, the libomp failure, `npm ci`, and any frontend build.
-No runtime, memory or profitability number is claimed.
+real evidence champion, the `--schedule-paper` daemon on a real champion, the
+libomp failure, `npm ci`, and any frontend build. No runtime, memory or
+profitability number is claimed.

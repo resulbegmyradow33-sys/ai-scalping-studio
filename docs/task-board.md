@@ -7,26 +7,30 @@ with a `PARTIAL` note. GitHub phase issues mirror these lists.
 Legend: `[x]` done · `[ ]` todo · `PARTIAL` some code exists but the task is not
 met end to end · `BLOCKED` missing data/dependency/decision.
 
-## Snapshot — 2026-11-25, main `06c853c`
+## Snapshot — 2026-11-25, main `54eef5e`
 
-Verified `main`: `06c853c88b83b29c31b7478702fc9bb848f2e840` (#191). CI is green
-at `50fbca6` (run `45550807353`: backend `2,320 passed, 3 skipped`; frontend
-`263 passed`; CodeQL green); `06c853c` adds two documentation files only, so
-those counts describe the same code. Test counts are not repeated per phase
+Verified `main`: `54eef5e7a25854c78f2bef2d26e4c42d50f3ab5e` (#220). CI run
+`45627617157` is green at this SHA: backend `2,435 passed, 8 skipped`, lint
+clean, mypy `153 source files`; frontend `287 passed` in 34 files and build
+compiled; CodeQL `45627617898` success. Test counts are not repeated per phase
 below — use that run or a newer CI run, never an estimate.
 
 The autonomous track added more than 20 new modules since the 2026-11-24
-snapshot (`693f8a3`): 14 new backend source modules, 24 new test modules and 10
+snapshot (`693f8a3`): 14 new backend source modules, 24+ new test modules and 10
 frontend source files. A module plus a passing unit test is `implemented`, not
 `validated` and not `paper-traded` (`AGENTS.md`, "Evidence vocabulary").
 
-Present in code at this commit: the evidence-bundle producer
-(#159), fail-closed `PROMOTION_V1` (#117), one-shot holdout (#121), bundle
-reproduction (#130/#169), tradable-best candidate gate (#174), provenance-aware
-paper champion with the continuous runner (#156/#164), paper-completion trigger
+Present in code at this commit: the evidence-bundle producer (#159), fail-closed
+`PROMOTION_V1` (#117), one-shot holdout (#121), bundle reproduction
+(#130/#169), tradable-best candidate gate (#174), provenance-aware paper
+champion with the continuous runner (#156/#164), paper-completion trigger
 (#189), audited local controls (#175), fail-closed legacy UI switch (#177),
 slippage cap and data-quality entry block (#186), M30/H4 context (#187),
-feature ablation (#188) and OOF regime weights (#190).
+feature ablation (#188), OOF regime weights (#190), optional PDF extraction
+(#215), provenance fail-closed through dataset → evidence → promotion (#216),
+read-only discovery archive API (#217), evidence-champion paper scheduler
+(#218), M30/H4 resample boundary tests (#219) and the runtime promotion command
+with one-shot owner approval (#220).
 
 ### Current blockers
 
@@ -36,32 +40,26 @@ Canonical list and per-area evidence: `STATUS.md`.
    a real `locked_oos` section, and `PROMOTION_V1` rejects every bundle. The
    merged real-data H1 attempt (#191) ended `no_trade`; NO TRADE is a valid
    result, not validation.
-2. **No runtime holdout/promotion command.** The CLI exposes only
-   `discovery run|reproduce|evidence`. No `discovery promote`, no orchestrator
-   handler, no HTTP endpoint. The holdout ledger and `promote_with_evidence`
-   are library-only; the only successful promotion in tests uses a helper with
-   `require_production=False`.
-3. **Provenance cannot gate promotion.** `DatasetManifest`,
-   `CandidateEvidence`, the holdout and `promotion.py` carry no
-   `source`/`synthetic`; a synthetic dataset can satisfy every policy check.
-4. **No governed paper champion and no paper scheduler.** No evidence-mode
-   champion exists, so `paper.advance` returns NO TRADE. Nothing enqueues
-   `paper.advance` on a clock or on new bars: the daemon scans data files
-   (→ `dataset.build`) and paper ledgers (→ `paper.outcomes` proposal) only.
-5. **No model edge.** Classical models are at or below the prior baseline; PPO
+2. **The holdout spend is unexercised.** `discovery promote` (#220) is the
+   runtime call site and is tested, including the second-spend refusal, but no
+   owner-approved spend has run against real data. This is the only PARTIAL
+   left in the promotion path; it needs owner approval, not code.
+3. **No governed paper champion and no paper run.** `--schedule-paper` (#218)
+   enqueues `paper.advance` for an evidence champion on a new decidable bar, but
+   no evidence champion exists, so every scope is refused and no session runs.
+4. **No model edge.** Classical models are at or below the prior baseline; PPO
    is experimental and mostly degenerate; no committed neural checkpoint.
-6. **No target-hardware acceptance.** No measured full loop on the M2 8 GB
+5. **No target-hardware acceptance.** No measured full loop on the M2 8 GB
    machine; the bench paper stage failed with `BarGapError`; walk-forward is
    unmeasured.
-7. **Documentation drift.** Snapshots below lag the code in places; this
+6. **Documentation drift.** Snapshots below lag the code in places; this
    snapshot and the corrected boxes supersede them.
 
-Not on `06c853c`, in progress: fail-closed provenance through dataset →
-evidence → promotion (acceptance step 1), an optional offline PDF parser
-(acceptance step 5; `knowledge/ingest.py` still raises `UnsupportedFormat`), and
-a broader discovery-archive read API (only read-only `/api/autonomy` status and
-champions exist). The three 2026-11-25 assessment reports are on unmerged
-branches; cite them as evidence, not as repository files.
+Closed by the #215–#220 merges: PDF is now an optional extra with page
+references, provenance is fail-closed, the archive has a read-only API, the
+paper scheduler exists, M30/H4 resample boundaries are pinned by tests, and the
+holdout/promotion command exists. What is not closed is the evidence itself:
+holdout spend, champion, paper run.
 
 ## Phase 1 — Audit and documentation
 
@@ -107,6 +105,8 @@ branches; cite them as evidence, not as repository files.
 - [x] Feature availability rules (e.g. signed flow only with tick volumes).
 - [x] H4/M30 multi-timeframe alignment tests (#133): a higher-timeframe value
       is visible only after its bucket closes; chained resampling is pinned.
+      Resample bucket alignment, left-closed boundaries and stored-derivation
+      parity are covered in `test_store.py` (#219).
 - [x] Opt-in M30/H4 higher-timeframe context features with closed-bucket
       causality (#187).
 - [ ] Dataset id wired into every trainer/run config.
@@ -191,7 +191,7 @@ branches; cite them as evidence, not as repository files.
 - [ ] PARTIAL: rule baseline exists in backtest/evaluator; random baseline and
       both in the RL run manifest are open.
 - [ ] PARTIAL: flow mask (#76) is merged; full risk/session/spread/ATR/lot mask
-      and evaluation wiring is #181 (no #181 commit is on `06c853c`). Training
+      and evaluation wiring is #181 (no #181 commit is on `54eef5e`). Training
       still uses plain PPO (no MaskablePPO dependency).
 - [ ] REDUCE position action.
 - [ ] SAC evaluation.
@@ -224,20 +224,24 @@ branches; cite them as evidence, not as repository files.
       backtests ve paper runs tabloları yok.
 - [x] Dataset versioning and checksums (dataset_id + digest).
 - [x] Model versioning, champion pointer and rollback (scope'lu).
-- [ ] PARTIAL: aday → şampiyon kapısı fail-closed promotion policy (#117) ve
-      one-shot locked holdout (#121) ile implemented+tested; #159 ayrıca evidence
-      bundle ve dataset artifact üretiyor. Ancak hiçbir CLI komutu veya
-      orchestrator handler holdout'u harcayıp promote etmiyor; kapı runtime'da
-      çağrılmıyor.
-- [ ] Runtime holdout + promotion command: bundle identity check, pre-holdout
+- [x] Aday → şampiyon kapısı: fail-closed promotion policy (#117), one-shot
+      locked holdout (#121), evidence bundle + dataset artifact (#159),
+      provenance fail-closed (#216) ve runtime `discovery promote` (#220)
+      merged. Gerçek holdout harcaması yapılmadı; o ayrı ve owner onaylı bir act.
+- [x] Runtime holdout + promotion command: bundle identity check, pre-holdout
       policy, one holdout spend, `PROMOTION_V1` re-evaluation,
-      `promote_with_evidence`, archive/champion row and a second-spend refusal.
-      Not on `06c853c`; see `docs/runbook.md` §2.6.
+      `promote_with_evidence`, archive/champion row and a second-spend refusal
+      (#220; `tests/test_discovery_promote.py`). Code merged; **no real spend**
+      — the one-shot token is owner-supplied and has not been used.
+- [ ] PARTIAL: gerçek locked holdout harcaması ve champion kaydı — kod hazır,
+      owner onayı yok. `discovery promote --spend-holdout` yalnızca owner token
+      ile çalışır; gerçek veride denenmedi.
 - [x] Drift detection: features (PSI/KS), predictions and calibration (ECE).
-- [ ] PARTIAL: konfigüre edilebilir scheduler — kalıcı kuyruk, pause/resume/cancel
-      ve daemon döngüsü var (#118); tetikleyiciler veri dosyası (#158) ve matured
-      paper-outcome (#122/#189, proposal only). `paper.advance` için saat/bar
-      tetikleyicisi ve doküman/araştırma tetikleyicileri yok.
+- [x] Konfigüre edilebilir scheduler: kalıcı kuyruk, pause/resume/cancel ve
+      daemon döngüsü (#118); tetikleyiciler veri dosyası (#158), matured
+      paper-outcome (#122/#189, proposal only) ve evidence champion için
+      `paper.advance` (#218, `--schedule-paper`). Scheduler saat/feed okumaz;
+      karar barı store'da kapandıktan sonra tetikler.
 - [ ] PARTIAL: bir ağır iş/RAM bütçesi — NN/ML job slot ve RAM guard var; PPO
       için global slot yok.
 - [ ] Failed training cannot stop paper replay.
@@ -313,9 +317,11 @@ branches; cite them as evidence, not as repository files.
 - [ ] All 15 required documents complete and accurate.
 - [ ] Full backend/frontend tests, lint, types, build, e2e.
 - [ ] End-to-end: import → validate → dataset → train → evaluate → promote/
-      reject → paper → monitor → rollback. The merged #191 attempt ran the chain
-      on real XAUUSD H1 to the promotion gate, recorded NO TRADE and stopped:
-      no holdout spend, no promotion, no paper session.
+      reject → paper → monitor → rollback. All runtime call sites now exist
+      (#216 provenance, #218 scheduler, #220 promote), but the chain has not
+      been validated: the merged #191 attempt ran the chain on real XAUUSD H1 to
+      the promotion gate, recorded NO TRADE and stopped. No holdout spend, no
+      promotion, no paper session.
 - [ ] Acceptance checklist met or each gap documented.
 - [ ] Final report separates implemented / trained / validated / profitable.
 
@@ -373,23 +379,25 @@ branches; cite them as evidence, not as repository files.
       allow no_trade / no_change outcomes.
 - [x] Replay a stored evidence bundle from its identity and refuse settings,
       code-version, dataset or spec drift (#130).
-- [ ] PARTIAL: a fail-closed `PROMOTION_V1` policy compares candidate and
-      incumbent on identical evidence (#117); #159 now supplies its evidence
-      bundle input. Automatic production promotion remains intentionally
-      unconnected pending explicit policy review and acceptance.
+- [x] Fail-closed `PROMOTION_V1` policy compares candidate and incumbent on
+      identical evidence (#117); #159 supplies the evidence bundle input and
+      #220 connects the runtime call site. Promotion is an explicit
+      owner-approved act (`discovery promote`), not an automatic scheduler job.
 - [ ] PARTIAL: no-look-ahead, determinism, lineage and DSL safety tests exist;
-      #169 makes evidence checksums thread-independent. The real XAUUSD H1
-      smoke (#143) correctly chose NO TRADE; it did not validate a strategy.
-      #174 (merged) requires a tradable best candidate; #191 records a second
-      real-data attempt that stopped at the promotion gate.
+      #169 makes evidence checksums thread-independent and #216 pins provenance.
+      The real XAUUSD H1 smoke (#143) correctly chose NO TRADE; it did not
+      validate a strategy. #174 (merged) requires a tradable best candidate;
+      #191 records a second real-data attempt that stopped at the promotion
+      gate.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
-- [ ] PARTIAL: TXT/MD/HTML/DOCX var; PDF kasten desteklenmiyor (opsiyonel parser).
+- [x] TXT/MD/HTML/DOCX var; PDF optional `pypdf` extra ile (`uv sync --extra
+      pdf`), sayfa referanslı (#215). OCR yok.
 - [x] Preserve originals, checksums, source metadata, parser versions and
       page/section references.
-- [ ] PARTIAL: metin, DOCX ve tablo yapısı var (#119); PDF/OCR yok. A pinned
-      offline PDF parser is acceptance step 5, not on `06c853c`.
+- [x] Metin, DOCX, tablo yapısı (#119) ve opsiyonel PDF sayfa çıkarımı (#215)
+      var; OCR yok ve core kurulum `pypdf` içe aktarmaz.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
 - [x] Classify claims, concepts, examples, opinions and empirical observations
       (deterministic heuristic triage, #107; not semantic reading).
@@ -425,19 +433,21 @@ branches; cite them as evidence, not as repository files.
       daemon (#118) defaults to the `m2_8gb` profile, but the plain `Orchestrator`
       still defaults to `AllowAllGuard`, so callers can bypass measurement.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] PARTIAL: #159 now persists evidence bundles and dataset artifacts;
-      #117 supplies the fail-closed promotion policy; #121 protects one-shot
-      holdout; #156 routes `paper.advance` through the continuous runner and
-      evidence-governed champion. #151 proves only synthetic wiring. A complete
-      real-market OOS → reviewed promotion → sustained paper → matured-feedback
-      cycle is still unproven.
+- [ ] PARTIAL: #159 persists evidence bundles and dataset artifacts; #117
+      supplies the fail-closed promotion policy; #121 protects one-shot holdout;
+      #156 routes `paper.advance` through the continuous runner and
+      evidence-governed champion; #216 adds provenance; #218 adds the scheduler;
+      #220 adds the owner-approved promotion command. #151 proves only synthetic
+      wiring. A complete real-market OOS → reviewed promotion → sustained paper
+      → matured-feedback cycle is still unproven.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
-- [ ] PARTIAL: persisted pause/safe-mode/disable-research controls exist in
-      the orchestrator core. #175 adds an audited local HTTP control surface and
+- [x] Persisted pause/safe-mode/disable-research controls exist in the
+      orchestrator core. #175 adds an audited local HTTP control surface and
       #177 adds a fail-closed legacy UI fallback switch; both are merged.
 - [ ] PARTIAL: trigger, recovery, resource refusal ve kontrol testleri var;
-      paper isolation ve uçtan uca döngü yok. `paper.advance` için scheduler yok.
+      `paper.advance` scheduler'ı (#218) var, gerçek paper session yok. Paper
+      isolation ve uçtan uca döngü kanıtlanmadı.
 
 ## Phase 19 — Autonomous paper-trading acceptance
 
@@ -450,9 +460,10 @@ branches; cite them as evidence, not as repository files.
 - [ ] Keep real-money execution disabled; optional MT5 demo remains explicitly
       configured and disabled by default.
 - [ ] Final report distinguishes implemented, tested, trained, validated,
-      paper-traded and profitable; no profitability guarantee. A 2026-11-25
-      report exists on an unmerged branch, and the merged #191 attempt record is
-      a stage-by-stage real-data attempt, not the final acceptance report.
+      paper-traded and profitable; no profitability guarantee.
+      `docs/final-report-2026-11-25.md` is merged and carries a late addendum
+      ("runtime chain complete, not validated"); the merged #191 attempt record
+      is a stage-by-stage real-data attempt, not final acceptance.
 
 ## New project-wide acceptance rule
 
@@ -493,23 +504,30 @@ wins.
 9. **Main is not green.** Stale. `test_api_autonomy.py` passes at `50fbca6`
    (CI run `45550807353`, backend `2,320 passed, 3 skipped`).
 
-### Next work, strict order (updated 2026-11-25)
+### Next work, strict order (updated 2026-11-25, late)
 
-- [ ] Make provenance fail closed through dataset → evidence → promotion:
-      carry `source`/`synthetic`/provenance checksum and reject unknown or
-      synthetic bundles in `PROMOTION_V1`.
-- [ ] Add the runtime holdout + promotion command (CLI and/or handler) that
+- [x] Make provenance fail closed through dataset → evidence → promotion:
+      `source`/`synthetic` carried end to end; `PROMOTION_V1` refuses unknown
+      and synthetic data (#216).
+- [x] Add the runtime holdout + promotion command (CLI and/or handler) that
       spends one holdout, re-evaluates `PROMOTION_V1` and calls
-      `promote_with_evidence`; refuse a second spend.
+      `promote_with_evidence`; refuse a second spend (#220). Code complete; the
+      first real spend still needs owner approval.
 - [ ] Record a real candidate experiment and a deliberately overfit negative
       control; publish the artifacts whether the decision is NO TRADE or a
-      rejection.
-- [ ] Add a `paper.advance` trigger/scheduler so the daemon, not a human,
-      creates advance jobs on new bars; keep the gap policy in the payload.
-- [ ] Add the optional pinned offline PDF parser and record a PDF → page/section
-      → hypothesis run.
+      rejection. **Still open.**
+- [x] Add a `paper.advance` trigger/scheduler so the daemon, not a human,
+      creates advance jobs on new bars (#218, `--schedule-paper`). The scheduler
+      reads stored bars, never a live feed; a gap still reaches the strict
+      runner unchanged.
+- [x] Add the optional pinned offline PDF parser (#215): `pypdf` is an optional
+      extra and each page is a section with a page reference. Extraction is
+      merged.
+- [ ] PARTIAL: a recorded PDF → page/section → hypothesis run is not published.
+      The parser exists; the end-to-end document-to-hypothesis artifact is open.
 - [ ] Prove the complete loop on real XAUUSD data within measured M2 8 GB
       limits, and publish one report that does not promote lower evidence rungs.
+      **Still open, and it now requires an owner-approved holdout spend.**
 
 Do not mark an item complete because a module, issue, PR or unit test exists.
 Require code integration, regression tests and reproducible acceptance evidence.

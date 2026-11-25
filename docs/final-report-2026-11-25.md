@@ -244,3 +244,33 @@ The second command needs a concrete spec sidecar and a tradable candidate; it wi
 - `docs/secret-audit-2026-11-24.md` and `docs/security-review-2026-11-24.md` are the security gap reports.
 - `docs/autonomous-system-audit-2026-11-24.md` and `docs/current-state-addendum-2026-11-24.md` are historical snapshots; they predate the evidence producer and the green CI. Do not quote their “#136 open” or “main is red” statements as current.
 - `STATUS.md` was minimally corrected in this change: the verified `main` hash and CI line now name `50fbca6` and the green runs, and the section that listed five merged PRs as “open work” now says they merged before this commit.
+
+## Addendum — 2026-11-25 (late): runtime chain complete, not validated
+
+**Commit:** `54eef5e7a25854c78f2bef2d26e4c42d50f3ab5e` (#220). This addendum records what merged after the report body was written at `50fbca6`: #215 optional PDF extraction, #216 provenance fail-closed, #217 read-only discovery API, #218 paper scheduler, #219 M30/H4 resample tests, #220 runtime promotion command and #178 audited gap policy.
+
+**The claim matrix has not changed.** Every verdict in §0 still stands:
+
+- **Validated: No.** No locked holdout has been spent and no bundle carries a real `locked_oos` section.
+- **Paper-traded: No.** No evidence champion exists, so no paper session has run one.
+- **Profitable: No**, and not claimed. The forward sample is still 24 legacy-card trades with a CI crossing zero.
+- **Trained: unchanged.** The same local fits exist; no committed artifact and no governed model.
+
+**What is complete now is the runtime chain, not the evidence.** Every link from a stored dataset to a scheduled paper advance has a runtime call site:
+
+| Link | At `50fbca6` | At `54eef5e` |
+|---|---|---|
+| Provenance | Store sidecar only; dataset/evidence blind | `source`/`synthetic` carried through dataset artifact, evidence schema v4, holdout and promotion; `PROMOTION_V1` refuses `provenance_unknown` and `synthetic_data` (#216) |
+| Promotion | Library-only, no call site | `discovery promote` and `promote_evidence`: identity check, dry run, one-shot holdout spend behind a non-empty owner token, second-spend refusal, decision record to `--out` (#220) |
+| Paper scheduling | Human/caller enqueued every advance | `orchestrator run --schedule-paper` enqueues one `paper.advance` per evidence champion when a new decidable stored bar exists (#218) |
+| Archive review | `/api/autonomy/*` status only | `GET /api/discovery/summary|candidates|candidates/{id}|trials`, read-only with `mode=ro` (#217) |
+| PDF | `.pdf` refused | Optional `pypdf` extra, one section per page with page references; core install never imports it (#215) |
+| M30/H4 | Alignment/context tests | Resample bucket alignment, left-closed boundaries and stored-derivation parity pinned in `test_store.py` (#219) |
+
+“Complete” here means implemented and tested end to end in code. It does not mean the chain has produced market evidence. Two links still require a human: promotion is an explicit owner act, and the holdout spend is one-shot with no retry.
+
+**Verification at `54eef5e`.** CI run `45627617157`: backend **2,435 passed, 8 skipped** in 386.52 s, lint `All checks passed!`, mypy `153 source files`; frontend **287 passed** in 34 files, build compiled; CodeQL `45627617898` success. The counts quoted in §2 of this report are at `50fbca6` and are historical. Those tests prove software behaviour, not a market edge.
+
+**The single next action is unchanged, and it is now executable end to end:** run one frozen real-data experiment → `discovery evidence` → `discovery promote --dry-run` → if and only if a tradable candidate survives every non-holdout check, an owner-approved `discovery promote --spend-holdout --approval-token-env …` → `orchestrator run --schedule-paper`. If no candidate survives, record NO TRADE and do not spend the holdout. The exact commands and the one-shot/no-token-logging warnings are in `docs/runbook.md` §2.6.
+
+**What not to say after this addendum:** that the system is validated, paper-traded, profitable or “runtime-proven”. A complete call graph and a green suite are `implemented` evidence. They are not `validated` evidence.
