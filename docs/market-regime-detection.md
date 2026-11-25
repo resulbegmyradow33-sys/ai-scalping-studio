@@ -117,6 +117,21 @@ ARM64 wheels, add no service or credential, and the fixtures run in well under
 a second; a 5-year M1 frame is a few hundred thousand rows and stays far below
 the 1 GB Phase 4 budget.
 
+### Autoencoder representation
+
+`regime.autoencoder.fit_autoencoder(frame, AutoencoderConfig(...))` compresses
+the eight causal regime features through a small MLP autoencoder and clusters
+the latent space:
+
+- scaler, network and K-Means are fit on the first `train_fraction` rows only;
+- `latent` (default 4), `hidden` (16) and `epochs` (40) are CPU-sized; the seed
+  is fixed, so repeated fits are identical;
+- states are canonicalised by mean training `ret_1`, like the other models;
+- output is the same `RegimeFit` contract (`state`, `state_id`, aligned `ts`).
+
+It is research, not a forecast. The leakage test mutates future bars and
+requires the earlier labels to stay byte-identical.
+
 ## 6. Evaluation
 
 `regime/evaluate.py`:

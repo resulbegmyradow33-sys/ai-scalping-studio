@@ -9,6 +9,7 @@ bar. Regimes describe the past, never a forecast.
 
 from __future__ import annotations
 
+from scalping.regime.autoencoder import AutoencoderConfig, fit_autoencoder
 from scalping.regime.evaluate import dwell_stats, transition_matrix
 from scalping.regime.features import REGIME_FEATURES, build_regime_features
 from scalping.regime.models import (
@@ -25,6 +26,7 @@ __all__ = [
     "MODEL_NAMES",
     "REGIME_COLUMNS",
     "REGIME_FEATURES",
+    "AutoencoderConfig",
     "ModelConfig",
     "RegimeConfig",
     "RegimeFit",
@@ -32,6 +34,7 @@ __all__ = [
     "build_regime_features",
     "classify",
     "dwell_stats",
+    "fit_autoencoder",
     "fit_predict",
     "strategy_regime_table",
     "trades_with_regime",

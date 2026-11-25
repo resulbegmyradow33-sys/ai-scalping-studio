@@ -125,7 +125,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Gaussian mixture regime model.
 - [x] Hidden Markov regime model.
 - [x] Random forest / gradient boosting regime baseline.
-- [ ] Autoencoder/representation-based regime research.
+- [x] Autoencoder/representation-based regime research (`fit_autoencoder`).
 - [x] Strategy × regime performance table.
 - [x] API endpoint and Market Intelligence UI.
 - [x] `docs/market-regime-detection.md`.
