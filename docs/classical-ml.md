@@ -314,6 +314,65 @@ not independent samples; a small `min_train_rows` or few folds gives noisy
 mean/std. The module does not run the simulator and does not read the test
 split, so a good CV score is evidence about stability, not a trading result.
 
+## Feature-group ablation
+
+`ml ablation` answers one fixed question: for **this** dataset, model and spec,
+how much does the validation score change when a feature group is removed or
+kept alone? The 59 columns are partitioned into seven registered groups
+(`price`, `momentum`, `volatility`, `volume`, `structure`, `session`,
+`multi_timeframe`), and the protocol is:
+
+- `all` — every selected group (the reference);
+- `without:<group>` — leave one group out;
+- `only:<group>` — that group alone.
+
+That is `1 + 2 * 7 = 15` fits for the full registry; a smaller `--groups`
+selection costs `1 + 2 * n`. The dataset is built once, so every run shares the
+same rows, chronological split, purge/embargo, seed, hyperparameters and
+flat-row policy. There is no hyperparameter search, so the comparison isolates
+the columns rather than the tuning. `--groups` accepts the same comma-separated
+names as `ml train`.
+
+Each run reports accuracy, balanced accuracy, log loss, Brier score and ECE, plus
+`delta_vs_all` for every metric. The sign is `run - all`: a negative accuracy
+delta means the run scored worse than the full matrix. The `all` run's delta is
+`null`. The report also carries the shared dataset id, spec, split counts, the
+majority/prior baseline and a `protocol` block that states the scored split and
+that the test split was not scored.
+
+```bash
+cd backend
+uv run python -m scalping.cli ml ablation \
+  --root ../data-ticks5-store \
+  --symbol XAUUSD --timeframe H1 \
+  --model logistic --horizon 5 \
+  --groups price,momentum,volatility \
+  --purge 5 --embargo 5 \
+  --out runs/ablation/price-momentum-volatility.json
+```
+
+Output is one JSON line; `--out` writes the same full report without the `out`
+path, so the file is a reproducible record. Identical inputs produce an
+identical payload: the result carries no timestamp. The run is refused with a
+clear error for an empty selection, an unknown group, a single-group selection
+(leave-one-out would score an empty matrix) or a group that expands to no
+columns.
+
+Limits, stated plainly:
+
+- **Dependence, not causality.** Removing a group removes its columns, not the
+  information they encode. Correlated groups compensate for each other, so a
+  near-zero delta does not mean the group is useless, and a large delta does not
+  prove the group is the cause of the score.
+- **Not a trading edge.** A delta is measured on validation classification
+  metrics, before simulator costs, slippage and trade selection. A group that
+  improves log loss can still lose money; `ml evaluate` is the next step.
+- **One spec, one split.** The protocol does not tune, does not bootstrap and
+  reports no significance test. A validation split is a few hundred rows: small
+  deltas are noise, and re-running with another window is the honest check.
+- **Test rows stay locked.** `evaluate_test` is ignored here on purpose; an
+  ablation must not spend the one-shot split.
+
 ## Trading evaluation
 
 A classifier is not a strategy until it pays the simulator's costs. The
