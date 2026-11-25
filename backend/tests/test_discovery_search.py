@@ -16,6 +16,7 @@ from scalping.discovery import (
     TrialResult,
     evolve,
 )
+from scalping.discovery.search import _is_tradable
 
 DATASET_ID = "validation:XAUUSD:M5:abcd1234"
 CODE_VERSION = "test-2026-11-23"
@@ -341,20 +342,19 @@ def test_min_best_trades_is_a_threshold_not_a_zero_check(tmp_path: Path) -> None
     assert result.best_metrics["net_profit"] == -2.0
 
 
-@pytest.mark.parametrize("trade_count", [1.5, float("nan"), float("inf")])
-def test_invalid_trade_count_is_not_tradable(tmp_path: Path, trade_count: float) -> None:
-    class InvalidTradeCountEvaluator:
+def test_fractional_trade_count_is_not_tradable(tmp_path: Path) -> None:
+    class FractionalTradeCountEvaluator:
         def evaluate(self, candidate, *, dataset_id, code_version, budget):
             return TrialResult(
-                metrics={"net_profit": 99.0, "trades": trade_count},
+                metrics={"net_profit": 99.0, "trades": 1.5},
                 accepted=True,
             )
 
     config = _config(population=2, generations=1, max_trials=2, min_best_trades=1)
     with _open(tmp_path, "archive") as archive:
         result = evolve(
-            _SequenceFactory((ToyCandidate((1,)),)),
-            InvalidTradeCountEvaluator(),
+            _SequenceFactory((ToyCandidate((1,)), ToyCandidate((2,)))),
+            FractionalTradeCountEvaluator(),
             archive,
             config,
         )
@@ -362,6 +362,11 @@ def test_invalid_trade_count_is_not_tradable(tmp_path: Path, trade_count: float)
     assert result.accepted == 2
     assert result.tradable == 0
     assert result.best is None
+
+
+@pytest.mark.parametrize("trade_count", [float("nan"), float("inf"), "not-a-number", None])
+def test_tradability_gate_rejects_malformed_counts(trade_count: object) -> None:
+    assert not _is_tradable({"trades": trade_count}, min_trades=1)  # type: ignore[dict-item]
 
 
 def test_min_best_trades_zero_restores_the_flat_best(tmp_path: Path) -> None:
