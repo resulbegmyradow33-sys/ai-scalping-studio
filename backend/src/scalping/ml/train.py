@@ -29,6 +29,7 @@ from scalping.datasets.builder import DatasetBundle, build_dataset
 from scalping.features.build import FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.calibration import calibration_summary, fit_temperature
+from scalping.ml.incremental import incremental_fit, supports_partial_fit
 from scalping.ml.models import build_model
 
 __all__ = [
@@ -58,6 +59,13 @@ class TrainSpec:
     seed: int = 0
     evaluate_test: bool = False
     include_flat: bool = False
+    #: ``0`` fits in one batch pass; ``N > 1`` fits N contiguous, ordered
+    #: ``partial_fit`` chunks (only models with ``partial_fit`` support it).
+    incremental_chunks: int = 0
+
+    def __post_init__(self) -> None:
+        if self.incremental_chunks < 0:
+            raise ValueError("incremental_chunks must be >= 0")
     #: ``"none"`` or ``"temperature"``. Temperature is fitted on validation
     #: rows only; the test split is never used to fit or to report corrected
     #: test metrics.
@@ -191,7 +199,21 @@ def train_classifier(
     y_train = bundle.y_direction[train_mask]
     classes = tuple(int(value) for value in np.unique(y_train))
     model = build_model(spec.model, seed=spec.seed)
-    model.fit(bundle.X[train_mask], y_train)
+    if spec.incremental_chunks:
+        if not supports_partial_fit(model):
+            raise ValueError(
+                f"{spec.model!r} has no partial_fit; incremental_chunks needs a "
+                "linear model such as sgd, or use the batch path"
+            )
+        incremental_fit(
+            model,
+            bundle.X[train_mask],
+            y_train,
+            chunks=spec.incremental_chunks,
+            classes=np.asarray(classes),
+        )
+    else:
+        model.fit(bundle.X[train_mask], y_train)
     probabilities = model.predict_proba(bundle.X[validation_mask])
     validation = _metrics(bundle.y_direction[validation_mask], probabilities, classes)
     # Calibration is fitted on validation rows only. The test split is neither
@@ -270,6 +292,7 @@ def load_result(directory: str | Path) -> MLResult:
         seed=int(spec_raw["seed"]),
         evaluate_test=bool(spec_raw.get("evaluate_test", False)),
         include_flat=bool(spec_raw.get("include_flat", False)),
+        incremental_chunks=int(spec_raw.get("incremental_chunks", 0)),
         calibrate=str(spec_raw.get("calibrate", "none")),
     )
     model, columns = load_model(target / "model.joblib")
