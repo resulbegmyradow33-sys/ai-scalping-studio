@@ -41,9 +41,10 @@ window for a large historical ledger, and ``max_proposals`` caps a first scan.
 
 What this slice does not do
 ---------------------------
-No scheduler, no market clock, no background thread. ``scan`` is a call. The
-cursor and the job store live on local SQLite files; one process owns them at a
-time.
+No internal scheduler, no market clock, no background thread. ``scan`` is a
+call. The CLI can bind it with ``--watch-paper-ledger`` and the daemon's poll
+then decides the cadence; nothing here watches a bar or a file event. The cursor
+and the job store live on local SQLite files; one process owns them at a time.
 """
 
 from __future__ import annotations

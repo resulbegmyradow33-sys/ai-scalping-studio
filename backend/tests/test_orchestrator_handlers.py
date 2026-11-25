@@ -337,13 +337,15 @@ def test_ingest_duplicate_backfills_tables_for_a_v1_index(harness: Harness, tmp_
 
 
 def test_ingest_unsupported_format_is_permanent(harness: Harness, tmp_path: Path) -> None:
-    document = tmp_path / "scan.pdf"
-    document.write_bytes(b"%PDF-1.4 not really a document")
+    # A suffix no extractor owns keeps this independent of the optional pypdf
+    # extra; PDF-specific outcomes are covered in test_knowledge_ingest.py.
+    document = tmp_path / "scan.xyz"
+    document.write_bytes(b"not a supported document format")
 
     _, outcome, row = harness.run(
         KIND_KNOWLEDGE_INGEST,
         {"document_path": str(document)},
-        dedupe="ingest-pdf",
+        dedupe="ingest-unsupported",
         max_retries=3,
     )
     assert outcome.status == "failed"

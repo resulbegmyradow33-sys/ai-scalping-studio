@@ -818,8 +818,24 @@ def test_strategy_card_inactive_shape(tmp_path: Path) -> None:
     with TestClient(create_app(data_root=tmp_path, runs_root=tmp_path / "runs")) as client:
         body = _assert_no_leak(client.get("/api/strategy/card"), tmp_path)
 
-    _assert_keys(body, {"active", "strategy", "timeframe", "forward"}, "inactive card")
+    _assert_keys(
+        body,
+        {
+            "active",
+            "strategy",
+            "timeframe",
+            "classification",
+            "validation",
+            "active_rule",
+            "legacy_fallback",
+            "fallback_reason",
+            "forward",
+        },
+        "inactive card",
+    )
     assert body["active"] is False
+    assert body["classification"] == "fallback"
+    assert body["validation"] == "legacy-heuristic"
     _assert_str(body["strategy"], "strategy")
     _assert_str(body["timeframe"], "timeframe")
     assert body["forward"] is None
@@ -850,6 +866,7 @@ def test_strategy_card_active_shape(tmp_path: Path) -> None:
         {
             "active",
             "version",
+            "classification",
             "strategy",
             "symbol",
             "params",
@@ -858,11 +875,16 @@ def test_strategy_card_active_shape(tmp_path: Path) -> None:
             "digest",
             "created_at",
             "note",
+            "validation",
+            "active_rule",
+            "legacy_fallback",
             "forward",
         },
         "active card",
     )
     assert body["active"] is True
+    assert body["classification"] == "legacy"
+    assert body["validation"] == "legacy-heuristic"
     _assert_int(body["version"], "card version")
     _assert_keys(
         body["params"],

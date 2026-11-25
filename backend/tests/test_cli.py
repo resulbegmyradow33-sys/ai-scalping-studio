@@ -862,6 +862,60 @@ def test_cli_ml_evaluate_trades_a_saved_model(tmp_path):
     assert "x2" in payload["stress"]
 
 
+def test_cli_ml_train_reports_fitted_temperature(tmp_path):
+    root = tmp_path / "store"
+    synth = run(
+        "data",
+        "synth",
+        "--symbol",
+        "XAUUSD",
+        "--start",
+        "2026-01-05",
+        "--end",
+        "2026-01-07",
+        "--root",
+        str(root),
+    )
+    assert synth.returncode == 0, synth.stderr
+    out = tmp_path / "ml"
+    trained = run(
+        "ml",
+        "train",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--model",
+        "logistic",
+        "--groups",
+        "price,momentum",
+        "--horizon",
+        "5",
+        "--purge",
+        "5",
+        "--embargo",
+        "2",
+        "--calibrate",
+        "temperature",
+        "--root",
+        str(root),
+        "--out",
+        str(out),
+    )
+    assert trained.returncode == 0, trained.stderr
+    payload = json.loads(trained.stdout)
+    calibration = payload["calibration"]
+    assert calibration["method"] == "temperature"
+    assert calibration["fitted_on"] == "validation"
+    assert calibration["rows"] == payload["validation"]
+    assert calibration["temperature"] > 0.0
+    assert calibration["after"]["log_loss"] <= calibration["before"]["log_loss"]
+
+    stored = json.loads(Path(payload["metrics_path"]).read_text(encoding="utf-8"))
+    assert stored["spec"]["calibrate"] == "temperature"
+    assert stored["calibration"]["temperature"] == calibration["temperature"]
+
+
 def test_cli_ml_cv_prints_json_and_writes_report(tmp_path):
     root = tmp_path / "store"
     synth = run(

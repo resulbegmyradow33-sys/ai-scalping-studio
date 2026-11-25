@@ -28,12 +28,15 @@ from scalping.datasets.builder import DatasetBundle, SplitRange, build_dataset
 from scalping.discovery import evidence as evidence_module
 from scalping.discovery.evaluate import SimulationResult
 from scalping.discovery.evidence import (
+    EVIDENCE_SCHEMA_VERSION,
     EvidenceConfig,
     EvidenceError,
     FoldEvidence,
     RegimeEvidence,
     bootstrap_ci,
     build_evidence,
+    evidence_checksum,
+    evidence_from_dict,
     settings_digest,
     verify_evidence,
 )
@@ -884,3 +887,56 @@ def test_config_rejects_invalid_values() -> None:
         config(cost_stress=(1.0, 1.0))
     with pytest.raises(TypeError, match="folds"):
         config(folds=True)
+
+
+# --- provenance ---------------------------------------------------------------
+
+
+def test_config_cannot_claim_provenance_the_manifest_lacks(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    """A real/synthetic claim the dataset does not carry is refused, not written."""
+    with pytest.raises(EvidenceError) as exc:
+        build(discovery, source="test:real", synthetic=False)
+
+    assert exc.value.code == "provenance_mismatch"
+
+
+def test_manifest_provenance_propagates_into_the_evidence_bundle(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    features, _ = discovery
+    bundle = build_dataset(
+        features,
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        horizon=1,
+        train_fraction=0.6,
+        validation_fraction=0.2,
+        purge_bars=3,
+        embargo_bars=2,
+        source="test:tape",
+        synthetic=True,
+    )
+
+    evidence = build_evidence(
+        bundle,
+        long_spec(),
+        config(source="test:tape", synthetic=True),
+        features=features,
+    )
+
+    assert (evidence.source, evidence.synthetic) == ("test:tape", True)
+    assert evidence.schema_version == EVIDENCE_SCHEMA_VERSION
+    assert evidence_checksum(evidence) == evidence.checksum
+    restored = evidence_from_dict(evidence.to_dict())
+    assert (restored.source, restored.synthetic) == ("test:tape", True)
+
+
+def test_unknown_provenance_stays_unknown_in_the_bundle(
+    discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    evidence = build(discovery)
+
+    assert evidence.source is None
+    assert evidence.synthetic is None

@@ -5,56 +5,66 @@ Companion to `docs/architecture-audit.md` and
 resource-bounded. No phase starts until its predecessors' exit criteria are
 met.
 
-## Current execution order — 2026-11-24
+## Current execution order — 2026-11-25
 
-The autonomous core is now the critical path. This section takes precedence
-when older phase prose suggests adding more model families before the learning
-loop is connected.
+The autonomous core is the critical path. This section supersedes older phase
+prose where it suggests adding model families before the learning loop is
+connected. Verified `main`: `06c853c` (#191). CI is green at `50fbca6` (run
+`45550807353`); `06c853c` changes documentation only.
 
-1. **Evidence before promotion.** Extend discovery from one validation slice to
-   chronological walk-forward folds with purge/embargo, an inaccessible locked
-   OOS set, realistic costs/risk and stability reporting. Track every attempted
-   candidate and address multiple-testing/data-snooping bias. The fold bundle
-   (#114), fail-closed policy (#117), one-shot holdout (#121) and reproducer
-   (#130) exist; what is missing is a producer that persists the bundle from a
-   run (issue #136).
-2. **Fail-closed champion governance.** `PROMOTION_V1` (#117) requires
-   mandatory evidence, compares the candidate and incumbent on identical
-   windows, keeps immutable lineage and rejects missing evidence. It has no
-   runtime call site yet; validation-only #109 remains a foundation, not a
-   production gate.
-3. **Wire autonomy.** Register real handlers in the persistent orchestrator;
-   add a scheduler/daemon, new-data/document/paper-completion triggers,
-   eligibility/deduplication policies, measured RAM/CPU/disk limits and
-   isolation between paper replay and training failures. Handlers (#115),
-   guard (#112), daemon (#118) and paper-outcome trigger (#122, proposal only)
-   are merged; routing remains manual.
-4. **Connect research to discovery.** Preserve document provenance, parse
-   supported sources honestly, route source-linked hypotheses to quantitative
-   experiments, and never let prose create orders or bypass validation.
-5. **Close the paper loop.** Load only a validated DSL champion, run it over
-   appended market data, persist immutable decisions/fills/outcomes, wait for
-   matured outcomes, analyse them, and enqueue the next eligible experiment.
-   Missing/invalid champion means NO TRADE, not legacy fallback.
-6. **Accept on target hardware.** Run reproducible end-to-end XAUUSD acceptance
-   on the M2 8 GB machine under measured memory/disk budgets. Keep real-money
-   execution disabled.
-7. **Only then expand models/UI.** Merge the optional benchmark work when
-   rebased and green, but defer TFT/SAC/TD3/DQN/Mamba/GNN or dashboard expansion
-   unless an experiment justifies it.
+The evidence/holdout/promotion slice is merged and tested: the bundle producer
+(#159), fail-closed `PROMOTION_V1` (#117), one-shot holdout (#121) and
+reproductions (#130/#169). What is missing is the runtime link, not another
+module. The canonical blocker list is in `STATUS.md` ("Current blockers").
+
+1. **Provenance before promotion.** Carry `source`, `synthetic` and a provenance
+   checksum from the dataset manifest through the evidence bundle into
+   `PROMOTION_V1`, decode old bundles as unknown, and reject synthetic or
+   unknown provenance. Not on `06c853c`. Without this, a wired promotion could
+   look governed while accepting synthetic bars (master prompt §38).
+2. **One runtime holdout + promotion command.** Add a reviewed CLI command
+   and/or orchestrator handler that checks bundle identity, evaluates the
+   pre-holdout policy, seals/unlocks the ledger, spends the holdout once,
+   re-evaluates `PROMOTION_V1`, calls `promote_with_evidence`, writes the
+   archive/champion and refuses a second spend. No such command exists; the CLI
+   has `discovery run|reproduce|evidence` only and `docs/runbook.md` says so.
+3. **Paper scheduler.** Nothing enqueues `paper.advance` on a clock or on new
+   bars. The daemon scans data files (→ `dataset.build`) and paper ledgers
+   (→ `paper.outcomes` proposal, #122/#189); a promoted champion would still
+   wait for a caller. Add the trigger and keep the gap policy in the payload.
+4. **Record real evidence.** Run a real search at a defensible budget, persist
+   the bundle, and record either NO TRADE or a rejection; add a deliberately
+   overfit negative control. The merged #191 attempt is the template: it ran the
+   chain on XAUUSD H1 and stopped at promotion with seven rejection codes.
+5. **Connect research to discovery.** Preserve document provenance, add the
+   optional pinned offline PDF parser (PDF currently raises
+   `UnsupportedFormat`), route source-linked hypotheses to experiments, and
+   never let prose create orders or bypass validation.
+6. **Close the paper loop.** Load only a validated DSL champion, run it over
+   appended market data, persist immutable decisions/fills/outcomes, and turn
+   matured outcomes into a queued next experiment. Missing/invalid champion
+   means NO TRADE, not legacy fallback.
+7. **Accept on target hardware.** Run reproducible end-to-end XAUUSD acceptance
+   on the M2 8 GB machine under measured memory/disk budgets. The bench paper
+   stage failed with `BarGapError` and no walk-forward stage was measured, so
+   there is no target-hardware acceptance yet.
+8. **Only then expand models/UI.** Defer TFT/SAC/TD3/DQN/Mamba/GNN or dashboard
+   expansion unless an experiment justifies it.
 
 ### Mainline alignment
 
-- As of `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875`, #105–#118, #120–#124 and
-  #128–#135 are merged.
+- Every PR cited in this document is merged at `06c853c` unless the text says
+  otherwise. The #178–#182 block is the exception: #180 merged, #181 did not.
 - #107 is deterministic heuristic triage, not semantic understanding.
 - #109 is champion history/provider/rollback infrastructure, not a
   promotion-grade OOS/walk-forward gate.
 - #117 is a fail-closed promotion policy; #121 is a one-shot locked holdout;
-  #130 is a bundle reproducer. None of them has a runtime producer (#136 open).
-- #119 (knowledge table structure) is an open PR, not merged.
-- `backend/tests/test_api_autonomy.py` fails on current main (removed
-  `DiscoveryArchive.promote`); see `STATUS.md` for the CI run ids.
+  #130/#169 reproduce a bundle; #159 produces one. None of them has a runtime
+  promotion call site.
+- #119 (knowledge table structure) is merged; PDF remains an optional parser.
+- `backend/tests/test_api_autonomy.py` passes at `50fbca6`; the historical
+  `DiscoveryArchive.promote` failure is fixed.
+- #181 (full RL action-mask wiring) has no commit on `06c853c`.
 - #105 is optional benchmark infrastructure; do not let model-zoo expansion
   displace autonomous evidence and handler integration.
 
@@ -160,9 +170,11 @@ Progress (2026-11-22):
 
 Progress (2026-11-24): #133 pins M30/H4 alignment semantics (a higher-timeframe
 value reaches a decision bar only after its bucket closes) and the chained
-resampling path. M30/H4 remain data-layer timeframes; the feature layer still
-consumes M5/M15 (`htf_context` is timeframe-agnostic). `log_ret_3` is a
-documented read-only alias for the log-return column.
+resampling path. M30/H4 context is now an opt-in feature group (`htf`:
+`m30_trend`, `m30_ret`, `h4_trend`, `h4_ret`, `h4_atr_frac`) appended after the
+frozen 59 columns; the default matrix still consumes M5/M15 only (`htf_context`
+is timeframe-agnostic). `log_ret_3` is a documented read-only alias for the
+log-return column.
 
 Remaining: availability rules (flow only with tick volumes), wiring the manifest
 id into the trainer/registry, and a persisted array format for large datasets.
@@ -320,12 +332,14 @@ Deliverables:
 Dependencies: Phases 5–9. RAM: < 500 MB (scheduler/SQLite). Tests: promotion,
 rejection, rollback, drift trigger, job cancellation, DB migration.
 
-Progress (2026-11-24): the gate is no longer hypothetical. #117 adds a named,
-versioned, fail-closed `PROMOTION_V1` policy (no empty policy, no force flag,
-locked OOS required); #121 adds the one-shot holdout ledger that can attach the
-locked section; #130 replays a stored bundle. The remaining gap is the producer:
-no command persists an evidence bundle or dataset artifact from a discovery run
-(#136), and `paper.advance` does not consume a promotion decision.
+Progress (2026-11-25): the gate is no longer hypothetical and the producer
+exists. #117 adds a named, versioned, fail-closed `PROMOTION_V1` policy (no
+empty policy, no force flag, locked OOS required); #121 adds the one-shot
+holdout ledger; #130/#169 replay and compare a stored bundle; #159 persists the
+dataset artifact, evidence bundle and spec sidecar atomically. The remaining gap
+is the runtime link: no CLI command or handler spends the holdout and promotes,
+and `paper.advance` is not scheduled. `docs/runbook.md` documents the exact
+library call and its refusals.
 
 Exit criteria: a candidate can be trained, rejected, promoted and rolled back
 with a queryable audit trail; the previous champion is always recoverable.
@@ -348,10 +362,10 @@ Deliverables:
 Dependencies: Phase 3; can run in parallel with Phase 5. RAM: < 1 GB. Tests:
 kill-switch triggers, embargo, Monte Carlo determinism, sensitivity bounds.
 
-Progress (2026-11-24): #135 adds the Phase 11 non-bypass acceptance suite: a DSL
+Progress (2026-11-25): #135 adds the Phase 11 non-bypass acceptance suite: a DSL
 spec, a raw simulator action and an orchestrator job payload all reach the same
-frozen `RiskEngine`, and divergence fails the test. Slippage cap, rejected-order
-model and data-quality trade block remain open.
+frozen `RiskEngine`, and divergence fails the test. #186 adds the slippage cap
+and the data-quality entry block. The rejected-order model remains open.
 
 Exit criteria: risk blocks cannot be bypassed by a policy; every reported
 strategy has walk-forward, stress and sample-size context.
@@ -372,6 +386,12 @@ Deliverables:
 Dependencies: Phases 10–11. RAM: < 500 MB. Tests: ledger invariants, restart
 recovery, no real-money path enabled, rejection audit.
 
+Progress (2026-11-25): the ledger, continuous runner, gap policy (#164),
+provenance-aware session/outcome fields (#160) and evidence-governed
+`paper.advance` (#156) are merged. There is no `paper.advance` scheduler, and
+no real session exists: the #191 attempt was refused with `NoChampionError`
+because no evidence-mode champion has been promoted.
+
 Exit criteria: a paper session survives restart and reconciles every trade;
 real execution remains impossible without an explicit future adapter.
 
@@ -391,10 +411,12 @@ Deliverables:
 Dependencies: Phases 4–12. RAM: < 500 MB (UI). Tests: component tests, e2e
 smoke, type check, build.
 
-Progress (2026-11-24): the Paper Trading page (#128) reads `/api/paper` only and
+Progress (2026-11-25): the Paper Trading page (#128) reads `/api/paper` only and
 renders an explicit dash/unknown rather than a fabricated zero. The read-only
-autonomy status API (#134) exists, but no dashboard page consumes
-`/api/autonomy` yet.
+autonomy page consumes `/api/autonomy/*` (#134). Market Intelligence
+(`/intelligence`), Strategy Intelligence by regime (#166) and the data-quality
+panel (#165) are merged. Neural Network Lab, RL Lab, Backtesting and System
+Monitoring pages do not exist.
 
 Exit criteria: every displayed number comes from an API or a documented local
 artifact.
@@ -432,36 +454,42 @@ Deliverables:
 - A final status report that separates implemented / trained / validated /
   profitable.
 
+Progress (2026-11-25): the full backend/frontend CI suite is green at `50fbca6`
+(run `45550807353`: backend `2,320 passed, 3 skipped`; frontend `263 passed`;
+CodeQL green) and `06c853c` is documentation-only. The end-to-end scenario is
+**not** met: the merged #191 real-data attempt ran to the promotion gate, chose
+NO TRADE, spent no holdout and never reached paper. The final report exists only
+on an unmerged branch; the three 2026-11-25 assessment documents are evidence,
+not repository files.
+
 Exit criteria: the acceptance checklist in the master prompt is met or each
 unmet item has a documented reason.
 
 ## Priority queue
 
-**P0 — unblock the platform**
+The historical platform order is retained for reference. For the autonomous
+track the live P0 is the execution order at the top of this file: provenance →
+runtime promotion → paper scheduler → recorded real-data evidence.
 
-1. Phase 2 data registry/validation/provenance.
-2. Phase 3 dataset builder/leakage.
-3. Phase 10 SQLite registry + promotion/rollback (can start after Phase 5).
+**P0 — unblock acceptance**
 
-**P1 — learning evidence**
+1. Fail-closed provenance through dataset → evidence → promotion.
+2. Runtime holdout + promotion command.
+3. `paper.advance` trigger/scheduler.
 
-4. Phase 4 regime engine.
-5. Phase 5 classical ML baselines.
-6. Phase 6 GRU/TCN framework and evaluation.
+**P1 — produce evidence**
 
-**P2 — advanced research**
+4. Recorded real-data experiment plus a deliberately overfit negative control.
+5. Optional offline PDF parser and one PDF → hypothesis run.
 
-7. Phase 7 Transformers.
-8. Phase 8 RL expansion.
-9. Phase 9 ensemble/confidence.
+**P2 — product hardening**
 
-**P3 — product hardening**
+6. Target-M2 end-to-end acceptance and resource measurement.
+7. Operator surfaces for proposal approval and promotion review.
 
-10. Phase 11 risk/backtest.
-11. Phase 12 paper ledger.
-12. Phase 13 dashboard.
-13. Phase 14 optimisation.
-14. Phase 15 acceptance.
+**P3 — optional research**
+
+8. Additional model families only when a falsifiable experiment requires them.
 
 ## Resource plan (8 GB M2)
 
@@ -488,16 +516,20 @@ checkpoint before cancellation, and no training in the paper-trading process.
 - Do not run parallel heavy trainings on 8 GB.
 - Do not enable real-money execution.
 
-## Immediate next step after approval
+## Immediate next step (2026-11-25)
 
-Phase 2, in this order:
+The platform phases below are historical ordering. The live sequence is the one
+at the top of this document:
 
-1. `data/registry.py` + tests for ten symbols.
-2. `data/validate.py` + `data/provenance.py` + tests.
-3. JSON importer and M30/H4 resampling.
-4. API status extension and documentation.
+1. Fail-closed provenance from dataset manifest to `PROMOTION_V1`.
+2. One runtime holdout + promotion command with a second-spend refusal.
+3. A `paper.advance` scheduler/trigger with a gap policy in the payload.
+4. A recorded real-data experiment plus an overfit negative control.
+5. The optional offline PDF parser and one PDF → hypothesis run.
+6. Target-M2 end-to-end acceptance with measured RSS/CPU/disk.
 
-No model work starts until Phase 2 and Phase 3 exit criteria are met.
+No model-family or dashboard expansion starts before step 2 is merged and
+exercised.
 
 
 ---
@@ -524,11 +556,14 @@ Exit criteria: an end-to-end run creates strategy candidates without
 owner-authored rules, reproduces them from saved lineage, rejects an
 intentionally overfit candidate, and records a champion/no-change decision.
 
-Progress (2026-11-24): #104 runs search end to end on a validation slice and
-archives a decision. #114 builds a chronological fold bundle, #121 enforces a
-single holdout spend, #130 replays a bundle from identity. `discovery run`
-still writes a decision report, not an evidence bundle; the producer is #136.
-Reproduce commands are in `STATUS.md`.
+Progress (2026-11-25): #104 runs search end to end on a validation slice and
+archives a decision; #174 rejects flat or thin "best" candidates. #114 builds a
+chronological fold bundle, #121 enforces a single holdout spend, #130/#169
+replay a bundle from identity, and #159 produces the bundle from a run. What is
+still missing is a runtime holdout+promotion command and provenance in the
+bundle. The merged #191 real-data attempt ran the chain to the promotion gate,
+recorded NO TRADE and did not spend the holdout. Reproduce commands are in
+`STATUS.md`.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
@@ -540,6 +575,11 @@ to quantitative strategy experiments. Document text must never directly
 become a trusted strategy or order. This is structured knowledge extraction,
 not a claim that the trading model has been trained on a book or that it has
 human-level comprehension.
+
+Text extraction for TXT/MD/HTML/DOCX and table structure (#119) is merged.
+PDF is deliberately refused with `UnsupportedFormat` until a pinned offline
+parser is added (acceptance step 5); no OCR. Hypothesis drafts and routing are
+deterministic heuristics, not semantic reading.
 
 Exit criteria: import a sample document, trace a generated hypothesis back to
 source passages, run its test, and record the outcome.
@@ -557,12 +597,14 @@ Exit criteria: a new dataset/document or matured paper outcome automatically
 queues the appropriate eligible workflow; interrupted jobs recover safely;
 the full chain is queryable and auditable.
 
-Progress (2026-11-24): the daemon (#118) runs the persistent queue with the
-`m2_8gb` guard profile by default; the file trigger and the matured
-paper-outcome trigger (#122, proposal only) exist; five handlers (#115) and
-end-to-end integration tests (#129) are merged. The bare `Orchestrator` still
-defaults to `AllowAllGuard`, knowledge proposals do not auto-queue discovery, and
-there is no orchestrator-level rollback control.
+Progress (2026-11-25): the daemon (#118) runs the persistent queue with the
+`m2_8gb` guard profile by default; the data-file trigger (#158) and the matured
+paper-outcome trigger (#122, bound to the daemon CLI in #189, proposal only)
+exist; five handlers (#115) and end-to-end integration tests (#129) are merged.
+Two links are still missing: an evidence/holdout/promotion handler, and any
+trigger that enqueues `paper.advance`. The bare `Orchestrator` still defaults to
+`AllowAllGuard`, approved proposals can enqueue discovery but nothing approves
+them automatically, and there is no orchestrator-level rollback control.
 
 ## Phase 19 — Autonomous paper-trading acceptance
 

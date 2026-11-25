@@ -214,6 +214,73 @@ def test_key_covers_costs_and_registry(
     assert base != _key(cache, bars)
 
 
+def test_a_settings_change_rebuilds_and_is_not_a_hit(
+    cache: FeatureCache, bars: pl.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A different cost block is a different input, even mid-run."""
+    counter = BuildCounter()
+    monkeypatch.setattr(cache_module, "build_features", counter)
+    changed = Settings(costs=CostConfig(spread_floor=0.31))
+
+    first = cached_build_features(
+        cache, symbol=SYMBOL, timeframe=TIMEFRAME, frame=bars, settings=Settings()
+    )
+    second = cached_build_features(
+        cache, symbol=SYMBOL, timeframe=TIMEFRAME, frame=bars, settings=changed
+    )
+
+    assert counter.calls == 2, "a changed cost block must not reuse the old entry"
+    assert same_frame(first, build_features(bars, Settings().costs))
+    assert same_frame(second, build_features(bars, changed.costs))
+    stats = cache.stats()
+    assert stats["misses"] == 2
+    assert stats["hits"] == 0
+    assert stats["entries"] == 2
+
+
+def test_a_data_change_rebuilds_and_is_not_a_hit(
+    cache: FeatureCache, bars: pl.DataFrame, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One edited bar changes the data identity and therefore the key."""
+    counter = BuildCounter()
+    monkeypatch.setattr(cache_module, "build_features", counter)
+    edited = bars.with_columns(
+        pl.when(pl.int_range(pl.len()) == 10)
+        .then(pl.col("close") + 0.01)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+
+    cached_build_features(
+        cache, symbol=SYMBOL, timeframe=TIMEFRAME, frame=bars, settings=Settings()
+    )
+    cached_build_features(
+        cache, symbol=SYMBOL, timeframe=TIMEFRAME, frame=edited, settings=Settings()
+    )
+
+    assert counter.calls == 2, "an edited bar must not hit the old entry"
+    assert cache.stats()["misses"] == 2
+    assert cache.stats()["entries"] == 2
+
+
+def test_a_version_bump_rejects_an_existing_entry(
+    cache: FeatureCache,
+    bars: pl.DataFrame,
+    built: FeatureFrame,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bumping CACHE_VERSION changes the key *and* invalidates an old manifest."""
+    key = _key(cache, bars)
+    cache.save(key, built)
+    assert cache.load(key) is not None
+
+    monkeypatch.setattr(cache_module, "CACHE_VERSION", CACHE_VERSION + 1)
+    assert _key(cache, bars) != key, "a version bump must change the key"
+    assert cache.load(key) is None, "the manifest version check must reject the old entry"
+    assert cache.stats()["corrupt"] == 1
+    assert _bad_files(cache, key)
+
+
 def test_registry_version_is_a_stable_digest() -> None:
     assert registry_version() == registry_version()
     assert len(registry_version()) == 16

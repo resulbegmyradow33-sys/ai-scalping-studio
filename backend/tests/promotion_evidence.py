@@ -88,7 +88,15 @@ def evidence_for(
     settings_digest: str,
     expectancy_r: float = 0.3,
     trades_per_fold: int = 25,
+    source: str | None = "test:fixture",
+    synthetic: bool | None = False,
 ) -> CandidateEvidence:
+    """A hand-built bundle for seams that only need an evidence-shaped object.
+
+    The provenance defaults to an explicit real fixture so the policy gate is
+    exercised, not skipped. A test that needs unknown or synthetic provenance
+    passes it in: nothing here runs a simulator or measures market data.
+    """
     folds = tuple(
         _fold(index, trades=trades_per_fold, expectancy_r=expectancy_r) for index in (1, 2, 3)
     )
@@ -147,6 +155,8 @@ def evidence_for(
         aggregate=aggregate,
         checksum="",
         created_at="2026-11-24T00:00:00+00:00",
+        source=source,
+        synthetic=synthetic,
     )
     draft = replace(bundle, checksum="")
     return replace(draft, checksum=evidence_checksum(draft))

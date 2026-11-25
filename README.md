@@ -10,8 +10,8 @@ The target is a strategy-independent autonomous research learner: discover
 hypotheses from market data and source-linked research, generate candidate
 policies without owner-authored entry/exit rules, test them with realistic costs
 and independent validation, and paper-trade only a governed DSL champion.
-That complete closed loop is not yet finished; see the dated audit and task
-board before interpreting any module as autonomous.
+That complete closed loop is not yet finished; read the "Current blockers" list
+in `STATUS.md` before interpreting any module as autonomous.
 
 The existing flow_momentum card is a legacy incumbent with historical
 forward-test evidence. The current panel still contains that older runtime
@@ -21,17 +21,30 @@ LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
-- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
-  the exact commands that reproduce each claim.
-- [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
+- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, the
+  single **Current blockers** list, and the exact commands that reproduce each
+  claim. Verified `main`: `06c853c` (2026-11-25).
+- [`docs/acceptance-attempt-2026-11-25.md`](docs/acceptance-attempt-2026-11-25.md) — the
+  merged real-data XAUUSD H1 attempt: the chain stops at promotion with NO
+  TRADE, no holdout spend and no paper session.
+- [`docs/runbook.md`](docs/runbook.md) — operator runbook: install, daily flows,
+  orchestrator, audited local controls, legacy-fallback switch, troubleshooting
+  and safety rules.
+- [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — historical mainline snapshot; superseded by `STATUS.md`.
 - [docs/autonomous-system-audit-2026-11-24.md](docs/autonomous-system-audit-2026-11-24.md) — historical autonomous-system audit and ordered gaps.
 - [AGENTS.md](AGENTS.md) — mandatory instructions for every human/AI contributor.
 - [docs/architecture-audit.md](docs/architecture-audit.md) — historical 2026-11-22 snapshot.
-- [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
+- [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan and the live execution order.
 - [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
 - [`docs/language-decision.md`](docs/language-decision.md) — why Python/TypeScript stay; when Rust would be justified.
 - [`docs/api-contracts.md`](docs/api-contracts.md) — public API schema, drift guard and how to update the snapshot.
+
+The system can discover candidates and reject them, including on real XAUUSD H1
+bars. It cannot yet spend a real locked holdout, promote a candidate or trade a
+governed champion at runtime: there is no promotion CLI/handler, no
+`paper.advance` scheduler, and dataset/evidence/promotion carry no
+`source`/`synthetic` field. The full list is in `STATUS.md`.
 
 ## Team
 
@@ -105,7 +118,9 @@ npm run dev -- -p 3001
 ```
 
 Open `http://127.0.0.1:3001`. Without a strategy card the panel replays the
-legacy M1 momentum rule; the data screen can generate synthetic bars.
+legacy M1 momentum rule by default during migration. `--no-legacy-fallback`
+(#177, merged) makes the UI fail closed for testing; it does not change the
+autonomous paper path. See the runbook for details.
 
 To use the validated rule, copy the seed card and start with a flow store:
 
@@ -132,8 +147,11 @@ uv run python -m scalping.cli discovery run --root ../data-ticks5-store \
   --symbol XAUUSD --timeframe M5 --max-trials 64 --seed 0
 ```
 
-Main is red on `tests/test_api_autonomy.py` as of 2026-11-24; the cause and the
-latest green CI run id are recorded in `STATUS.md`.
+The latest verified `main` snapshot is `06c853c` (2026-11-25). CI is green at
+`50fbca6` — run `45550807353`: backend `2,320 passed, 3 skipped`, frontend
+`263 passed`, CodeQL green — and `06c853c` adds documentation only. `STATUS.md`
+records the exact commit, merged changes, the current blockers and remaining
+validation gaps.
 
 ## Data
 

@@ -147,6 +147,20 @@ evolutionary loop with an exact attempt budget.
    run as `exhausted`. That is how a saturated factory stops instead of burning
    the rest of the budget on duplicates.
 
+**Best eligibility.** With an empty (default-off) gate every candidate is
+accepted, and a policy that never trades reports `net_profit = 0`. Ranked
+purely by that metric, it would beat every trading candidate that lost money and
+turn "did nothing" into the run's best result. A candidate is therefore eligible
+for `best` only when its evaluator publishes `trades` and that count is at least
+`min_best_trades` (default `1`). A missing trade count is not evidence of
+trading, so it is ineligible; an evaluator that does not report `trades` cannot
+hand the run a best candidate. `min_best_trades = 0` disables the rule and
+restores the pre-rule behaviour for compatibility tests and explicit flat-policy
+runs; it is not a recommendation. The rule changes only who may be `best`:
+survival ranking, the attempt budget and deduplication are unchanged.
+`SearchResult.tradable` reports how many accepted trials met the threshold, so a
+caller can tell "nothing traded" from "nothing was accepted".
+
 `SearchConfig` defaults:
 
 | Field | Default | Meaning |
@@ -164,6 +178,7 @@ evolutionary loop with an exact attempt budget.
 | `novelty_requirement` | `1` | minimum new trials a generation must contribute |
 | `selection_metric` | `net_profit` | metric the evaluator must publish |
 | `minimize` | `False` | rank lowest instead of highest |
+| `min_best_trades` | `1` | closed trades needed to be the run's best; `0` disables the rule |
 
 The loop stops for exactly one recorded reason.
 
@@ -175,10 +190,10 @@ The loop stops for exactly one recorded reason.
 | `stopped` | the injected `should_stop` callback returned true before an attempt |
 
 `SearchResult` reports the best candidate of this run (not the archive-wide
-best), its metrics and id, the number of recorded trials and accepted trials,
-the skip and rejection histograms, the deepest lineage chain recorded, the
-generations completed and the stop reason. `trials + skipped` is the number of
-attempts spent.
+best), its metrics and id, the number of recorded trials, accepted trials and
+tradable accepted trials, the skip and rejection histograms, the deepest lineage
+chain recorded, the generations completed and the stop reason.
+`trials + skipped` is the number of attempts spent.
 
 Determinism is a promise with a narrow scope: same `numpy.random.Generator`
 stream (PCG64), same seed, same factory and evaluator, same archive state, same
@@ -242,6 +257,7 @@ positive and carries the CLI's `rule:ret_5-baseline` label. A strategy that
 | `horizon`, `--train-fraction`, `--validation-fraction`, `--purge`, `--embargo` | `1`, `0.70`, `0.15`, `0`, `0` | split geometry |
 | `window` (`--window`) | `60` | observation warm-up |
 | `patience` (`--patience`) | `5` (`3`) | generations without a new best |
+| `min_best_trades` (`--min-best-trades`) | `1` | closed trades a candidate needs to be the run's best; `0` disables the rule (compatibility only) |
 | `max_lookback` / `max_depth` | `20` / `3` | DSL generation bounds |
 | `code_version` | source digest | recorded on every candidate and trial |
 
@@ -262,10 +278,10 @@ was given and that was actually run (`missing_cost_stress` otherwise).
 
 `DiscoveryRunResult.to_dict()` is JSON-safe with no NaN or Infinity and carries
 the dataset id, the validation range (`start`, `end`, `rows`, first/last
-timestamp), the seed, the code version, the trial/skip/accepted counts and stop
-reason, the best accepted candidate's hash, canonical spec and metrics, the
-baseline table, the comparison numbers the decision used, the decision with its
-reason, the archive path and the decision row id.
+timestamp), the seed, the code version, the trial/skip/accepted/tradable counts
+and stop reason, the best accepted candidate's hash, canonical spec and metrics,
+the baseline table, the comparison numbers the decision used, the decision with
+its reason, the archive path and the decision row id.
 
 ### Decision semantics
 
@@ -276,7 +292,7 @@ own *model* promotion. The run's vocabulary is:
 
 | Decision | When | Meaning |
 |---|---|---|
-| `no_trade` | the gate rejected every trial, or the best accepted candidate is flat (0 closed trades) | standing aside is the result, not a failure |
+| `no_trade` | the gate rejected every trial, or every accepted trial closed fewer than `min_best_trades` trades | standing aside is the result, not a failure |
 | `no_change` | no accepted candidate beat the best baseline | the champion (or the baseline) stands |
 | `rejected` | an accepted candidate strictly beat the best baseline | an improving candidate exists; the run hands it to the champion governor instead of promoting it |
 
@@ -287,6 +303,24 @@ decision is persisted with `record_decision` under the best candidate of the
 run (or the archive's best when a rerun added no trials), and the reason string
 carries the numbers: the selection metric, the candidate value, the best
 baseline's name and value, and the trial count.
+
+**NO TRADE is not one thing.** `no_trade` covers more than one outcome and the
+run records which one happened instead of leaving it to prose:
+
+- `gate_rejected_all` — no trial passed the acceptance gate. The rejection
+  histogram says why.
+- `no_tradable_candidate` — some trials passed the gate, but no accepted
+  candidate reported at least `min_best_trades` closed trades. This is the
+  empty-gate flat case: nothing traded, so nothing can be ranked as a strategy.
+  The reason reads "no tradable candidate", not "flat by construction".
+- `flat_candidate` — compatibility mode (`min_best_trades = 0`) where a flat
+  candidate was allowed to win by construction. It exists to keep old
+  compatibility tests meaningful and is not produced by the default config.
+
+The distinction is stored in `decisions.detail_json.reason_code` next to
+`min_best_trades`, `trials`, `accepted` and `tradable`, and the same numbers
+appear in `DiscoveryRunResult.to_dict()`. A reader can therefore query "how
+often did the search find only flat policies?" without parsing sentences.
 
 **A validation winner after N trials is not evidence of a durable edge.** The
 decision only says what happened on one validation slice at a chosen cost
@@ -605,6 +639,43 @@ and accepts every candidate — that is search-fitness mode, not promotion.
 Non-finite metrics are omitted rather than clamped: `profit_factor` is `inf`
 for wins without losses, and a gate that requires it then rejects with
 `missing_metric` instead of reading a fabricated number.
+
+## Read-only API
+
+`scalping.api.routes_discovery` mounts under `/api/discovery` and exposes the
+archive for evidence and promotion review. Every route is a `GET`; nothing here
+evaluates a candidate, runs a search, promotes, rolls back or schedules work.
+
+| Route | Returns |
+|---|---|
+| `GET /api/discovery/summary?scope=&limit=` | candidate/trial/decision totals, accepted/rejected and distinct-dataset trial counts, and every champion with `mode`, `policy_id`, `policy_version`, `policy_digest`, `evidence_checksum` and the champion's trial counts |
+| `GET /api/discovery/candidates?scope=&metric=&limit=&offset=` | candidates newest first with the spec hash (`candidate_id`), complexity, trial and accepted-trial counts, and the best accepted trial's `best_value`/`best_metrics` for `metric` (default `net_profit`) |
+| `GET /api/discovery/candidates/{id}` | the canonical spec, bounded newest-first trials (`dataset_id`, checksums, code version, seed, metrics, accepted, rejections), direct lineage edges and bounded decisions with `detail` |
+| `GET /api/discovery/trials?candidate_id=&dataset_id=&scope=&accepted=&limit=&offset=` | a bounded newest-first trial window across candidates |
+
+**Honest missing states.** A missing archive is `configured: false`; an existing
+file that cannot be opened or lacks the candidate/trial tables is
+`configured: true, readable: false` with every count and item omitted. A real
+zero means the archive was read and nothing matched. `champions_readable` is
+`false` when a champion table exists but lacks the columns a reader needs; an
+archive with no champion table is readable with an empty champion list.
+
+**Read-only by construction.** SQLite is opened with a `mode=ro` URI and
+`PRAGMA query_only = ON`. When no WAL sidecar exists the file is also opened
+`immutable=1`, so a review poll creates no `-wal`/`-shm` file and leaves the
+directory byte-identical; if a writer left a non-empty WAL, a plain `mode=ro`
+connection reads its committed rows instead. The archive is queried with plain
+SQL and is never migrated: a v1 archive answers with the columns it has and
+`None` for governance fields that postdate it.
+
+**Request boundary.** The archive path is server configuration only. Candidate
+ids must be 64 lowercase hex characters (the sha256 spec hash), metric names use
+the archive's conservative alphabet, and scope/dataset filters are validated
+data-id text. Every value is a bound SQL parameter. `limit` is `1..500`,
+`offset ≥ 0`, a malformed parameter is a `422`, an unknown candidate on the
+detail route is a `404`, and a configured but unreadable archive is a `409`.
+`scope` follows the archive's own rule: a trial belongs to it when every
+alphanumeric scope token appears in its `dataset_id`.
 
 ## What is deliberately absent
 

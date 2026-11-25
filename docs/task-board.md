@@ -7,6 +7,62 @@ with a `PARTIAL` note. GitHub phase issues mirror these lists.
 Legend: `[x]` done · `[ ]` todo · `PARTIAL` some code exists but the task is not
 met end to end · `BLOCKED` missing data/dependency/decision.
 
+## Snapshot — 2026-11-25, main `06c853c`
+
+Verified `main`: `06c853c88b83b29c31b7478702fc9bb848f2e840` (#191). CI is green
+at `50fbca6` (run `45550807353`: backend `2,320 passed, 3 skipped`; frontend
+`263 passed`; CodeQL green); `06c853c` adds two documentation files only, so
+those counts describe the same code. Test counts are not repeated per phase
+below — use that run or a newer CI run, never an estimate.
+
+The autonomous track added more than 20 new modules since the 2026-11-24
+snapshot (`693f8a3`): 14 new backend source modules, 24 new test modules and 10
+frontend source files. A module plus a passing unit test is `implemented`, not
+`validated` and not `paper-traded` (`AGENTS.md`, "Evidence vocabulary").
+
+Present in code at this commit: the evidence-bundle producer
+(#159), fail-closed `PROMOTION_V1` (#117), one-shot holdout (#121), bundle
+reproduction (#130/#169), tradable-best candidate gate (#174), provenance-aware
+paper champion with the continuous runner (#156/#164), paper-completion trigger
+(#189), audited local controls (#175), fail-closed legacy UI switch (#177),
+slippage cap and data-quality entry block (#186), M30/H4 context (#187),
+feature ablation (#188) and OOF regime weights (#190).
+
+### Current blockers
+
+Canonical list and per-area evidence: `STATUS.md`.
+
+1. **No validated candidate.** The locked holdout is unspent, no bundle carries
+   a real `locked_oos` section, and `PROMOTION_V1` rejects every bundle. The
+   merged real-data H1 attempt (#191) ended `no_trade`; NO TRADE is a valid
+   result, not validation.
+2. **No runtime holdout/promotion command.** The CLI exposes only
+   `discovery run|reproduce|evidence`. No `discovery promote`, no orchestrator
+   handler, no HTTP endpoint. The holdout ledger and `promote_with_evidence`
+   are library-only; the only successful promotion in tests uses a helper with
+   `require_production=False`.
+3. **Provenance cannot gate promotion.** `DatasetManifest`,
+   `CandidateEvidence`, the holdout and `promotion.py` carry no
+   `source`/`synthetic`; a synthetic dataset can satisfy every policy check.
+4. **No governed paper champion and no paper scheduler.** No evidence-mode
+   champion exists, so `paper.advance` returns NO TRADE. Nothing enqueues
+   `paper.advance` on a clock or on new bars: the daemon scans data files
+   (→ `dataset.build`) and paper ledgers (→ `paper.outcomes` proposal) only.
+5. **No model edge.** Classical models are at or below the prior baseline; PPO
+   is experimental and mostly degenerate; no committed neural checkpoint.
+6. **No target-hardware acceptance.** No measured full loop on the M2 8 GB
+   machine; the bench paper stage failed with `BarGapError`; walk-forward is
+   unmeasured.
+7. **Documentation drift.** Snapshots below lag the code in places; this
+   snapshot and the corrected boxes supersede them.
+
+Not on `06c853c`, in progress: fail-closed provenance through dataset →
+evidence → promotion (acceptance step 1), an optional offline PDF parser
+(acceptance step 5; `knowledge/ingest.py` still raises `UnsupportedFormat`), and
+a broader discovery-archive read API (only read-only `/api/autonomy` status and
+champions exist). The three 2026-11-25 assessment reports are on unmerged
+branches; cite them as evidence, not as repository files.
+
 ## Phase 1 — Audit and documentation
 
 - [x] Read the backend, frontend, API, strategies, PPO, imitation, features,
@@ -51,10 +107,12 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Feature availability rules (e.g. signed flow only with tick volumes).
 - [x] H4/M30 multi-timeframe alignment tests (#133): a higher-timeframe value
       is visible only after its bucket closes; chained resampling is pinned.
-      M30/H4 are data-layer timeframes, not feature inputs yet.
+- [x] Opt-in M30/H4 higher-timeframe context features with closed-bucket
+      causality (#187).
 - [ ] Dataset id wired into every trainer/run config.
 - [x] Persisted array format for large datasets (memmap/parquet).
-- [ ] Feature ablation runner.
+- [x] Feature ablation runner (#188): reproducible feature-group ablation with
+      a recorded run manifest.
 - [ ] PARTIAL: `log_ret_3` is a documented read-only alias for the log-return
       column and the naming is pinned by tests (#133); consecutive-candle
       features do not exist.
@@ -75,11 +133,11 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 5 — Classical ML
 
-- [x] Add scikit-learn (LightGBM/XGBoost still open).
+- [x] Add scikit-learn.
 - [x] Logistic regression, random forest, extra trees, HistGradientBoosting.
 - [x] LightGBM and XGBoost (lazy imports; macOS needs `libomp`).
-- [ ] SGDClassifier incremental path.
-- [ ] Isolation forest anomaly detector.
+- [x] SGDClassifier incremental path (#184).
+- [x] Isolation forest anomaly detector (#184).
 - [ ] SVM only if timing is practical.
 - [x] Direction task (3-class, configurable horizon).
 - [x] Train/validation split, purge/embargo and dataset id.
@@ -89,7 +147,7 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Purged time-series CV with embargo.
 - [x] Reliability curve, ECE and guarded MCE.
 - [ ] Calibration thresholds / probability rejection gate.
-- [ ] Feature importance and ablation.
+- [x] Feature importance and ablation (#184 importances, #188 ablation runner).
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
 - [x] Regime breakdown of the trading evaluation (as-of join, partition identity tested).
 - [x] Model registry metadata in SQLite (Phase 10).
@@ -118,9 +176,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] PatchTST-style patching.
 - [x] iTransformer-style variate attention.
 - [ ] TFT only if smaller models justify it.
-- [x] Config guard (d_model/layers/heads/sequence/batch).
-- [ ] PARTIAL: parameter-count smoke test done; measured benchmark pending.
-- [ ] Same evaluator/registry.
+- [x] Config guard (hidden/heads/layers/sequence).
+- [x] Memory smoke test and measured benchmark (parameters, latency, throughput, RSS).
+- [x] Same evaluator.
+- [ ] PARTIAL: shared model registry is Phase 10 work.
 - [x] `docs/transformer-models.md`.
 
 ## Phase 8 — Reinforcement learning expansion
@@ -128,11 +187,12 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] PPO with Gymnasium environment.
 - [x] Behavior-cloning warm start.
 - [x] VecNormalize, random starts, checkpoints, pause/resume.
-- [x] Rule, hold and random baselines.
-- [ ] PARTIAL: mask now covers flow/signal, session, daily/weekly loss, drawdown,
-      kill switches, consecutive losses, spread, ATR and lot-size gates, and
-      `run_backtest(mask_actions=True)` / `backtest --mask-actions` enforce it in
-      evaluation. Training still uses plain PPO (no MaskablePPO dependency).
+- [x] Hold baseline in the RL run (`baseline_hold_net_profit`).
+- [ ] PARTIAL: rule baseline exists in backtest/evaluator; random baseline and
+      both in the RL run manifest are open.
+- [ ] PARTIAL: flow mask (#76) is merged; full risk/session/spread/ATR/lot mask
+      and evaluation wiring is #181 (no #181 commit is on `06c853c`). Training
+      still uses plain PPO (no MaskablePPO dependency).
 - [ ] REDUCE position action.
 - [ ] SAC evaluation.
 - [ ] TD3 evaluation.
@@ -141,21 +201,22 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Seed ensembles / policy averaging.
 - [ ] Execution-delay assumption in the environment.
 - [ ] Reward ablation report.
-- [ ] `docs/reinforcement-learning.md`.
+- [x] `docs/reinforcement-learning.md`.
 
 ## Phase 9 — Ensemble and confidence
 
 - [x] Out-of-fold stacking (reuses the purged CV fold geometry).
 - [x] Weighted averaging and voting (soft, weighted, hard with tie → NO_TRADE).
-- [ ] Regime-dependent model selection.
-- [ ] PARTIAL: Brier/log loss/ECE/MCE var; temperature scaling yok.
+- [x] Regime-dependent model selection: OOF-only regime-dependent member
+      weights (#190).
+- [x] Brier/log loss/ECE/MCE metrics and optional temperature scaling (#176).
 - [x] Brier/log loss/calibration curves.
 - [x] Ensemble disagreement score (mean pairwise total variation).
 - [ ] Out-of-distribution/unknown regime detection.
 - [x] Decision engine: BUY/SELL/HOLD/NO TRADE (ordered gates, reason required).
 - [ ] PARTIAL: `Decision` kaydı model/probability/disagreement/regime/reason taşıyor; kalıcı log yok.
 - [ ] PARTIAL: karşılaştırma var; 'daha basit olanı tut' otomatik değil.
-- [ ] `docs/ensemble-decision.md`.
+- [x] `docs/ensemble-decision.md`.
 
 ## Phase 10 — Autonomous learning and registry
 
@@ -164,13 +225,19 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Dataset versioning and checksums (dataset_id + digest).
 - [x] Model versioning, champion pointer and rollback (scope'lu).
 - [ ] PARTIAL: aday → şampiyon kapısı fail-closed promotion policy (#117) ve
-      one-shot locked holdout (#121) ile implemented+tested; ancak hiçbir komut
-      discovery çalışmasından evidence bundle yazmıyor (#136 açık), dolayısıyla
-      kapı uçtan uca çalıştırılamıyor ve runtime'da çağıran yok.
+      one-shot locked holdout (#121) ile implemented+tested; #159 ayrıca evidence
+      bundle ve dataset artifact üretiyor. Ancak hiçbir CLI komutu veya
+      orchestrator handler holdout'u harcayıp promote etmiyor; kapı runtime'da
+      çağrılmıyor.
+- [ ] Runtime holdout + promotion command: bundle identity check, pre-holdout
+      policy, one holdout spend, `PROMOTION_V1` re-evaluation,
+      `promote_with_evidence`, archive/champion row and a second-spend refusal.
+      Not on `06c853c`; see `docs/runbook.md` §2.6.
 - [x] Drift detection: features (PSI/KS), predictions and calibration (ECE).
 - [ ] PARTIAL: konfigüre edilebilir scheduler — kalıcı kuyruk, pause/resume/cancel
-      ve daemon döngüsü var (#118); tetikleyiciler yalnızca dosya ve matured
-      paper-outcome (#122), veri/doküman/araştırma tetikleyicileri yok.
+      ve daemon döngüsü var (#118); tetikleyiciler veri dosyası (#158) ve matured
+      paper-outcome (#122/#189, proposal only). `paper.advance` için saat/bar
+      tetikleyicisi ve doküman/araştırma tetikleyicileri yok.
 - [ ] PARTIAL: bir ağır iş/RAM bütçesi — NN/ML job slot ve RAM guard var; PPO
       için global slot yok.
 - [ ] Failed training cannot stop paper replay.
@@ -183,8 +250,9 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Max weekly loss (Monday 17:00 UTC anchor; default off).
 - [x] Max drawdown kill switch (peak-to-equity; force-closes; default off).
 - [x] Consecutive-loss pause (blocks new entries, never CLOSE; default off).
-- [ ] PARTIAL: max spread points landed; no slippage cap and no rejected-order model.
-- [ ] Data-quality trade block.
+- [x] Max spread points, slippage cap and data-quality entry block (#186).
+- [x] Data-quality trade block (#186).
+- [ ] Rejected-order model.
 - [x] Emergency kill switch (equity below a fraction of initial balance; default off).
 - [x] Risk limits cannot be bypassed by a model (frozen at construction, no override).
 - [ ] Purged CV with embargo integrated in evaluation.
@@ -211,39 +279,43 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 13 — Dashboard
 
-- [ ] Market Intelligence page.
+- [x] Market Intelligence page (`/intelligence`, `/api/regime` only).
 - [x] Classical ML Lab (`/labs/ml`, real API only).
 - [ ] Neural Network Lab.
 - [ ] RL Lab.
-- [ ] Strategy Intelligence by regime.
-- [ ] Autonomous Learning (candidate/champion/rollback/drift).
+- [x] Strategy Intelligence by regime (#166). The strategy × regime table is
+      not exposed by any endpoint yet; the page says so instead of deriving it.
+- [x] Autonomous Learning page (`/autonomy`): read-only candidates, champions,
+      jobs, events and drift from `/api/autonomy/*`; no control mutations.
 - [ ] Backtesting (equity, DD, Monte Carlo, walk-forward).
 - [x] Paper Trading page over the real `/api/paper` ledger (#128); read-only
       except closing a running session, every number from a response.
 - [ ] System Monitoring (RAM/CPU/storage/jobs/data quality).
-- [ ] PARTIAL: read-only autonomy status API exists (#134: `/api/autonomy`
-      status/jobs/events/champions, all GET, missing store = `configured:false`);
-      no autonomy dashboard page consumes it yet.
-- [ ] PARTIAL: ML Lab ve Paper Trading sayfaları gerçek API kullanıyor; diğer
-      lab ve autonomy sayfaları henüz yok. Test sayısı burada yazılmaz; CI
-      sonucu için STATUS.md'ye bakın.
+- [x] Data quality panel on the Data page (#165).
+- [ ] PARTIAL: Neural Network Lab, RL Lab, Backtesting and System Monitoring
+      pages do not exist. Test counts are not written here; use the CI run in
+      STATUS.md.
 
 ## Phase 14 — Mac mini optimisation
 
-- [ ] RAM budget manager and job caps.
+- [ ] PARTIAL: measured orchestrator guard (RSS/load/disk, #112) exists; a
+      general RAM budget manager for every job kind and PPO does not.
 - [ ] MPS benchmark and fallback policy.
 - [ ] Torch thread pinning and memory profiling.
 - [ ] Chunked dataset loading.
 - [ ] Benchmark table: LightGBM, GRU, TCN, small Transformer, PPO.
 - [ ] Cancellation/resume under memory pressure.
-- [ ] `docs/mac-mini-optimization.md`.
+- [x] `docs/mac-mini-optimization.md` exists; its measurements are partial
+      (`docs/evidence/bench-2026-11-24.json`, `m2_acceptance=false`).
 
 ## Phase 15 — Acceptance
 
 - [ ] All 15 required documents complete and accurate.
 - [ ] Full backend/frontend tests, lint, types, build, e2e.
 - [ ] End-to-end: import → validate → dataset → train → evaluate → promote/
-      reject → paper → monitor → rollback.
+      reject → paper → monitor → rollback. The merged #191 attempt ran the chain
+      on real XAUUSD H1 to the promotion gate, recorded NO TRADE and stopped:
+      no holdout spend, no promotion, no paper session.
 - [ ] Acceptance checklist met or each gap documented.
 - [ ] Final report separates implemented / trained / validated / profitable.
 
@@ -256,7 +328,8 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Independent risk engine with daily loss/notional/position limits.
 - [x] Independent risk engine with weekly/DD/consecutive-loss/spread blocks;
       #135 proves a spec, a raw action and a job payload all hit the same frozen
-      `RiskEngine`. Slippage cap and rejected-order model stay open in Phase 11.
+      `RiskEngine`. Slippage cap and data-quality block landed in #186; the
+      rejected-order model stays open in Phase 11.
 - [x] Public repository, CI, branch protection, secret scanning, CodeQL.
 - [ ] License choice (owner decision; currently none).
 - [ ] Real-money execution: **not a goal**; must stay disabled.
@@ -285,12 +358,14 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Add candidate mutation, crossover, deduplication, complexity limits,
       reproducible seeds, experiment budgets and cancellation.
 - [ ] PARTIAL: simulator fills/costs and risk controls are connected through
-      DslEvaluator (#102/#104). A chronological fold evidence bundle (#114), a
-      one-shot locked holdout (#121) and a bundle reproducer (#130) exist, but
-      `discovery run` neither builds an evidence bundle nor spends a holdout;
-      the producer is issue #136.
-- [ ] PARTIAL: trial counts and caps are recorded per search; a data-snooping
-      correction/penalty policy is still missing (only attempt caps apply).
+      DslEvaluator (#102/#104). #159 closes #136: discovery can now persist an
+      atomic dataset artifact, evidence bundle and spec sidecar, verify them by
+      read-back and reproduce the checksum. The CLI producer exists, but
+      discovery does not automatically spend the locked holdout or promote.
+- [x] Add multiple-testing selection controls (#149): adjusted screening,
+      deflated effect floor with trial/complexity penalty and seeded bootstrap
+      CI. The advice is an additional screen, not a promotion decision; IID
+      assumptions and limitations remain documented.
 - [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
 - [x] Store full candidate lineage, dataset/code/config hashes and rejection
       reasons in the registry.
@@ -299,18 +374,22 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Replay a stored evidence bundle from its identity and refuse settings,
       code-version, dataset or spec drift (#130).
 - [ ] PARTIAL: a fail-closed `PROMOTION_V1` policy compares candidate and
-      incumbent on identical evidence (#117), but no runtime path calls it and
-      no command writes the bundle it reads (#136).
-- [ ] PARTIAL: no-look-ahead, determinizm, lineage ve DSL safety testleri var;
-      overfit reddi, no-trade seçimi ve cost sensitivity evaluator diliminde.
+      incumbent on identical evidence (#117); #159 now supplies its evidence
+      bundle input. Automatic production promotion remains intentionally
+      unconnected pending explicit policy review and acceptance.
+- [ ] PARTIAL: no-look-ahead, determinism, lineage and DSL safety tests exist;
+      #169 makes evidence checksums thread-independent. The real XAUUSD H1
+      smoke (#143) correctly chose NO TRADE; it did not validate a strategy.
+      #174 (merged) requires a tradable best candidate; #191 records a second
+      real-data attempt that stopped at the promotion gate.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
 - [ ] PARTIAL: TXT/MD/HTML/DOCX var; PDF kasten desteklenmiyor (opsiyonel parser).
 - [x] Preserve originals, checksums, source metadata, parser versions and
       page/section references.
-- [ ] PARTIAL: metin ve DOCX paragrafları var; tablo yapısı PR #119'da açık
-      (henüz merge değil), OCR yok.
+- [ ] PARTIAL: metin, DOCX ve tablo yapısı var (#119); PDF/OCR yok. A pinned
+      offline PDF parser is acceptance step 5, not on `06c853c`.
 - [x] Build a local searchable document index with source citations (FTS5/LIKE).
 - [x] Classify claims, concepts, examples, opinions and empirical observations
       (deterministic heuristic triage, #107; not semantic reading).
@@ -319,8 +398,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Link each hypothesis to source passages and experiment outcomes.
 - [x] Route source-linked hypotheses to audited experiment proposals (#123,
       provenance hardened in #132). Prose cannot create a strategy or an order.
-- [ ] PARTIAL: proposals are stored with an approval/audit trail; nothing
-      converts an approved proposal into a discovery run automatically.
+- [ ] PARTIAL: #153 adds an audited bridge: only approved, scope-checked,
+      holdout-safe and deduplicated proposals may enqueue `discovery.run`.
+      It does not approve proposals, create strategies from prose or place
+      orders. Completed backtests/paper logs are not yet a full feedback corpus.
 - [ ] Ingest completed backtests, paper logs and broker exports as feedback.
 - [x] Tests: parser errors, provenance, source traceability, duplicate imports,
       hypothesis schema and no direct document-to-order path.
@@ -329,12 +410,14 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation
 
-- [ ] PARTIAL: file triggers (#158) and matured paper-outcome proposals
-      (#122) exist. #153 adds an approved-proposal → `discovery.run` bridge;
-      this does not approve hypotheses or promote candidates automatically.
-- [ ] PARTIAL: data-file triggers can enqueue dataset builds (#158); the
-      audited proposal bridge can enqueue discovery (#153). Automatic data
-      quality approval and an unattended research-to-paper cycle remain open.
+- [ ] PARTIAL: file triggers (size+mtime+sha256, durable cursor) and the
+      matured paper-outcome trigger (#122, proposal only) exist. #153 adds the
+      approved-proposal → `discovery.run` queue bridge; this is not automatic
+      hypothesis approval or promotion.
+- [ ] PARTIAL: ingestion/index and dataset/discovery handlers are registered
+      (#115); data triggers can enqueue dataset builds, and approved proposals
+      can enqueue discovery. Automatic data-quality approval and a full
+      unattended research lifecycle remain open.
 - [x] Production handlers registered: knowledge ingest, dataset build,
       discovery, paper advance and matured-outcome analysis (#115).
 - [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
@@ -342,21 +425,19 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       daemon (#118) defaults to the `m2_8gb` profile, but the plain `Orchestrator`
       still defaults to `AllowAllGuard`, so callers can bypass measurement.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] PARTIAL: discovery evidence persistence (#159), fail-closed promotion
-      policy (#117), one-shot holdout (#121), champion governance and continuous
-      paper runner (#156) are wired as separate pieces. Synthetic acceptance
-      (#151) proves wiring only; real-market OOS → reviewed promotion → sustained
-      paper → matured-feedback cycle remains unproven.
-- [x] Paper gap handling: runner supports `strict`, `session_aware` and
-      `skip_with_report` with append-only audit (#164). Open PR
-      `fix/paper-advance-gap-policy` wires explicit `gap_policy` selection
-      into `paper.advance`; omitted payload keeps the safe `strict` default.
+- [ ] PARTIAL: #159 now persists evidence bundles and dataset artifacts;
+      #117 supplies the fail-closed promotion policy; #121 protects one-shot
+      holdout; #156 routes `paper.advance` through the continuous runner and
+      evidence-governed champion. #151 proves only synthetic wiring. A complete
+      real-market OOS → reviewed promotion → sustained paper → matured-feedback
+      cycle is still unproven.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
-- [ ] PARTIAL: pause/safe mode/disable research var; champion rollback discovery
-      arşivinde var (#109), orchestrator seviyesinde rollback kontrolü yok.
+- [ ] PARTIAL: persisted pause/safe-mode/disable-research controls exist in
+      the orchestrator core. #175 adds an audited local HTTP control surface and
+      #177 adds a fail-closed legacy UI fallback switch; both are merged.
 - [ ] PARTIAL: trigger, recovery, resource refusal ve kontrol testleri var;
-      paper isolation ve uçtan uca döngü yok.
+      paper isolation ve uçtan uca döngü yok. `paper.advance` için scheduler yok.
 
 ## Phase 19 — Autonomous paper-trading acceptance
 
@@ -369,7 +450,9 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [ ] Keep real-money execution disabled; optional MT5 demo remains explicitly
       configured and disabled by default.
 - [ ] Final report distinguishes implemented, tested, trained, validated,
-      paper-traded and profitable; no profitability guarantee.
+      paper-traded and profitable; no profitability guarantee. A 2026-11-25
+      report exists on an unmerged branch, and the merged #191 attempt record is
+      a stage-by-stage real-data attempt, not the final acceptance report.
 
 ## New project-wide acceptance rule
 
@@ -383,58 +466,50 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       limits.
 
 
-## Current autonomous priority update — 2026-11-24 (second refresh)
+## Historical priority update — 2026-11-24 (superseded by the snapshot above)
 
-Verified main snapshot: `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875`.
-This section supersedes stale status statements above where they conflict with
-the current merged mainline. Detailed evidence and limitations are in
-`docs/current-state-addendum-2026-11-24.md`.
+Verified main at that time: `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875`. Kept for
+traceability only. Where it conflicts with the 2026-11-25 snapshot, the snapshot
+wins.
 
 1. **Discovery is a validation-slice experiment, not promotion-grade selection.**
-   #104 is merged; candidates are searched/evaluated with simulator costs and
-   compared with hold/ret_5. `discovery run` builds no evidence bundle and never
-   reads the test split.
+   Still true: `discovery run` builds no evidence bundle and never reads the
+   test split.
 2. **Promotion policy is fail-closed and tested, but unreachable at runtime.**
-   #117 `PROMOTION_V1` refuses an empty policy, a force flag, and any bundle
-   without a locked OOS section; `require_locked_oos` cannot be disabled on a
-   production policy. No merged command or handler calls it.
-3. **Locked holdout exists; no real one has been spent.** #121 seals a holdout
-   by `(dataset_id, dataset_checksum)`, grants one single-use token off an
-   accepted decision, and writes an immutable result. Spending it requires the
-   missing evidence producer (#136).
-4. **Reproduction has a consumer but no producer.** #130 replays a stored bundle
-   and returns a typed mismatch on any drift; nothing writes the bundle or the
-   dataset artifact it needs (#136 open).
-5. **Knowledge extraction is heuristic; routing is audited.** #106/#107 merged,
-   #123 routes hypotheses to experiment proposals (#132 hardens provenance).
-   Table structure is open PR #119. Proposals do not become discovery runs.
-6. **Orchestration is assembled, not one pipeline.** Queue/events/controls, five
-   handlers (#115), measured guard (#112), daemon with `m2_8gb` default (#118),
-   paper-outcome trigger (#122) and integration tests (#129) exist; the bare
-   `Orchestrator` still defaults to `AllowAllGuard`.
-7. **Paper has a page and a ledger, not a governed loop.** #103/#116/#128 give a
-   DSL runner, append-only continuation, matured outcomes and a `/paper` page;
-   `paper.advance` still uses the slice runner and enforces no promotion
-   provenance.
-8. **Risk is non-bypassable in tests.** #135 proves the DSL spec, a raw action
-   and a job payload all reach the same frozen `RiskEngine`. PPO training is
-   still plain PPO (#108 masks evaluation only).
-9. **Main is not green.** `tests/test_api_autonomy.py` calls a removed
-   `DiscoveryArchive.promote`; 4 tests fail on `6113197`/current tree. The newest
-   green main CI run is `45422130310` at `2bbb312`.
+   Still true, and it is blocker 2 in the current list.
+3. **Locked holdout exists; no real one has been spent.** Still true. The
+   "missing evidence producer" clause is stale: #159 merged the producer.
+4. **Reproduction has a consumer but no producer.** Stale. #159 added the
+   producer; #130/#169 replay and compare it.
+5. **Knowledge extraction is heuristic; routing is audited.** Table structure
+   is merged (#119); PDF is still unsupported.
+6. **Orchestration is assembled, not one pipeline.** Still true: five handlers,
+   no evidence/promotion/holdout job, no `paper.advance` trigger.
+7. **Paper has a page and a ledger, not a governed loop.** Partly stale:
+   `paper.advance` now uses the continuous runner and refuses non-evidence
+   champions (#156/#164). What is missing is a champion and a scheduler.
+8. **Risk is non-bypassable in tests.** Still true; #186 added the slippage cap
+   and data-quality block.
+9. **Main is not green.** Stale. `test_api_autonomy.py` passes at `50fbca6`
+   (CI run `45550807353`, backend `2,320 passed, 3 skipped`).
 
-### Next work, strict order
+### Next work, strict order (updated 2026-11-25)
 
-- [ ] Persist the candidate evidence bundle and dataset artifact from a discovery
-      run and invoke `evaluate_promotion`/`promote_with_evidence` (issue #136).
-- [ ] Fix `test_api_autonomy.py` so main is green again.
-- [ ] Enforce promotion provenance in `paper.advance`: only a sealed accepted
-      decision may select the champion; otherwise auditable NO TRADE.
-- [ ] Record every candidate attempt and add multiple-testing/data-snooping
-      controls, complexity penalties and uncertainty reporting inside the bundle.
-- [ ] Convert an approved experiment proposal into a discovery run without
-      letting prose become a strategy or an order.
-- [ ] Prove the complete loop on real XAUUSD data within measured M2 8 GB limits.
+- [ ] Make provenance fail closed through dataset → evidence → promotion:
+      carry `source`/`synthetic`/provenance checksum and reject unknown or
+      synthetic bundles in `PROMOTION_V1`.
+- [ ] Add the runtime holdout + promotion command (CLI and/or handler) that
+      spends one holdout, re-evaluates `PROMOTION_V1` and calls
+      `promote_with_evidence`; refuse a second spend.
+- [ ] Record a real candidate experiment and a deliberately overfit negative
+      control; publish the artifacts whether the decision is NO TRADE or a
+      rejection.
+- [ ] Add a `paper.advance` trigger/scheduler so the daemon, not a human,
+      creates advance jobs on new bars; keep the gap policy in the payload.
+- [ ] Add the optional pinned offline PDF parser and record a PDF → page/section
+      → hypothesis run.
+- [ ] Prove the complete loop on real XAUUSD data within measured M2 8 GB
+      limits, and publish one report that does not promote lower evidence rungs.
 
 Do not mark an item complete because a module, issue, PR or unit test exists.
 Require code integration, regression tests and reproducible acceptance evidence.

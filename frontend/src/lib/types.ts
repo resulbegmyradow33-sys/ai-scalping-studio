@@ -217,13 +217,35 @@ export interface Metrics {
   avg_bars: number;
 }
 
-/** One entry of `GET /api/runs`. */
+/** One entry of `GET /api/runs`; `created_at` is null when the manifest lacks it. */
 export interface RunSummary {
   run_id: string;
   status: string;
-  created_at: string;
+  created_at: string | null;
   steps: number;
   reward_mean: number | null;
+  reward_mean_normalized?: number | null;
+  degenerate?: boolean | null;
+  baseline_hold_net_profit?: number | null;
+}
+
+/** `POST /api/backtest`; the server accepts only these two fields. */
+export interface BacktestRequest {
+  run_id: string;
+  symbol: string;
+}
+
+/**
+ * `POST /api/backtest`: the report path and the run metrics.
+ *
+ * `equity` is optional because the current backend does not send it; the page
+ * renders a curve only when a response actually carries a finite array. The
+ * metrics themselves are `Metrics` with non-finite values serialised as null.
+ */
+export interface BacktestResponse {
+  report_path: string;
+  metrics: Metrics;
+  equity?: number[];
 }
 
 /** One checkpoint of a training curve; `step` is the x axis. */
@@ -290,6 +312,12 @@ export interface DecisionPayload {
   action: DecisionAction;
   strategy: string;
   blocked: string | null;
+  /** What produced the strategy label: legacy card, DSL champion or fallback. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** True when the runner refused to trade because the legacy fallback is off. */
+  no_trade?: boolean;
+  /** Safe reason code for a NO TRADE decision. */
+  reason?: string;
 }
 
 export interface EquityPayload {
@@ -326,7 +354,7 @@ export type SimMessageType = SimMessage["type"];
 
 // --- strategy card -----------------------------------------------------------
 
-/** Parameters the promoted flow-momentum rule replays. */
+/** Parameters the legacy flow-momentum rule replays. */
 export interface RuleParams {
   timeframe: string;
   flow_quantile: number;
@@ -362,6 +390,16 @@ export interface ForwardResult {
 export interface StrategyCard {
   active: boolean;
   strategy: string;
+  /** What actually ran: legacy card, a DSL champion, or the fallback path. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** Never a validation claim; the legacy path reports `legacy-heuristic`. */
+  validation?: string;
+  /** Safe reason code when `classification` is `fallback`. */
+  fallback_reason?: string;
+  /** Whether the M1 momentum fallback is enabled in this process. */
+  legacy_fallback?: boolean;
+  /** The rule that actually produced the stream, e.g. `flow_momentum`. */
+  active_rule?: string;
   timeframe?: string;
   symbol?: string;
   params?: RuleParams;
@@ -552,6 +590,26 @@ export interface CalibrateResponse {
 
 /** Bar sizes a paper session may be opened on (`PaperTimeframe` in the schema). */
 export type PaperTimeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+
+/**
+ * Body of `POST /api/paper/sessions`. The server generates the id and the
+ * ledger path is app configuration, so neither is expressible here. `config`
+ * is stored verbatim under `extra`; it does not configure a runner.
+ */
+export interface PaperSessionCreateRequest {
+  symbol: string;
+  timeframe: PaperTimeframe;
+  strategy: string;
+  model_version: string | null;
+  config?: Record<string, unknown>;
+}
+
+/** `201` from `POST /api/paper/sessions`; the id was chosen by the server. */
+export interface PaperSessionCreated {
+  session_id: string;
+  status: string;
+  started_at: string;
+}
 
 /**
  * One row of `GET /api/paper/sessions`. `model_version` carries the DSL spec

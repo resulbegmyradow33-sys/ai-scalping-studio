@@ -731,6 +731,7 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                             "scanned_sentences": extraction.scanned_sentences,
                             "duplicate": True,
                             "stored_path": existing.stored_path,
+                            "warnings": list(record.warnings),
                             "index": str(index_path),
                         }
                     )
@@ -774,6 +775,7 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                         "scanned_sentences": extraction.scanned_sentences,
                         "duplicate": record.duplicate,
                         "stored_path": record.stored_path,
+                        "warnings": list(record.warnings),
                         "index": str(index_path),
                     }
                 )
@@ -1095,6 +1097,10 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
                     "mode": "continuous",
                     "bars": advance.new_bars,
                     "bars_processed": advance.bars_processed,
+                    "gap_policy": advance.gap_policy,
+                    "gaps_skipped": advance.gaps_skipped,
+                    "missing_bars": advance.missing_bars,
+                    "gaps_recorded": advance.gaps_recorded,
                 },
             )
             return HandlerResult.success(_jsonable(data))

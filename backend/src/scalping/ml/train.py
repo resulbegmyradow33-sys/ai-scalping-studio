@@ -28,7 +28,8 @@ from sklearn.metrics import (
 from scalping.datasets.builder import DatasetBundle, build_dataset
 from scalping.features.build import FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS
-from scalping.ml.calibration import calibration_summary
+from scalping.ml.calibration import calibration_summary, fit_temperature
+from scalping.ml.incremental import incremental_fit, supports_partial_fit
 from scalping.ml.models import build_model
 
 __all__ = [
@@ -58,6 +59,17 @@ class TrainSpec:
     seed: int = 0
     evaluate_test: bool = False
     include_flat: bool = False
+    #: ``0`` fits in one batch pass; ``N > 1`` fits N contiguous, ordered
+    #: ``partial_fit`` chunks (only models with ``partial_fit`` support it).
+    incremental_chunks: int = 0
+
+    def __post_init__(self) -> None:
+        if self.incremental_chunks < 0:
+            raise ValueError("incremental_chunks must be >= 0")
+    #: ``"none"`` or ``"temperature"``. Temperature is fitted on validation
+    #: rows only; the test split is never used to fit or to report corrected
+    #: test metrics.
+    calibrate: str = "none"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +86,10 @@ class MLResult:
     test: dict[str, Any] | None
     baseline: dict[str, Any]
     split_counts: dict[str, int]
+    #: Fitted calibration (before/after on validation) or ``None``. The
+    #: headline ``validation`` metrics stay raw so promotion evidence reads the
+    #: numbers that were recorded, not a post-hoc view.
+    calibration: dict[str, Any] | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -87,6 +103,7 @@ class MLResult:
             "test": self.test,
             "baseline": self.baseline,
             "split_counts": self.split_counts,
+            "calibration": self.calibration,
             "created_at": self.created_at,
             "spec": asdict(self.spec),
         }
@@ -113,9 +130,7 @@ def _metrics(
         "balanced_accuracy": float(balanced_accuracy_score(y_true, predicted)),
         "log_loss": float(log_loss(y_true, probabilities, labels=list(classes))),
         "brier": float(np.mean(np.sum((probabilities - one_hot) ** 2, axis=1))),
-        "precision": {
-            str(label): float(precision[index]) for index, label in enumerate(classes)
-        },
+        "precision": {str(label): float(precision[index]) for index, label in enumerate(classes)},
         "recall": {str(label): float(recall[index]) for index, label in enumerate(classes)},
         "f1": {str(label): float(f1[index]) for index, label in enumerate(classes)},
         "support": {str(label): int(support[index]) for index, label in enumerate(classes)},
@@ -139,7 +154,9 @@ def _baseline(
     return {
         "majority_class": majority,
         "accuracy": float(np.mean(y_validation == majority)),
-        "log_loss": float(log_loss(y_validation, np.tile(prior, (y_validation.size, 1)), labels=list(classes))),
+        "log_loss": float(
+            log_loss(y_validation, np.tile(prior, (y_validation.size, 1)), labels=list(classes))
+        ),
         "class_prior": {str(label): float(prior[index]) for index, label in enumerate(classes)},
     }
 
@@ -176,13 +193,36 @@ def train_classifier(
         raise ValueError("not enough training rows; adjust fractions or horizon")
     if int(validation_mask.sum()) < 5:
         raise ValueError("not enough validation rows; adjust fractions or embargo")
+    if spec.calibrate not in ("none", "temperature"):
+        raise ValueError(f"unknown calibration {spec.calibrate!r}; choose none or temperature")
 
     y_train = bundle.y_direction[train_mask]
     classes = tuple(int(value) for value in np.unique(y_train))
     model = build_model(spec.model, seed=spec.seed)
-    model.fit(bundle.X[train_mask], y_train)
+    if spec.incremental_chunks:
+        if not supports_partial_fit(model):
+            raise ValueError(
+                f"{spec.model!r} has no partial_fit; incremental_chunks needs a "
+                "linear model such as sgd, or use the batch path"
+            )
+        incremental_fit(
+            model,
+            bundle.X[train_mask],
+            y_train,
+            chunks=spec.incremental_chunks,
+            classes=np.asarray(classes),
+        )
+    else:
+        model.fit(bundle.X[train_mask], y_train)
     probabilities = model.predict_proba(bundle.X[validation_mask])
     validation = _metrics(bundle.y_direction[validation_mask], probabilities, classes)
+    # Calibration is fitted on validation rows only. The test split is neither
+    # used to fit nor re-scored with the temperature here: its metrics below
+    # stay the raw model output, exactly as it would be evaluated elsewhere.
+    calibration = None
+    if spec.calibrate == "temperature":
+        fitted = fit_temperature(bundle.y_direction[validation_mask], probabilities, classes)
+        calibration = {**fitted.to_dict(), "fitted_on": "validation"}
     test = None
     if spec.evaluate_test and int(test_mask.sum()) > 0:
         test = _metrics(
@@ -207,6 +247,7 @@ def train_classifier(
             "purged": int((bundle.split == -1).sum()),
             "flat_dropped": int(flat.sum()),
         },
+        calibration=calibration,
     )
 
 
@@ -251,6 +292,8 @@ def load_result(directory: str | Path) -> MLResult:
         seed=int(spec_raw["seed"]),
         evaluate_test=bool(spec_raw.get("evaluate_test", False)),
         include_flat=bool(spec_raw.get("include_flat", False)),
+        incremental_chunks=int(spec_raw.get("incremental_chunks", 0)),
+        calibrate=str(spec_raw.get("calibrate", "none")),
     )
     model, columns = load_model(target / "model.joblib")
     dataset_id = str(metadata["dataset_id"])
@@ -268,5 +311,6 @@ def load_result(directory: str | Path) -> MLResult:
         test=metadata.get("test"),
         baseline=metadata["baseline"],
         split_counts=metadata["split_counts"],
+        calibration=metadata.get("calibration"),
         created_at=str(metadata["created_at"]),
     )

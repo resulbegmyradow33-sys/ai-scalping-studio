@@ -14,6 +14,8 @@ import type {
   StrategyCard,
 } from "@/lib/types";
 
+import { LegacyBadge } from "./legacy-badge";
+
 export interface StrategyCardPanelProps {
   card: StrategyCard | undefined;
   loading?: boolean;
@@ -49,6 +51,28 @@ function holdoutLine(metrics: RuleMetrics | undefined): string {
   return `${r} · PF ${pf} · DD ${dd} · ${metrics.trades} işlem`;
 }
 
+function fallbackCopy(card: StrategyCard | undefined): string {
+  if (card?.legacy_fallback === false) {
+    return "DSL şampiyonu yok ve legacy geri dönüş kapalı; panel NO TRADE üretir.";
+  }
+  if (card?.classification === "fallback" && card.params !== undefined) {
+    return "Kart uygulanamadı; panel doğrulanmamış M1 momentumunu (legacy fallback) oynatıyor.";
+  }
+  return (
+    "Henüz terfi etmiş bir kural kartı yok; panel doğrulanmamış M1 momentumunu " +
+    "(legacy fallback) oynatıyor. Kalibrasyon en az 5 yıllık H1 verisi ister."
+  );
+}
+
+function stateCopy(card: StrategyCard | undefined, active: boolean): string {
+  if (active) return "flow + momentum";
+  if (card?.legacy_fallback === false) return "NO TRADE · legacy fallback kapalı";
+  if (card?.classification === "fallback" && card.params !== undefined) {
+    return "kart uygulanamadı · legacy fallback · M1 momentum";
+  }
+  return "kart yok · legacy fallback · M1 momentum";
+}
+
 export function StrategyCardPanel({
   card,
   loading = false,
@@ -59,6 +83,7 @@ export function StrategyCardPanel({
   onCalibrate,
 }: StrategyCardPanelProps) {
   const active = card?.active === true && card.params !== undefined;
+  const legacy = card?.classification !== "dsl";
   return (
     <section
       aria-labelledby="strategy-card-heading"
@@ -67,8 +92,9 @@ export function StrategyCardPanel({
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div className="flex flex-wrap items-baseline gap-2">
           <h2 id="strategy-card-heading" className="text-sm font-semibold text-slate-100">
-            Canlı strateji
+            Strateji kartı
           </h2>
+          {legacy && <LegacyBadge testId="strategy-card-legacy" />}
           <span
             data-testid="strategy-card-state"
             className={
@@ -77,7 +103,7 @@ export function StrategyCardPanel({
                 : "rounded-sm border border-slate-700 px-1.5 py-0.5 text-xs text-slate-400"
             }
           >
-            {active ? "flow + momentum" : "kart yok · M1 momentum"}
+            {stateCopy(card, active)}
           </span>
         </div>
         <button
@@ -142,9 +168,8 @@ export function StrategyCardPanel({
       )}
 
       {!loading && error === null && !active && (
-        <p className="mt-1 text-xs text-slate-400">
-          Henüz terfi etmiş bir kural kartı yok; panel doğrulanmamış M1 momentumunu
-          oynatıyor. Kalibrasyon en az 5 yıllık H1 verisi ister.
+        <p data-testid="strategy-card-hint" className="mt-1 text-xs text-slate-400">
+          {fallbackCopy(card)}
         </p>
       )}
 

@@ -161,6 +161,8 @@ _EVIDENCE_KEYS: Final[tuple[str, ...]] = (
     "created_at",
     "schema_version",
     "locked_oos",
+    "source",
+    "synthetic",
 )
 _POLICY_KEYS: Final[tuple[str, ...]] = (
     "folds",
@@ -299,6 +301,22 @@ def _sequence(value: object, where: str) -> Sequence[Any]:
 def _text(value: object, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvidenceError("invalid_payload", f"{where} must be a non-empty string")
+    return value
+
+
+def _optional_text(value: object, where: str) -> str | None:
+    """A null or absent provenance string is unknown, never an empty claim."""
+    if value is None:
+        return None
+    return _text(value, where)
+
+
+def _optional_bool(value: object, where: str) -> bool | None:
+    """A null or absent provenance flag is unknown; only a real bool is accepted."""
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise EvidenceError("invalid_payload", f"{where} must be true, false or null")
     return value
 
 
@@ -454,7 +472,12 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
     :func:`~scalping.discovery.evidence.verify_evidence` right after loading.
     """
     data = _mapping(payload, "evidence")
-    _only(data, _EVIDENCE_KEYS, "evidence", optional=("locked_oos",))
+    _only(
+        data,
+        _EVIDENCE_KEYS,
+        "evidence",
+        optional=("locked_oos", "source", "synthetic"),
+    )
     schema = _count(data["schema_version"], "schema_version")
     if schema != EVIDENCE_SCHEMA_VERSION:
         raise EvidenceError(
@@ -492,6 +515,8 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
         created_at=_text(data["created_at"], "created_at"),
         schema_version=schema,
         locked_oos=locked,
+        source=_optional_text(data.get("source"), "source"),
+        synthetic=_optional_bool(data.get("synthetic"), "synthetic"),
     )
 
 
@@ -718,6 +743,18 @@ def _manifest(payload: Mapping[str, Any]) -> DatasetManifest:
         notes = payload.get("notes", "")
         if not isinstance(notes, str):
             raise ReproduceError("dataset_manifest_invalid", "manifest.notes must be a string")
+        source = payload.get("source")
+        if source is not None and (not isinstance(source, str) or not source.strip()):
+            raise ReproduceError(
+                "dataset_manifest_invalid",
+                "manifest.source must be a non-empty string or null",
+            )
+        synthetic = payload.get("synthetic")
+        if synthetic is not None and not isinstance(synthetic, bool):
+            raise ReproduceError(
+                "dataset_manifest_invalid",
+                "manifest.synthetic must be true, false or null",
+            )
         return DatasetManifest(
             dataset_id=_string(payload.get("dataset_id"), "manifest.dataset_id"),
             symbol=_string(payload.get("symbol"), "manifest.symbol"),
@@ -734,6 +771,8 @@ def _manifest(payload: Mapping[str, Any]) -> DatasetManifest:
             checksum=_string(payload.get("checksum"), "manifest.checksum"),
             created_at=_string(payload.get("created_at"), "manifest.created_at"),
             notes=notes,
+            source=source,
+            synthetic=synthetic,
         )
     except ReproduceError:
         raise
@@ -892,6 +931,8 @@ def _evidence_config(evidence: CandidateEvidence) -> EvidenceConfig:
         trial_count=evidence.trial_count,
         complexity=evidence.complexity,
         window=policy.window,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
     )
 
 
@@ -1068,6 +1109,17 @@ def reproduce_bundle(
             invalid=False,
             expected=evidence.checksum,
         )
+    if (manifest.source, manifest.synthetic) != (evidence.source, evidence.synthetic):
+        raise ReproduceError(
+            "provenance_mismatch",
+            (
+                f"the artifact manifest says source={manifest.source!r} "
+                f"synthetic={manifest.synthetic!r}, but the bundle recorded "
+                f"source={evidence.source!r} synthetic={evidence.synthetic!r}"
+            ),
+            invalid=False,
+            expected=evidence.checksum,
+        )
 
     bars = ParquetStore(store_root).read(evidence.symbol, evidence.timeframe)
     if bars.is_empty():
@@ -1076,7 +1128,7 @@ def reproduce_bundle(
             f"no {evidence.symbol} {evidence.timeframe} bars under {store_root}",
         )
     try:
-        features = build_features(bars, costs=run_settings.costs)
+        features = build_features(bars, costs=run_settings.costs, groups=manifest.groups)
     except (TypeError, ValueError) as exc:
         raise ReproduceError("bars_invalid", str(exc)) from exc
 

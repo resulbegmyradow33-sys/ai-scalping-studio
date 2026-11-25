@@ -1,0 +1,960 @@
+{
+  "arms": [
+    {
+      "fit_seconds": 0.17,
+      "kind": "probabilistic classifier",
+      "name": "logistic",
+      "prediction": {
+        "test": {
+          "metrics": {
+            "accuracy": 0.4927404719,
+            "balanced_accuracy": 0.4879789021,
+            "brier": 0.5029380918,
+            "ece": 0.041222684,
+            "ece_positive_class": 1,
+            "log_loss": 0.6961153746,
+            "mce": 0.0839346607,
+            "predicted_counts": {
+              "-1": 1981,
+              "1": 2427
+            },
+            "rows": 4408
+          },
+          "prior_baseline": {
+            "accuracy": 0.5460526316,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6917663463,
+            "majority_class": 1
+          }
+        },
+        "validation": {
+          "metrics": {
+            "accuracy": 0.5161508923,
+            "balanced_accuracy": 0.5179162986,
+            "brier": 0.4989894032,
+            "ece": 0.0426736504,
+            "ece_positive_class": 1,
+            "log_loss": 0.6921200156,
+            "mce": 0.0581705596,
+            "predicted_counts": {
+              "-1": 2298,
+              "1": 2129
+            },
+            "rows": 4427
+          },
+          "prior_baseline": {
+            "accuracy": 0.5428055116,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6918732622,
+            "majority_class": 1
+          }
+        }
+      },
+      "spec": {
+        "calibrate": "none",
+        "embargo_bars": 5,
+        "evaluate_test": true,
+        "groups": [
+          "price",
+          "momentum",
+          "volatility",
+          "volume",
+          "structure",
+          "session",
+          "multi_timeframe"
+        ],
+        "horizon": 5,
+        "include_flat": false,
+        "incremental_chunks": 0,
+        "model": "logistic",
+        "purge_bars": 5,
+        "seed": 0,
+        "train_fraction": 0.7,
+        "validation_fraction": 0.15
+      },
+      "trading": {
+        "test": {
+          "base": {
+            "expectancy_r": -0.1573932083,
+            "max_drawdown": 0.1813604302,
+            "net_profit": -1751.6545384577,
+            "profit_factor": 0.7717534054,
+            "total_costs": 808.1935642671,
+            "trades": 296,
+            "win_rate": 0.2939189189
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": false
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "test",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.218943799,
+              "max_drawdown": 0.2017402501,
+              "net_profit": -2015.187022728,
+              "profit_factor": 0.7024924723,
+              "total_costs": 1409.9670868144,
+              "trades": 260,
+              "win_rate": 0.2769230769
+            },
+            "x3": {
+              "expectancy_r": -0.3835570378,
+              "max_drawdown": 0.2038165168,
+              "net_profit": -2038.1651684403,
+              "profit_factor": 0.5168125756,
+              "total_costs": 1329.8213893632,
+              "trades": 139,
+              "win_rate": 0.2158273381
+            }
+          },
+          "threshold": 0.55
+        },
+        "validation": {
+          "base": {
+            "expectancy_r": -0.1313361795,
+            "max_drawdown": 0.2228909501,
+            "net_profit": -2002.2624571505,
+            "profit_factor": 0.8271811195,
+            "total_costs": 1503.2029236179,
+            "trades": 407,
+            "win_rate": 0.3046683047
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "validation",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.2310104602,
+              "max_drawdown": 0.2093181786,
+              "net_profit": -2002.4742999436,
+              "profit_factor": 0.7067230467,
+              "total_costs": 1731.2009949743,
+              "trades": 226,
+              "win_rate": 0.2699115044
+            },
+            "x3": {
+              "expectancy_r": -0.2744669941,
+              "max_drawdown": 0.2049425169,
+              "net_profit": -2005.8264655942,
+              "profit_factor": 0.647160921,
+              "total_costs": 2113.69101465,
+              "trades": 185,
+              "win_rate": 0.2594594595
+            }
+          },
+          "threshold": 0.55
+        }
+      }
+    },
+    {
+      "fit_seconds": 1.44,
+      "kind": "probabilistic classifier",
+      "name": "lightgbm",
+      "prediction": {
+        "test": {
+          "metrics": {
+            "accuracy": 0.5099818512,
+            "balanced_accuracy": 0.5117742334,
+            "brier": 0.5385632397,
+            "ece": 0.1077182921,
+            "ece_positive_class": 1,
+            "log_loss": 0.7420502701,
+            "mce": 0.6437419624,
+            "predicted_counts": {
+              "-1": 2285,
+              "1": 2123
+            },
+            "rows": 4408
+          },
+          "prior_baseline": {
+            "accuracy": 0.5460526316,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6917663463,
+            "majority_class": 1
+          }
+        },
+        "validation": {
+          "metrics": {
+            "accuracy": 0.5193133047,
+            "balanced_accuracy": 0.5204397007,
+            "brier": 0.5124499192,
+            "ece": 0.0684108984,
+            "ece_positive_class": 1,
+            "log_loss": 0.7073060047,
+            "mce": 0.2605340565,
+            "predicted_counts": {
+              "-1": 2264,
+              "1": 2163
+            },
+            "rows": 4427
+          },
+          "prior_baseline": {
+            "accuracy": 0.5428055116,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6918732622,
+            "majority_class": 1
+          }
+        }
+      },
+      "spec": {
+        "calibrate": "none",
+        "embargo_bars": 5,
+        "evaluate_test": true,
+        "groups": [
+          "price",
+          "momentum",
+          "volatility",
+          "volume",
+          "structure",
+          "session",
+          "multi_timeframe"
+        ],
+        "horizon": 5,
+        "include_flat": false,
+        "incremental_chunks": 0,
+        "model": "lightgbm",
+        "purge_bars": 5,
+        "seed": 0,
+        "train_fraction": 0.7,
+        "validation_fraction": 0.15
+      },
+      "trading": {
+        "test": {
+          "base": {
+            "expectancy_r": -0.0606576741,
+            "max_drawdown": 0.2099774958,
+            "net_profit": -2013.7648928429,
+            "profit_factor": 0.8786580421,
+            "total_costs": 2672.8523337444,
+            "trades": 886,
+            "win_rate": 0.4097065463
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "test",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.2530034889,
+              "max_drawdown": 0.2075356896,
+              "net_profit": -2005.5251010976,
+              "profit_factor": 0.5663031472,
+              "total_costs": 1476.1191036389,
+              "trades": 194,
+              "win_rate": 0.3350515464
+            },
+            "x3": {
+              "expectancy_r": -0.3887600978,
+              "max_drawdown": 0.2070543299,
+              "net_profit": -2017.1231856494,
+              "profit_factor": 0.4124073864,
+              "total_costs": 1612.8447433294,
+              "trades": 131,
+              "win_rate": 0.2671755725
+            }
+          },
+          "threshold": 0.55
+        },
+        "validation": {
+          "base": {
+            "expectancy_r": -0.0430036209,
+            "max_drawdown": 0.2196884052,
+            "net_profit": -2018.6938479017,
+            "profit_factor": 0.9070461284,
+            "total_costs": 4591.7901155944,
+            "trades": 1075,
+            "win_rate": 0.4148837209
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "validation",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.2378031473,
+              "max_drawdown": 0.2098163358,
+              "net_profit": -2012.3197431213,
+              "profit_factor": 0.5884316301,
+              "total_costs": 1949.1883726135,
+              "trades": 194,
+              "win_rate": 0.3402061856
+            },
+            "x3": {
+              "expectancy_r": -0.3105942901,
+              "max_drawdown": 0.2109643174,
+              "net_profit": -2026.7481279624,
+              "profit_factor": 0.4812480072,
+              "total_costs": 2131.841260153,
+              "trades": 149,
+              "win_rate": 0.3020134228
+            }
+          },
+          "threshold": 0.55
+        }
+      }
+    },
+    {
+      "fit_plus_scoring_seconds": 1.02,
+      "fit_seconds": 1.0,
+      "kind": "small MLP (32 hidden, scaler fitted on train)",
+      "name": "mlp",
+      "prediction": {
+        "test": {
+          "metrics": {
+            "accuracy": 0.5022686025,
+            "balanced_accuracy": 0.5107807542,
+            "brier": 0.5626655817,
+            "ece": 0.147695461,
+            "ece_positive_class": 1,
+            "log_loss": 0.7933718562,
+            "mce": 0.4851095895,
+            "predicted_counts": {
+              "-1": 2607,
+              "1": 1801
+            },
+            "rows": 4408
+          },
+          "prior_baseline": {
+            "accuracy": 0.5460526316,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6917663463,
+            "majority_class": 1
+          }
+        },
+        "validation": {
+          "metrics": {
+            "accuracy": 0.4989835103,
+            "balanced_accuracy": 0.5011676363,
+            "brier": 0.5297868252,
+            "ece": 0.1038001817,
+            "ece_positive_class": 1,
+            "log_loss": 0.7268817425,
+            "mce": 0.3982295444,
+            "predicted_counts": {
+              "-1": 2326,
+              "1": 2101
+            },
+            "rows": 4427
+          },
+          "prior_baseline": {
+            "accuracy": 0.5428055116,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6918732622,
+            "majority_class": 1
+          }
+        }
+      },
+      "spec": {
+        "calibrate": "none",
+        "embargo_bars": 5,
+        "evaluate_test": true,
+        "groups": [
+          "price",
+          "momentum",
+          "volatility",
+          "volume",
+          "structure",
+          "session",
+          "multi_timeframe"
+        ],
+        "horizon": 5,
+        "include_flat": false,
+        "incremental_chunks": 0,
+        "model": "mlp",
+        "purge_bars": 5,
+        "seed": 0,
+        "train_fraction": 0.7,
+        "validation_fraction": 0.15
+      },
+      "trading": {
+        "test": {
+          "base": {
+            "expectancy_r": -0.0935126082,
+            "max_drawdown": 0.2312388757,
+            "net_profit": -2012.9595981759,
+            "profit_factor": 0.815789182,
+            "total_costs": 1994.9943760395,
+            "trades": 561,
+            "win_rate": 0.4099821747
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "test",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.2021913897,
+              "max_drawdown": 0.2057618122,
+              "net_profit": -2003.8948028887,
+              "profit_factor": 0.642537505,
+              "total_costs": 1977.2980755087,
+              "trades": 251,
+              "win_rate": 0.3505976096
+            },
+            "x3": {
+              "expectancy_r": -0.2381701045,
+              "max_drawdown": 0.2057748283,
+              "net_profit": -2008.7152191257,
+              "profit_factor": 0.5646944139,
+              "total_costs": 2492.0562156931,
+              "trades": 205,
+              "win_rate": 0.3414634146
+            }
+          },
+          "threshold": 0.55
+        },
+        "validation": {
+          "base": {
+            "expectancy_r": -0.1472461481,
+            "max_drawdown": 0.2222786061,
+            "net_profit": -2034.8388284299,
+            "profit_factor": 0.7066780754,
+            "total_costs": 1677.5673554695,
+            "trades": 321,
+            "win_rate": 0.3800623053
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "validation",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.2892407351,
+              "max_drawdown": 0.2046178029,
+              "net_profit": -2011.4152131547,
+              "profit_factor": 0.4933735112,
+              "total_costs": 1594.496096618,
+              "trades": 165,
+              "win_rate": 0.2848484848
+            },
+            "x3": {
+              "expectancy_r": -0.338434707,
+              "max_drawdown": 0.2009546552,
+              "net_profit": -2005.1378580178,
+              "profit_factor": 0.4444935359,
+              "total_costs": 2005.9298174539,
+              "trades": 142,
+              "win_rate": 0.2746478873
+            }
+          },
+          "threshold": 0.55
+        }
+      }
+    },
+    {
+      "kind": "rule baseline: sign of 5-bar return, long-only",
+      "name": "ret_5",
+      "prediction": {
+        "test": {
+          "metrics": {
+            "accuracy": 0.498185118,
+            "balanced_accuracy": 0.4938916084,
+            "brier": null,
+            "ece": null,
+            "log_loss": null,
+            "mce": null,
+            "predicted_counts": {
+              "-1": 2000,
+              "0": 1,
+              "1": 2407
+            },
+            "probability_metrics_reason": "label-only predictor: no probabilities to score",
+            "rows": 4408
+          },
+          "prior_baseline": {
+            "accuracy": 0.5460526316,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6917663463,
+            "majority_class": 1
+          }
+        },
+        "validation": {
+          "metrics": {
+            "accuracy": 0.5055342218,
+            "balanced_accuracy": 0.5017859963,
+            "brier": null,
+            "ece": null,
+            "log_loss": null,
+            "mce": null,
+            "predicted_counts": {
+              "-1": 2019,
+              "0": 1,
+              "1": 2407
+            },
+            "probability_metrics_reason": "label-only predictor: no probabilities to score",
+            "rows": 4427
+          },
+          "prior_baseline": {
+            "accuracy": 0.5428055116,
+            "class_prior": {
+              "-1": 0.4917691488,
+              "1": 0.5082308512
+            },
+            "log_loss": 0.6918732622,
+            "majority_class": 1
+          }
+        }
+      },
+      "spec": {
+        "horizon": 5,
+        "model": "ret_5",
+        "threshold": 0.55
+      },
+      "trading": {
+        "test": {
+          "base": {
+            "expectancy_r": -0.0138930057,
+            "max_drawdown": 0.186291292,
+            "net_profit": -651.1430679681,
+            "profit_factor": 0.9707938109,
+            "total_costs": 3991.7822961496,
+            "trades": 1150,
+            "win_rate": 0.34
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": false
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "test",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.086111298,
+              "max_drawdown": 0.2024285318,
+              "net_profit": -2008.124270792,
+              "profit_factor": 0.8263411327,
+              "total_costs": 3903.7056985336,
+              "trades": 556,
+              "win_rate": 0.3201438849
+            },
+            "x3": {
+              "expectancy_r": -0.2372220229,
+              "max_drawdown": 0.2029615802,
+              "net_profit": -2018.5620907332,
+              "profit_factor": 0.6074615037,
+              "total_costs": 2431.2709317972,
+              "trades": 208,
+              "win_rate": 0.2596153846
+            }
+          },
+          "threshold": 0.55
+        },
+        "validation": {
+          "base": {
+            "expectancy_r": -0.1953693774,
+            "max_drawdown": 0.2047299252,
+            "net_profit": -2028.1912808112,
+            "profit_factor": 0.6608717395,
+            "total_costs": 1203.712963426,
+            "trades": 245,
+            "win_rate": 0.2857142857
+          },
+          "base_floor_check": {
+            "episode_termination_equity": 8000.0,
+            "initial_balance": 10000.0,
+            "net_at_or_below_termination_floor": true
+          },
+          "exit_threshold": 0.55,
+          "hold": {
+            "expectancy_r": 0.0,
+            "max_drawdown": 0.0,
+            "net_profit": 0.0,
+            "profit_factor": 0.0,
+            "total_costs": 0.0,
+            "trades": 0,
+            "win_rate": 0.0
+          },
+          "split": "validation",
+          "stress": {
+            "x2": {
+              "expectancy_r": -0.308213991,
+              "max_drawdown": 0.2055013962,
+              "net_profit": -2038.8299913791,
+              "profit_factor": 0.5296529846,
+              "total_costs": 1487.7663369524,
+              "trades": 162,
+              "win_rate": 0.2407407407
+            },
+            "x3": {
+              "expectancy_r": -0.3552283486,
+              "max_drawdown": 0.2031682142,
+              "net_profit": -2018.3646413339,
+              "profit_factor": 0.4719923238,
+              "total_costs": 1785.2779527216,
+              "trades": 137,
+              "win_rate": 0.2116788321
+            }
+          },
+          "threshold": 0.55
+        }
+      }
+    }
+  ],
+  "created_at": "2026-11-25T05:40:07+00:00",
+  "limits": [
+    "Prediction accuracy is not a trading edge; the simulator and cost stress are the gate.",
+    "One store, one symbol, one timeframe, one chronological split.",
+    "No hyperparameter search, no walk-forward, no locked holdout.",
+    "The test split was read once for all arms at once; it was not used to choose a model.",
+    "The MLP uses an in-train StandardScaler and a fixed 60-epoch budget.",
+    "The ret_5 rule has no probabilities, so log loss, Brier and ECE are not defined for it."
+  ],
+  "protocol": {
+    "cost_stress_multipliers": [
+      2.0,
+      3.0
+    ],
+    "costs": {
+      "commission_per_lot": 7.0,
+      "slippage_atr_frac": 0.05,
+      "spread_floor": 0.2,
+      "spread_vol_mult": 0.1
+    },
+    "embargo_bars": 5,
+    "entry_threshold": 0.55,
+    "episode_termination": "simulator ends the episode at equity <= 80% of initial (-$2,000); losing runs therefore report a net near that floor, not their unbounded path loss",
+    "exit_threshold": 0.55,
+    "feature_columns": 59,
+    "feature_groups": [
+      "price",
+      "momentum",
+      "volatility",
+      "volume",
+      "structure",
+      "session",
+      "multi_timeframe"
+    ],
+    "flat_rows": "dropped (exact-zero direction labels excluded)",
+    "horizon_bars": 5,
+    "initial_balance": 10000.0,
+    "promotion": "none; this file is not promotion evidence",
+    "purge_bars": 5,
+    "risk_daily_loss_pct": 0.03,
+    "risk_per_trade_pct": 0.005,
+    "seed": 0,
+    "simulator_window": 60,
+    "splits_scored": [
+      "validation",
+      "test"
+    ],
+    "symbol": "XAUUSD",
+    "test_split_policy": "read once for every pre-registered arm in the same run; never used to select, tune or promote a model",
+    "timeframe": "H1",
+    "train_fraction": 0.7,
+    "tuning": "none: fixed hyperparameters, threshold and split",
+    "validation_fraction": 0.15
+  },
+  "provenance": {
+    "code_version": "05c600129db13136",
+    "dataset_checksum": "316312dff68323f14136c9a86db76767",
+    "dataset_columns": 59,
+    "dataset_id": "XAUUSD:H1:h5:316312dff683",
+    "dataset_rows": 29521,
+    "git_commit": "06c853c",
+    "libomp_available": true,
+    "lightgbm": "4.7.0",
+    "machine": "arm64",
+    "numpy": "2.5.5",
+    "platform": "macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.12.13",
+    "settings_digest": "2226685b488a17e799a58f8d7e1da7db74be94352663575c0447516c0951c5ed",
+    "sklearn": "1.9.1",
+    "split_counts": {
+      "flat_dropped": 12,
+      "purged": 20,
+      "test": 4408,
+      "train": 20654,
+      "validation": 4427
+    },
+    "store_checksum": "0930bedd3c64554621c599ad6ee20214",
+    "store_first_ts": "2021-05-24T00:00:00+00:00",
+    "store_last_ts": "2026-05-22T20:00:00+00:00",
+    "store_root": "/Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-ticks5-store",
+    "store_rows": 29586,
+    "store_source": "ticks:data-ticks5",
+    "store_synthetic": false
+  },
+  "question": "On one fixed chronological XAUUSD H1 split, do logistic, LightGBM or a small MLP beat the ret_5 rule and the train prior on prediction metrics, and do any survive simulator costs?",
+  "report": "model-comparison-2026-11-25",
+  "resource": {
+    "elapsed_seconds": 7.57,
+    "max_rss_bytes": 433078272,
+    "threads": {
+      "OMP_NUM_THREADS": "1",
+      "POLARS_MAX_THREADS": "1"
+    }
+  },
+  "status": "descriptive prediction/trading comparison; NOT validated, NOT promoted",
+  "verdicts": {
+    "test": {
+      "any_arm_positive_at_base_cost": false,
+      "any_arm_positive_under_stress": false,
+      "any_model_beats_prior_log_loss": false,
+      "arms": [
+        {
+          "accuracy": 0.4927404719,
+          "accuracy_delta_vs_prior": -0.0533121597,
+          "log_loss": 0.6961153746,
+          "log_loss_delta_vs_prior": 0.0043490282,
+          "name": "logistic"
+        },
+        {
+          "accuracy": 0.5099818512,
+          "accuracy_delta_vs_prior": -0.0360707804,
+          "log_loss": 0.7420502701,
+          "log_loss_delta_vs_prior": 0.0502839237,
+          "name": "lightgbm"
+        },
+        {
+          "accuracy": 0.5022686025,
+          "accuracy_delta_vs_prior": -0.043784029,
+          "log_loss": 0.7933718562,
+          "log_loss_delta_vs_prior": 0.1016055099,
+          "name": "mlp"
+        },
+        {
+          "accuracy": 0.498185118,
+          "accuracy_delta_vs_prior": -0.0478675136,
+          "log_loss": null,
+          "log_loss_delta_vs_prior": null,
+          "name": "ret_5"
+        }
+      ],
+      "best_by_log_loss": "logistic",
+      "prior_baseline": {
+        "accuracy": 0.5460526316,
+        "class_prior": {
+          "-1": 0.4917691488,
+          "1": 0.5082308512
+        },
+        "log_loss": 0.6917663463,
+        "majority_class": 1
+      },
+      "trading": [
+        {
+          "expectancy_r": -0.1573932083,
+          "hit_equity_floor": false,
+          "name": "logistic",
+          "net_profit": -1751.6545384577,
+          "profit_factor": 0.7717534054,
+          "total_costs": 808.1935642671,
+          "trades": 296
+        },
+        {
+          "expectancy_r": -0.0606576741,
+          "hit_equity_floor": true,
+          "name": "lightgbm",
+          "net_profit": -2013.7648928429,
+          "profit_factor": 0.8786580421,
+          "total_costs": 2672.8523337444,
+          "trades": 886
+        },
+        {
+          "expectancy_r": -0.0935126082,
+          "hit_equity_floor": true,
+          "name": "mlp",
+          "net_profit": -2012.9595981759,
+          "profit_factor": 0.815789182,
+          "total_costs": 1994.9943760395,
+          "trades": 561
+        },
+        {
+          "expectancy_r": -0.0138930057,
+          "hit_equity_floor": false,
+          "name": "ret_5",
+          "net_profit": -651.1430679681,
+          "profit_factor": 0.9707938109,
+          "total_costs": 3991.7822961496,
+          "trades": 1150
+        }
+      ]
+    },
+    "validation": {
+      "any_arm_positive_at_base_cost": false,
+      "any_arm_positive_under_stress": false,
+      "any_model_beats_prior_log_loss": false,
+      "arms": [
+        {
+          "accuracy": 0.5161508923,
+          "accuracy_delta_vs_prior": -0.0266546194,
+          "log_loss": 0.6921200156,
+          "log_loss_delta_vs_prior": 0.0002467534,
+          "name": "logistic"
+        },
+        {
+          "accuracy": 0.5193133047,
+          "accuracy_delta_vs_prior": -0.0234922069,
+          "log_loss": 0.7073060047,
+          "log_loss_delta_vs_prior": 0.0154327425,
+          "name": "lightgbm"
+        },
+        {
+          "accuracy": 0.4989835103,
+          "accuracy_delta_vs_prior": -0.0438220014,
+          "log_loss": 0.7268817425,
+          "log_loss_delta_vs_prior": 0.0350084802,
+          "name": "mlp"
+        },
+        {
+          "accuracy": 0.5055342218,
+          "accuracy_delta_vs_prior": -0.0372712898,
+          "log_loss": null,
+          "log_loss_delta_vs_prior": null,
+          "name": "ret_5"
+        }
+      ],
+      "best_by_log_loss": "logistic",
+      "prior_baseline": {
+        "accuracy": 0.5428055116,
+        "class_prior": {
+          "-1": 0.4917691488,
+          "1": 0.5082308512
+        },
+        "log_loss": 0.6918732622,
+        "majority_class": 1
+      },
+      "trading": [
+        {
+          "expectancy_r": -0.1313361795,
+          "hit_equity_floor": true,
+          "name": "logistic",
+          "net_profit": -2002.2624571505,
+          "profit_factor": 0.8271811195,
+          "total_costs": 1503.2029236179,
+          "trades": 407
+        },
+        {
+          "expectancy_r": -0.0430036209,
+          "hit_equity_floor": true,
+          "name": "lightgbm",
+          "net_profit": -2018.6938479017,
+          "profit_factor": 0.9070461284,
+          "total_costs": 4591.7901155944,
+          "trades": 1075
+        },
+        {
+          "expectancy_r": -0.1472461481,
+          "hit_equity_floor": true,
+          "name": "mlp",
+          "net_profit": -2034.8388284299,
+          "profit_factor": 0.7066780754,
+          "total_costs": 1677.5673554695,
+          "trades": 321
+        },
+        {
+          "expectancy_r": -0.1953693774,
+          "hit_equity_floor": true,
+          "name": "ret_5",
+          "net_profit": -2028.1912808112,
+          "profit_factor": 0.6608717395,
+          "total_costs": 1203.712963426,
+          "trades": 245
+        }
+      ]
+    }
+  }
+}

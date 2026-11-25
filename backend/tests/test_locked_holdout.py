@@ -76,6 +76,14 @@ PRE_HOLDOUT_POLICY = replace(
     require_locked_oos=False,
 )
 
+#: The same eligibility thresholds for a synthetic tape. This is an explicit,
+#: named, non-production demo policy: ``PROMOTION_V1`` still refuses the bundle.
+DEMO_HOLDOUT_POLICY = replace(
+    PRE_HOLDOUT_POLICY,
+    policy_id="holdout-demo",
+    allow_synthetic=True,
+)
+
 ALWAYS = Compare(Const(0.0), "<", Const(1.0))
 NEVER = Compare(Const(0.0), ">", Const(1.0))
 
@@ -155,6 +163,8 @@ def discovery() -> tuple[FeatureFrame, DatasetBundle]:
         validation_fraction=0.2,
         purge_bars=3,
         embargo_bars=2,
+        source="test:fixture",
+        synthetic=False,
     )
     return features, bundle
 
@@ -171,6 +181,8 @@ def profitable_discovery() -> tuple[FeatureFrame, DatasetBundle]:
         validation_fraction=0.2,
         purge_bars=3,
         embargo_bars=2,
+        source="test:fixture",
+        synthetic=False,
     )
     return features, bundle
 
@@ -183,6 +195,8 @@ def holdout_spec(
     settings_hash: str = SETTINGS_HASH,
     dataset_id: str | None = None,
     dataset_checksum: str | None = None,
+    source: str | None = "test:fixture",
+    synthetic: bool | None = False,
 ) -> HoldoutSpec:
     return HoldoutSpec(
         dataset_id=bundle.manifest.dataset_id if dataset_id is None else dataset_id,
@@ -192,6 +206,8 @@ def holdout_spec(
         spec_hash=spec_hash,
         code_version=code_version,
         settings_digest=settings_hash,
+        source=source,
+        synthetic=synthetic,
     )
 
 
@@ -205,6 +221,8 @@ def precheck(
     settings_hash: str = SETTINGS_HASH,
     expectancy_r: float = 0.3,
     policy: Any = PRE_HOLDOUT_POLICY,
+    source: str | None = "test:fixture",
+    synthetic: bool | None = False,
 ) -> tuple[PromotionDecision, CandidateEvidence]:
     """A sealed accepted decision plus the synthetic bundle that produced it.
 
@@ -224,6 +242,8 @@ def precheck(
         ),
         settings_digest=settings_hash,
         expectancy_r=expectancy_r,
+        source=source,
+        synthetic=synthetic,
     )
     # The promotion policy requires the locked section's test range to equal the
     # bundle's declared test split. The synthetic bundle is built without a
@@ -272,6 +292,8 @@ def holdout_config(
         "features": features,
         "dataset_id": dataset_id,
         "dataset_checksum": dataset_checksum,
+        "source": "test:fixture",
+        "synthetic": False,
     }
     values.update(overrides)
     return HoldoutConfig(**values)
@@ -827,7 +849,7 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     assert attached.locked_oos is not None
     assert attached.locked_oos.checksum == locked_oos_checksum(attached.locked_oos)
     assert attached.locked_oos.evidence_checksum == evidence.checksum
-    assert attached.locked_oos.schema_version == 1
+    assert attached.locked_oos.schema_version == 2
     assert attached.locked_oos.test_start_row == result.test_start_row
     assert attached.locked_oos.test_end_row == result.test_end_row
     assert attached.checksum != evidence.checksum
@@ -864,6 +886,59 @@ def test_attach_holdout_returns_a_new_bundle_and_never_mutates(
     assert is_production_policy(PROMOTION_V1)
     assert PROMOTION_V1.digest in PRODUCTION_POLICIES
     assert not is_production_policy(PRE_HOLDOUT_POLICY)
+
+
+def test_a_holdout_result_for_other_provenance_is_refused(
+    tmp_path: Path,
+    profitable_discovery: tuple[FeatureFrame, DatasetBundle],
+) -> None:
+    """A synthetic holdout cannot be attached to real-data evidence.
+
+    The sealed identity and the spent result both say ``synthetic=True``; the
+    evidence bundle says ``False``. The attach gate must compare the provenance,
+    not just the dataset id and checksum, because identical bars can be labelled
+    differently.
+    """
+    features, _ = profitable_discovery
+    synthetic_bundle = build_dataset(
+        features,
+        symbol=SYMBOL,
+        timeframe=TIMEFRAME,
+        horizon=1,
+        train_fraction=0.6,
+        validation_fraction=0.2,
+        purge_bars=3,
+        embargo_bars=2,
+        source="test:fixture",
+        synthetic=True,
+    )
+    demo_decision, demo_evidence = precheck(
+        synthetic_bundle,
+        policy=DEMO_HOLDOUT_POLICY,
+        synthetic=True,
+    )
+    real_decision, real_evidence = precheck(profitable_discovery[1])
+    assert demo_decision.accepted and real_decision.accepted
+    spec = holdout_spec(synthetic_bundle, synthetic=True)
+
+    with HoldoutLedger(tmp_path / "holdout.sqlite") as ledger:
+        ledger.seal(spec)
+        token = ledger.unlock(spec, decision=demo_decision, policy=PROMOTION_V1)
+        result = evaluate_holdout(
+            synthetic_bundle,
+            SPEC,
+            holdout_config(features, source="test:fixture", synthetic=True),
+            ledger=ledger,
+            unlock_token=token,
+        )
+
+    assert (result.source, result.synthetic) == ("test:fixture", True)
+    assert demo_evidence.synthetic is True
+    assert real_evidence.synthetic is False
+    with pytest.raises(HoldoutError) as exc:
+        attach_holdout(real_evidence, result)
+
+    assert exc.value.code == "stale_synthetic"
 
 
 def test_attach_refuses_a_zero_trade_holdout(

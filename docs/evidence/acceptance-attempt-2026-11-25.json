@@ -1,0 +1,296 @@
+{
+  "schema_version": 1,
+  "kind": "real-data-acceptance-attempt",
+  "date": "2026-11-25",
+  "attempt_id": "realaccept-2026-11-25-xauusd-h1",
+  "status": "stopped",
+  "stopped_at": "paper_advance",
+  "scope": "Bounded attempt to run the real XAUUSD H1 chain on data-ticks5-store: validate/quality, dataset, discovery with a non-empty gate, three-fold evidence with cost stress, persisted bundle, reproduce, and a non-production promotion-policy evaluation. No locked holdout spend and no production promotion.",
+  "evidence_level": "pipeline attempt only; not validated, not profitable, not paper-traded",
+  "environment": {
+    "machine": "Apple M2, 8 GB RAM, macOS 27.2.1 (arm64)",
+    "python": "3.12.13",
+    "numpy": "2.5.5",
+    "polars": "2.1.0",
+    "runner": "uv 0.11.28",
+    "thread_pinning": "POLARS_MAX_THREADS=1 for evidence, reproduce and promotion evaluation"
+  },
+  "repository": {
+    "branch": "feat/realaccept",
+    "base_commit": "50fbca6856f7b6df13fe2a6cea223bf06d93c2f7",
+    "code_version": "05c600129db13136",
+    "settings_digest": "2226685b488a17e799a58f8d7e1da7db74be94352663575c0447516c0951c5ed"
+  },
+  "data": {
+    "source_store": "/Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-ticks5-store",
+    "source_store_mode": "read-only (market data untouched; meta checksum unchanged)",
+    "writable_copy": "backend/runs/realaccept/store (copied because the evidence writer creates <store_root>/datasets/<checksum>)",
+    "symbol": "XAUUSD",
+    "timeframe": "H1",
+    "synthetic": false,
+    "rows": 29586,
+    "first_ts": "2021-05-24T00:00:00+00:00",
+    "last_ts": "2026-05-22T20:00:00+00:00",
+    "store_manifest_checksum": "0930bedd3c64554621c599ad6ee20214",
+    "dataset_id": "XAUUSD:H1:h1:439ad79658c7",
+    "dataset_checksum": "439ad79658c774371ceb32c7e605d184",
+    "dataset_rows": 29525,
+    "dataset_columns": 59,
+    "splits": {
+      "train_rows": 20667,
+      "validation_rows": 4428,
+      "test_rows": 4428,
+      "purged_rows": 2,
+      "train_fraction": 0.70,
+      "validation_fraction": 0.15
+    },
+    "validation_slice": {
+      "first_ts": "2024-11-20T10:00:00+00:00",
+      "last_ts": "2025-08-21T16:00:00+00:00",
+      "rows": 4428
+    }
+  },
+  "commands": [
+    {
+      "stage": "validate",
+      "command": "uv run python -m scalping.cli data validate --root ../../../data-ticks5-store --symbol XAUUSD --timeframe H1",
+      "exit_code": 0,
+      "result": "ok=true; 29586 rows; warnings only"
+    },
+    {
+      "stage": "quality",
+      "command": "uv run python <driver>  # scalping.data.quality.detect_bar_outliers(OutlierConfig())",
+      "exit_code": 0,
+      "result": "159 price outliers (>8 robust sigma); volume outliers none; reconciliation skipped (no second source)"
+    },
+    {
+      "stage": "dataset",
+      "command": "uv run python -m scalping.cli dataset build --root ../../../data-ticks5-store --symbol XAUUSD --timeframe H1 --horizon 1 --out runs/realaccept/dataset-manifest.json",
+      "exit_code": 0,
+      "result": "dataset_id XAUUSD:H1:h1:439ad79658c7; checksum 439ad79658c774371ceb32c7e605d184"
+    },
+    {
+      "stage": "discovery",
+      "command": "POLARS_MAX_THREADS=1 uv run python -m scalping.cli discovery run --root ../../../data-ticks5-store --symbol XAUUSD --timeframe H1 --max-trials 64 --population 8 --generations 6 --seed 7 --archive runs/realaccept/discovery.sqlite --out runs/realaccept/03-discovery.json --no-cache --min-trades 30 --min-expectancy-r 0.0 --min-profit-factor 1.05 --require-stress 1.5 --min-best-trades 10",
+      "exit_code": 0,
+      "result": "decision no_trade; 22/22 trials rejected by the gate"
+    },
+    {
+      "stage": "evidence_decision_candidate",
+      "command": "POLARS_MAX_THREADS=1 uv run python -m scalping.cli discovery evidence --root runs/realaccept/store --symbol XAUUSD --timeframe H1 --spec runs/realaccept/specs/15bdae8a1e154ee1d08963d9e40e6f25eca2ef551c6a4cab41dfca26a69cfa63.json --out runs/realaccept/evidence/decision-candidate.evidence.json --folds 3 --window 60 --horizon 1 --min-trades-per-fold 5 --search-budget 64 --trials 22 --seed 7 --no-cache",
+      "exit_code": 2,
+      "result": "refused: fold_trades_below_minimum (fold 1 closed 0 trades; the policy requires 5)"
+    },
+    {
+      "stage": "evidence_least_bad_gated_candidate",
+      "command": "POLARS_MAX_THREADS=1 uv run python -m scalping.cli discovery evidence --root runs/realaccept/store --symbol XAUUSD --timeframe H1 --spec runs/realaccept/specs/70fe1963823c8f9d3f8a71a055b3c0cf5e77eee0334f24b802901fdaa9e44673.json --out runs/realaccept/evidence/least-bad.evidence.json --folds 3 --window 60 --horizon 1 --min-trades-per-fold 5 --search-budget 64 --trials 22 --seed 7 --no-cache",
+      "exit_code": 0,
+      "result": "persisted dataset artifact and bundle; evidence checksum 7819f9d9a8b4c7d4adad821efc19157fdae41b8b5cb0215ac198947a7e0e7c02"
+    },
+    {
+      "stage": "reproduce",
+      "command": "POLARS_MAX_THREADS=1 uv run python -m scalping.cli discovery reproduce --bundle runs/realaccept/evidence/least-bad.evidence.json --store-root runs/realaccept/store --out runs/realaccept/05-reproduce.json",
+      "exit_code": 0,
+      "result": "reproduced=true; checksum matched 7819f9d9a8b4c7d4adad821efc19157fdae41b8b5cb0215ac198947a7e0e7c02"
+    },
+    {
+      "stage": "promotion_evaluation",
+      "command": "POLARS_MAX_THREADS=1 uv run python runs/realaccept/promotion_eval.py",
+      "exit_code": 0,
+      "result": "test policy rejected; production policy rejected; both promote_with_evidence calls refused"
+    },
+    {
+      "stage": "paper_gate",
+      "command": "uv run python <driver>  # ChampionProvider(archive, scope='XAUUSD:H1').champion()",
+      "exit_code": 0,
+      "result": "NoChampionError; no evidence champion exists and none can be created without production promotion"
+    }
+  ],
+  "validation": {
+    "structural_ok": true,
+    "rows": 29586,
+    "issues": [
+      {
+        "code": "time_gaps",
+        "severity": "warning",
+        "count": 29585,
+        "note": "H1 bars are one hour apart; the 10-minute gap threshold is M1-oriented. Not a data defect for H1."
+      },
+      {
+        "code": "price_outliers",
+        "severity": "warning",
+        "count": 159,
+        "note": "retrospective robust-z warnings; extreme prints were not repaired or removed"
+      }
+    ],
+    "quality": {
+      "price_outliers": 159,
+      "volume_outliers": 0,
+      "reconciliation": "skipped: no second source present"
+    }
+  },
+  "discovery": {
+    "seed": 7,
+    "attempt_cap": 64,
+    "population": 8,
+    "generations": 6,
+    "trials_evaluated": 22,
+    "skipped_before_evaluator": 2,
+    "deduped": 0,
+    "accepted": 0,
+    "tradable": 0,
+    "stop_reason": "patience",
+    "gate": {
+      "min_trades": 30,
+      "min_expectancy_r": 0.0,
+      "min_profit_factor": 1.05,
+      "require_positive_cost_stress": [1.5],
+      "min_best_trades": 10
+    },
+    "rejection_events": {
+      "cost_stress": 22,
+      "min_profit_factor": 22,
+      "min_trades": 11
+    },
+    "decision": "no_trade",
+    "decision_reason": "the gate rejected all 22 trial(s); no candidate is eligible, so NO TRADE is the recorded result",
+    "decision_candidate": "15bdae8a1e154ee1d08963d9e40e6f25eca2ef551c6a4cab41dfca26a69cfa63",
+    "decision_candidate_trades": 0,
+    "best_candidate": null,
+    "baselines": {
+      "hold": {"trades": 0, "net_profit": 0.0},
+      "ret_5": {"trades": 500, "net_profit": 226.41561299211935, "profit_factor": 1.0140284152210783, "expectancy_r": 0.011345076928731995}
+    },
+    "note": "Every evaluated candidate lost money at 1.5x costs or traded too little. The recorded decision candidate is a flat policy (0 validation trades)."
+  },
+  "evidence": {
+    "candidate_used": "70fe1963823c8f9d3f8a71a055b3c0cf5e77eee0334f24b802901fdaa9e44673",
+    "candidate_role": "least-bad gate-rejected trading candidate; used only to exercise persist/reproduce/promotion plumbing, not a winner",
+    "bundle": "backend/runs/realaccept/evidence/least-bad.evidence.json",
+    "bundle_checksum": "7819f9d9a8b4c7d4adad821efc19157fdae41b8b5cb0215ac198947a7e0e7c02",
+    "bundle_file_sha256": "f54894a003c22fb81c9d75373d1af82a93f3e237e84d288dc6b3acb0551ca389",
+    "spec_sidecar_sha256": "d098ec129d412520fa4353205750f52553ae910a65add5a6b09b48d39760ab28",
+    "schema_version": 3,
+    "folds": 3,
+    "bootstrap": {"method": "iid-bootstrap", "samples": 1000, "confidence": 0.95},
+    "cost_stress": [1.5, 2.0],
+    "aggregate": {
+      "total_trades": 200,
+      "total_r": -15.410474065453423,
+      "expectancy_r": -0.07705237032726711,
+      "expectancy_r_ci95": [-0.18435854636337853, 0.034707089404465215],
+      "total_r_ci95": [-36.87170927267571, 6.941417880893043],
+      "profit_factor": 0.7641862732326242,
+      "max_drawdown": 0.05362722098679771,
+      "positive_folds": 0,
+      "positive_fold_fraction": 0.0,
+      "regime_coverage": 1.0
+    },
+    "folds_aggregate": [
+      {"fold": 1, "test_rows": 6274, "trades": 71, "net_profit": -80.97, "expectancy_r": -0.0219, "stress_x1.5_net_profit": -289.45, "stress_x2.0_net_profit": -484.4},
+      {"fold": 2, "test_rows": 6274, "trades": 74, "net_profit": -453.73, "expectancy_r": -0.1315, "stress_x1.5_net_profit": -659.74, "stress_x2.0_net_profit": -863.85},
+      {"fold": 3, "test_rows": 6274, "trades": 55, "net_profit": -219.44, "expectancy_r": -0.075, "stress_x1.5_net_profit": -354.93, "stress_x2.0_net_profit": -519.07}
+    ],
+    "locked_oos_section": null,
+    "holdout_spent": false
+  },
+  "reproduce": {
+    "reproduced": true,
+    "expected": "7819f9d9a8b4c7d4adad821efc19157fdae41b8b5cb0215ac198947a7e0e7c02",
+    "observed": "7819f9d9a8b4c7d4adad821efc19157fdae41b8b5cb0215ac198947a7e0e7c02",
+    "mismatches": [],
+    "exit_code": 0,
+    "note": "Thread pinning (POLARS_MAX_THREADS=1) used because the 2026-11-24 smoke showed ~1e-16 regime-sum drift under the default polars pool."
+  },
+  "promotion": {
+    "test_policy": {
+      "id": "acceptance-test-policy",
+      "version": 1,
+      "digest": "1927e267bd7a032272972619c239f76f6f23f52e21e91d565b691e51b9986eb2",
+      "require_locked_oos": false,
+      "production": false
+    },
+    "test_policy_decision": {
+      "accepted": false,
+      "codes": ["min_positive_fold_fraction", "min_expectancy_r", "min_profit_factor", "cost_stress", "stress_degradation"]
+    },
+    "production_policy_decision": {
+      "policy_id": "promotion-v1",
+      "accepted": false,
+      "codes": ["min_positive_fold_fraction", "min_expectancy_r", "min_profit_factor", "min_ci_lower_r", "cost_stress", "stress_degradation", "missing_locked_oos"],
+      "note": "Evaluated for the record; no holdout was attached or spent."
+    },
+    "champion_creation": {
+      "test_policy_attempt": {
+        "promoted": false,
+        "refusal_code": "non_production_policy",
+        "message": "only a registered production policy may promote; 'acceptance-test-policy' v1 digest 1927e267bd7a is not registered"
+      },
+      "production_policy_attempt": {
+        "promoted": false,
+        "refusal_code": "missing_locked_oos",
+        "message": "candidate was rejected by policy promotion-v1 v1: min_positive_fold_fraction; min_expectancy_r; min_profit_factor; min_ci_lower_r; cost_stress; stress_degradation; missing_locked_oos"
+      }
+    }
+  },
+  "paper_advance": {
+    "attempted": false,
+    "reason": "No evidence champion can be created without production promotion, and production promotion requires a locked-OOS section.",
+    "gate_result": {
+      "scope": "XAUUSD:H1",
+      "champion_present": false,
+      "refusal_type": "NoChampionError",
+      "refusal_message": "no champion in scope 'XAUUSD:H1'; promote a validated candidate first"
+    }
+  },
+  "remaining_gate": {
+    "name": "locked_holdout_spend",
+    "required_for": "PROMOTION_V1 acceptance and any paper champion",
+    "spent": false,
+    "why_not_spent": "A real locked-holdout spend is irreversible and was outside this bounded attempt. The candidate evidence is negative on every aggregate metric, so spending the one-shot holdout on it could only consume the budget, not produce a promotable champion.",
+    "next_step_requires_owner_approval": true
+  },
+  "artifacts": {
+    "committed": [
+      "docs/evidence/acceptance-attempt-2026-11-25.json",
+      "docs/acceptance-attempt-2026-11-25.md"
+    ],
+    "gitignored": [
+      "backend/runs/realaccept/01-data-validate.json",
+      "backend/runs/realaccept/01b-data-quality.json",
+      "backend/runs/realaccept/02-dataset.json",
+      "backend/runs/realaccept/dataset-manifest.json",
+      "backend/runs/realaccept/03-discovery.json",
+      "backend/runs/realaccept/discovery.sqlite",
+      "backend/runs/realaccept/specs/",
+      "backend/runs/realaccept/evidence/least-bad.evidence.json",
+      "backend/runs/realaccept/evidence/least-bad.evidence.spec.json",
+      "backend/runs/realaccept/05-reproduce.json",
+      "backend/runs/realaccept/06-promotion.json",
+      "backend/runs/realaccept/07-paper-gate.json",
+      "backend/runs/realaccept/store/ (61 MB writable copy including datasets/439ad79658c774371ceb32c7e605d184)"
+    ],
+    "dataset_artifact": "backend/runs/realaccept/store/datasets/439ad79658c774371ceb32c7e605d184 (artifact.json, X.npy, split.npy, ts.npy, y_*.npy; ~7.1 MB)"
+  },
+  "limitations": [
+    "One bounded search: 22 evaluations over a 4,428-bar validation slice. This is not a search for an edge and the multiple-testing denominator is 22.",
+    "The gate rejected every candidate; NO TRADE is the real outcome. No candidate cleared min_trades=30 and positive net profit at 1.5x costs.",
+    "The evidence bundle belongs to the least-bad gate-rejected trading candidate, not to a winner. It exists to exercise persist, reproduce and promotion plumbing.",
+    "Evidence aggregate expectancy is -0.077R with a 95% interval of [-0.184, +0.035]; the interval includes zero. Profit factor 0.764 and 0/3 positive folds. Nothing here is validation or profitability evidence.",
+    "The bootstrap is iid and ignores trade clustering; its interval can be tighter than the trade sequence supports.",
+    "The test split was not read or scored. No locked holdout was sealed, unlocked or spent.",
+    "Promotion was evaluated with a test-only policy and for the record with PROMOTION_V1; both rejected. No champion exists and no production promotion occurred.",
+    "A real locked-holdout spend is the remaining gate. It was deliberately not spent.",
+    "`dataset build` without `--no-cache` created a `.feature-cache/` directory under the source store. It was removed after the run; market Parquet files and the store manifest checksum were unchanged. All later stages used `--no-cache` or the writable copy.",
+    "One store, one symbol, one timeframe (XAUUSD H1 derived from ticks5). Nothing generalises beyond it."
+  ],
+  "claims": {
+    "implemented": true,
+    "trained": false,
+    "validated": false,
+    "paper_traded": false,
+    "profitable": false,
+    "promoted": false
+  },
+  "conclusion": "The chain ran through validate, quality, dataset, a gated discovery search, evidence persistence for a gate-rejected candidate, and an exact reproduce. It stopped at promotion/paper: discovery returned NO TRADE, the candidate evidence is negative on every aggregate, the test policy refused, and both promotion attempts failed closed with non_production_policy and missing_locked_oos. The one-shot locked holdout was not spent. This is pipeline and fail-closed behaviour evidence only; no validation, profitability or paper-trading claim is made."
+}

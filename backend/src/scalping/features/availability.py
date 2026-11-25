@@ -87,6 +87,11 @@ COLUMN_REQUIREMENTS: Final[dict[str, frozenset[str]]] = {
     "m15_pos_range_20": frozenset({"m1_source"}),
     "htf_bos": frozenset({"m1_source"}),
     "htf_fvg_dist": frozenset({"m1_source"}),
+    "m30_trend": frozenset({"m1_source"}),
+    "m30_ret": frozenset({"m1_source"}),
+    "h4_trend": frozenset({"m1_source"}),
+    "h4_ret": frozenset({"m1_source"}),
+    "h4_atr_frac": frozenset({"m1_source"}),
 }
 
 
@@ -142,14 +147,14 @@ def capabilities_from_frame(df: pl.DataFrame) -> Capabilities:
     ``ask_close``/``spread`` pair.
     """
     required = ("bid_close", "ask_close", "spread")
-    has_quotes = all(name in df.columns for name in required) and df.select(
-        [pl.col(name).null_count().alias(name) for name in required]
-    ).sum_horizontal().item() == 0
-    volume = (
-        int(df.select((pl.col("volume") > 0).sum()).item())
-        if "volume" in df.columns
-        else 0
+    has_quotes = (
+        all(name in df.columns for name in required)
+        and df.select([pl.col(name).null_count().alias(name) for name in required])
+        .sum_horizontal()
+        .item()
+        == 0
     )
+    volume = int(df.select((pl.col("volume") > 0).sum()).item()) if "volume" in df.columns else 0
     return Capabilities(
         bar_volume=volume > 0,
         real_quotes=bool(has_quotes),

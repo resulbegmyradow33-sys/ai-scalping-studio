@@ -9,13 +9,17 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, Self
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from scalping.serialize import metrics_payload
 
 __all__ = [
+    "DISCOVERY_CANDIDATE_PATTERN",
+    "DISCOVERY_DATASET_PATTERN",
+    "DISCOVERY_METRIC_PATTERN",
+    "DISCOVERY_SCOPE_PATTERN",
     "IMPORT_NAME_PATTERN",
     "ML_RUN_ID_PATTERN",
     "PAPER_SESSION_PATTERN",
@@ -40,6 +44,19 @@ __all__ = [
     "ControlRequest",
     "DataQualityResponse",
     "DataStatusResponse",
+    "DiscoveryCandidateDetail",
+    "DiscoveryCandidateId",
+    "DiscoveryCandidateItem",
+    "DiscoveryCandidatePage",
+    "DiscoveryChampion",
+    "DiscoveryDatasetId",
+    "DiscoveryDecisionItem",
+    "DiscoveryLineageEdge",
+    "DiscoveryMetric",
+    "DiscoveryScope",
+    "DiscoverySummary",
+    "DiscoveryTrialItem",
+    "DiscoveryTrialPage",
     "DownloadRequest",
     "DownloadResponse",
     "EvaluateRequest",
@@ -58,6 +75,10 @@ __all__ = [
     "MLTrainRequest",
     "MLTrainResponse",
     "OkResponse",
+    "OrchestratorControlAction",
+    "OrchestratorControlChange",
+    "OrchestratorControlRequest",
+    "OrchestratorControlState",
     "PaperEquityPage",
     "PaperEquityPoint",
     "PaperOrder",
@@ -186,6 +207,62 @@ TrainRunId = Annotated[
         min_length=1,
         max_length=128,
         pattern=TRAIN_RUN_ID_PATTERN,
+    ),
+]
+
+
+#: A discovery candidate id is the sha256 of its canonical spec, so the HTTP
+#: boundary admits exactly a lowercase hex digest. Anything else is a malformed
+#: identity, not a path: the value is only ever a SQL parameter.
+DISCOVERY_CANDIDATE_PATTERN: Final[str] = r"^[0-9a-f]{64}$"
+
+DiscoveryCandidateId = Annotated[
+    str,
+    StringConstraints(
+        min_length=64,
+        max_length=64,
+        pattern=DISCOVERY_CANDIDATE_PATTERN,
+    ),
+]
+
+#: A scope is free text in the archive (conventionally ``<symbol>:<timeframe>``)
+#: and is matched against dataset-id tokens. The API keeps it to one bounded,
+#: separator-free token so a hostile value cannot become a wildcard or grow
+#: without limit. It never names a file.
+DISCOVERY_SCOPE_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+
+DiscoveryScope = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=64,
+        pattern=DISCOVERY_SCOPE_PATTERN,
+    ),
+]
+
+#: A dataset id is provenance text (``validation:<symbol>:<timeframe>:<hash>``),
+#: filtered with an exact ``=`` comparison.
+DISCOVERY_DATASET_PATTERN: Final[str] = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+
+DiscoveryDatasetId = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=200,
+        pattern=DISCOVERY_DATASET_PATTERN,
+    ),
+]
+
+#: A metric name becomes a JSON path (``$."<metric>"``), so the same
+#: conservative alphabet the archive enforces applies here.
+DISCOVERY_METRIC_PATTERN: Final[str] = r"^[A-Za-z0-9_][A-Za-z0-9_.:-]*$"
+
+DiscoveryMetric = Annotated[
+    str,
+    StringConstraints(
+        min_length=1,
+        max_length=100,
+        pattern=DISCOVERY_METRIC_PATTERN,
     ),
 ]
 
@@ -902,3 +979,224 @@ class AutonomyEventPage(BaseModel):
     readable: bool
     items: list[AutonomyEventItem] | None = None
     limit: int
+
+
+# ---------------------------------------------------------- discovery evidence
+
+
+class DiscoveryChampion(BaseModel):
+    """One scope's champion with the governance fields the archive stores.
+
+    ``mode`` is the promotion mode (``evidence``, ``exploratory`` or ``manual``);
+    it is ``None`` for an archive older than schema v3 rather than being guessed
+    from the payload. ``policy_*`` and ``evidence_checksum`` are likewise absent
+    on archives that predate the column. ``trials``/``accepted_trials`` count the
+    champion's trials on its own scope.
+    """
+
+    scope: str
+    candidate_id: str
+    mode: str | None = None
+    policy_id: str | None = None
+    policy_version: int | None = None
+    policy_digest: str | None = None
+    evidence_checksum: str | None = None
+    promoted_at: str | None = None
+    reason: str | None = None
+    trials: int | None = None
+    accepted_trials: int | None = None
+
+
+class DiscoverySummary(BaseModel):
+    """Archive totals, split by scope when asked.
+
+    A missing archive is ``configured=False`` and an existing file that cannot be
+    opened or lacks the candidate/trial tables is ``configured=True,
+    readable=False``; in both cases every count is absent instead of zero. When a
+    scope is supplied the counts describe trials whose ``dataset_id`` carries
+    every scope token, and ``candidates``/``decisions`` are restricted to that
+    population. A real zero means "read, and nothing matched".
+    """
+
+    configured: bool
+    readable: bool
+    scope: str | None = None
+    candidates: int | None = None
+    trials: int | None = None
+    accepted_trials: int | None = None
+    rejected_trials: int | None = None
+    datasets: int | None = None
+    decisions: int | None = None
+    champions_readable: bool = False
+    champions: list[DiscoveryChampion] | None = None
+    limit: int
+
+
+class DiscoveryCandidateItem(BaseModel):
+    """One candidate row and its trial evidence.
+
+    ``candidate_id`` is the sha256 of the canonical spec, so it is the spec hash.
+    ``best_value`` is the requested metric on the candidate's best accepted trial
+    that publishes it; ``best_metrics`` is that trial's metric object. Both are
+    ``None`` when no accepted trial carries the metric.
+    """
+
+    candidate_id: str
+    complexity: int
+    created_at: str
+    code_version: str
+    mutation: str | None = None
+    parent_a: str | None = None
+    parent_b: str | None = None
+    trials: int
+    accepted_trials: int
+    best_value: float | None = None
+    best_metrics: dict[str, float] | None = None
+
+
+class DiscoveryCandidatePage(BaseModel):
+    """Candidates newest first; ``items``/``total`` are absent if unreadable."""
+
+    configured: bool
+    readable: bool
+    items: list[DiscoveryCandidateItem] | None = None
+    total: int | None = None
+    metric: str
+    limit: int
+    offset: int
+
+
+class DiscoveryTrialItem(BaseModel):
+    """One archived evaluation, verbatim."""
+
+    id: int
+    candidate_id: str
+    dataset_id: str
+    dataset_checksum: str | None = None
+    settings_digest: str | None = None
+    code_version: str
+    seed: int
+    metrics: dict[str, float]
+    accepted: bool
+    rejections: list[str]
+    created_at: str
+
+
+class DiscoveryTrialPage(BaseModel):
+    """Trials newest first; ``items``/``total`` are absent if unreadable."""
+
+    configured: bool
+    readable: bool
+    items: list[DiscoveryTrialItem] | None = None
+    total: int | None = None
+    limit: int
+    offset: int
+
+
+class DiscoveryLineageEdge(BaseModel):
+    """One direct derivation edge: the candidate was produced from ``parent_id``."""
+
+    parent_id: str
+    relation: str
+
+
+class DiscoveryDecisionItem(BaseModel):
+    """One champion-gate decision and the numbers it used, when recorded."""
+
+    id: int
+    candidate_id: str
+    decision: Literal["promoted", "rejected", "no_change", "no_trade", "rolled_back"]
+    reason: str
+    champion_id: str | None = None
+    created_at: str
+    detail: dict[str, Any] | None = None
+
+
+class DiscoveryCandidateDetail(BaseModel):
+    """Everything the archive holds about one candidate.
+
+    ``spec`` is the stored canonical payload; its sha256 is ``candidate_id``.
+    Trials and decisions are returned newest first and bounded by ``limit``;
+    ``trial_total``/``decision_total`` say how many rows exist. ``lineage`` and
+    ``decisions`` are ``None`` when the corresponding table is absent, which is
+    "unknown", not "empty".
+    """
+
+    configured: bool
+    readable: bool
+    candidate: DiscoveryCandidateItem | None = None
+    spec: dict[str, Any] | None = None
+    trials: list[DiscoveryTrialItem] | None = None
+    trial_total: int | None = None
+    lineage: list[DiscoveryLineageEdge] | None = None
+    decisions: list[DiscoveryDecisionItem] | None = None
+    decision_total: int | None = None
+    limit: int
+    offset: int
+
+
+# --------------------------------------------------------- orchestrator controls
+
+#: The owner controls the HTTP boundary may switch. Each value maps to one
+#: persisted flag transition; no value starts, stops or enqueues anything.
+OrchestratorControlAction = Literal[
+    "pause",
+    "resume",
+    "safe_mode_on",
+    "safe_mode_off",
+    "disable_research",
+    "enable_research",
+]
+
+#: Actions that record a decision rather than undo one, so the reason is
+#: required. Resume/enable are unambiguous reversals and may omit it.
+_REASON_REQUIRED_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"pause", "safe_mode_on", "safe_mode_off"}
+)
+
+
+class OrchestratorControlRequest(BaseModel):
+    """One owner control change.
+
+    ``extra="forbid"`` is deliberate: an unknown field must not be silently
+    dropped, because a caller that thinks it set a different control would get a
+    success answer for a change it never made. There is no path, id or selector
+    in this body; the database path comes from app configuration only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: OrchestratorControlAction
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _reason_is_present(self) -> Self:
+        if self.action in _REASON_REQUIRED_ACTIONS and not (self.reason or "").strip():
+            raise ValueError(f"reason is required for action {self.action!r}")
+        return self
+
+
+class OrchestratorControlChange(BaseModel):
+    """The newest persisted control transition, from the append-only audit log."""
+
+    action: OrchestratorControlAction
+    actor: str
+    reason: str | None = None
+    at: str
+
+
+class OrchestratorControlState(BaseModel):
+    """Current persisted controls plus the last change that produced them.
+
+    ``configured=False`` means the orchestrator database is absent. A file that
+    exists but has no readable state/event schema is ``configured=True,
+    readable=False``; both omit the flags rather than answer as if every control
+    were off.
+    """
+
+    configured: bool
+    readable: bool
+    paused: bool | None = None
+    safe_mode: bool | None = None
+    research_disabled: bool | None = None
+    last_change: OrchestratorControlChange | None = None

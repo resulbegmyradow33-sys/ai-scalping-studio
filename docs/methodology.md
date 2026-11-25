@@ -116,6 +116,17 @@ flag, row count, time bounds, checksum and creation time. A changed frame gets a
 new checksum; the old sidecar is replaced only by an explicit write. A synthetic
 run is labelled synthetic and cannot become real market evidence by default.
 
+**Provenance rule.** `source`/`synthetic` travel from the sidecar into the
+dataset manifest, the evidence identity and checksum, the locked holdout seal
+and the promotion decision. A field that is missing is `None` (unknown); it is
+never defaulted to `False`. Promotion is fail-closed: a bundle with
+`synthetic is None` is rejected with `provenance_unknown`, `synthetic is True`
+with `synthetic_data`, and only an explicit `False` reaches a production policy.
+A non-production demo policy may opt into synthetic data with
+`allow_synthetic=True`; the production policy cannot be built with it. A
+reproduced bundle must match the stored manifest provenance or is refused with
+`provenance_mismatch`.
+
 **Failure modes.** Structural errors are reported as validator issues:
 missing schema columns, non-UTC or non-datetime timestamps, unsorted timestamps,
 duplicates, nulls, non-finite prices, OHLC inconsistency, crossed quotes,
@@ -737,13 +748,17 @@ artifact, not a narrative. "No" or "unknown" is a rejection, not a maybe.
       candidate.
 - [ ] The promotion policy is named, versioned, registered and non-empty;
       `PROMOTION_V1` was not weakened.
-- [ ] Candidate and champion were compared on identical identity and geometry;
-      a different window was rejected, not normalised.
+- [ ] The bundle's `source`/`synthetic` are explicit; unknown is
+      `provenance_unknown` and synthetic is `synthetic_data` on the production
+      policy.
+- [ ] Candidate and champion were compared on identical identity, geometry and
+      provenance; a different window or tape was rejected, not normalised.
 - [ ] A rejection lists stable codes and the observed/required values.
 
 ### 6.4 Holdout and paper
 
-- [ ] The holdout was sealed before the candidate was chosen.
+- [ ] The holdout was sealed before the candidate was chosen, including its
+      `source`/`synthetic`; the spend cannot switch tapes.
 - [ ] The eligibility decision was accepted and bound to the seal.
 - [ ] The unlock token was single-use; the result is stored and never recomputed.
 - [ ] The attached `locked_oos` section matches the dataset's test rows and the

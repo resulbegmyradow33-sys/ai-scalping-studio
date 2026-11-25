@@ -112,12 +112,14 @@ __all__ = [
 ]
 
 #: Layout version of :meth:`LockedHoldoutResult.to_dict`; version 2 records the
-#: sealed decision's policy digest alongside the id/version.
-HOLDOUT_SCHEMA_VERSION: Final[int] = 2
+#: sealed decision's policy digest alongside the id/version, version 3 records
+#: the dataset's ``source``/``synthetic`` provenance.
+HOLDOUT_SCHEMA_VERSION: Final[int] = 3
 
-#: SQLite layout version of the holdout ledger. The first release already has
-#: every column, so there is one migration and it is not the result layout.
-LEDGER_SCHEMA_VERSION: Final[int] = 1
+#: SQLite layout version of the holdout ledger. Version 2 adds the provenance
+#: columns to ``holdouts`` so a sealed identity keeps saying what it was sealed
+#: for; rows written by version 1 stay ``NULL`` (unknown), never ``0``.
+LEDGER_SCHEMA_VERSION: Final[int] = 2
 
 _WAL_ATTEMPTS: Final[int] = 5
 _WAL_BACKOFF_SECONDS: Final[float] = 0.05
@@ -205,6 +207,10 @@ _MIGRATIONS: dict[int, tuple[str, ...]] = {
         END
         """,
     ),
+    2: (
+        "ALTER TABLE holdouts ADD COLUMN source TEXT",
+        "ALTER TABLE holdouts ADD COLUMN synthetic INTEGER",
+    ),
 }
 
 
@@ -272,7 +278,9 @@ class HoldoutSpec:
     Every field is part of what makes this holdout unique. A later unlock must
     present a promotion decision with the same dataset, checksum, spec, code
     version and settings digest; the symbol/timeframe are checked against the
-    evaluation config as well.
+    evaluation config as well. ``source``/``synthetic`` are the dataset
+    provenance: a holdout sealed for a real tape cannot be spent on a synthetic
+    one that happens to share the same bars.
     """
 
     dataset_id: str
@@ -282,6 +290,8 @@ class HoldoutSpec:
     spec_hash: str
     code_version: str
     settings_digest: str
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -294,6 +304,10 @@ class HoldoutSpec:
             "settings_digest",
         ):
             _text(getattr(self, name), name)
+        if self.source is not None:
+            _text(self.source, "source")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a bool or None")
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,6 +383,8 @@ class HoldoutRecord:
     spec_hash: str
     code_version: str
     settings_digest: str
+    source: str | None
+    synthetic: bool | None
     policy_id: str | None
     policy_version: int | None
     policy_digest: str | None
@@ -399,7 +415,8 @@ class LockedHoldoutResult:
     so re-serialising the same numbers is stable while the creation stamp may
     differ. Identity fields bind the result to the dataset build, candidate,
     code version, execution settings and the promotion evidence that unlocked
-    it.
+    it. ``source``/``synthetic`` repeat the sealed provenance so the attached
+    section cannot silently describe a different kind of data.
     """
 
     dataset_id: str
@@ -440,6 +457,8 @@ class LockedHoldoutResult:
     checksum: str
     created_at: str
     schema_version: int = HOLDOUT_SCHEMA_VERSION
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -458,6 +477,10 @@ class LockedHoldoutResult:
             "created_at",
         ):
             _text(getattr(self, name), name)
+        if self.source is not None:
+            _text(self.source, "source")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a bool or None")
         for name in ("spec_version", "complexity", "test_start_row", "test_end_row"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -540,6 +563,11 @@ class HoldoutConfig:
 
     ``cost_stress`` must contain at least one multiplier above ``1.0``. A
     no-op stress would let a result claim cost resilience it never measured.
+
+    ``source``/``synthetic`` are the provenance the caller claims for the data
+    being spent. They must equal the sealed holdout's provenance; a missing
+    claim is compared as unknown, which only matches a seal that also recorded
+    unknown.
     """
 
     code_version: str
@@ -554,10 +582,16 @@ class HoldoutConfig:
     features: FeatureFrame | None = None
     dataset_id: str | None = None
     dataset_checksum: str | None = None
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("code_version", "symbol", "timeframe"):
             _text(getattr(self, name), name)
+        if self.source is not None:
+            _text(self.source, "source")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a bool or None")
         for name in ("window", "bootstrap_samples", "seed"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int):
@@ -602,6 +636,16 @@ class HoldoutConfig:
 
 
 def _row_to_record(row: sqlite3.Row) -> HoldoutRecord:
+    synthetic_raw = row["synthetic"]
+    if synthetic_raw is None:
+        synthetic: bool | None = None
+    elif synthetic_raw in (0, 1):
+        synthetic = bool(synthetic_raw)
+    else:
+        raise HoldoutError(
+            "holdout_provenance_invalid",
+            f"stored synthetic flag {synthetic_raw!r} is not 0, 1 or NULL",
+        )
     return HoldoutRecord(
         dataset_id=str(row["dataset_id"]),
         dataset_checksum=str(row["dataset_checksum"]),
@@ -611,6 +655,8 @@ def _row_to_record(row: sqlite3.Row) -> HoldoutRecord:
         spec_hash=str(row["spec_hash"]),
         code_version=str(row["code_version"]),
         settings_digest=str(row["settings_digest"]),
+        source=None if row["source"] is None else str(row["source"]),
+        synthetic=synthetic,
         policy_id=None if row["policy_id"] is None else str(row["policy_id"]),
         policy_version=None if row["policy_version"] is None else int(row["policy_version"]),
         policy_digest=None if row["policy_digest"] is None else str(row["policy_digest"]),
@@ -924,12 +970,16 @@ class HoldoutLedger:
                 existing.spec_hash,
                 existing.code_version,
                 existing.settings_digest,
+                existing.source,
+                existing.synthetic,
             ) == (
                 holdout.symbol,
                 holdout.timeframe,
                 holdout.spec_hash,
                 holdout.code_version,
                 holdout.settings_digest,
+                holdout.source,
+                holdout.synthetic,
             ):
                 self._log(
                     action="seal",
@@ -956,8 +1006,9 @@ class HoldoutLedger:
                     """
                     INSERT INTO holdouts
                         (dataset_id, dataset_checksum, symbol, timeframe, status,
-                         spec_hash, code_version, settings_digest, sealed_at, sealed_by)
-                    VALUES (?, ?, ?, ?, 'sealed', ?, ?, ?, ?, ?)
+                         spec_hash, code_version, settings_digest, sealed_at, sealed_by,
+                         source, synthetic)
+                    VALUES (?, ?, ?, ?, 'sealed', ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         holdout.dataset_id,
@@ -969,6 +1020,8 @@ class HoldoutLedger:
                         holdout.settings_digest,
                         stamp,
                         actor,
+                        holdout.source,
+                        None if holdout.synthetic is None else int(holdout.synthetic),
                     ),
                 )
                 self._append_access(
@@ -989,7 +1042,15 @@ class HoldoutLedger:
                 concurrent.spec_hash,
                 concurrent.code_version,
                 concurrent.settings_digest,
-            ) == (holdout.spec_hash, holdout.code_version, holdout.settings_digest):
+                concurrent.source,
+                concurrent.synthetic,
+            ) == (
+                holdout.spec_hash,
+                holdout.code_version,
+                holdout.settings_digest,
+                holdout.source,
+                holdout.synthetic,
+            ):
                 return concurrent
             self._refuse(
                 action="seal",
@@ -1106,12 +1167,16 @@ class HoldoutLedger:
             record.spec_hash,
             record.code_version,
             record.settings_digest,
+            record.source,
+            record.synthetic,
         ) != (
             holdout.symbol,
             holdout.timeframe,
             holdout.spec_hash,
             holdout.code_version,
             holdout.settings_digest,
+            holdout.source,
+            holdout.synthetic,
         ):
             self._refuse(
                 action="unlock",
@@ -1119,7 +1184,7 @@ class HoldoutLedger:
                 reason="holdout_identity_mismatch",
                 dataset_id=record.dataset_id,
                 dataset_checksum=record.dataset_checksum,
-                detail="the requested spec/code/settings do not match the sealed identity",
+                detail="the requested spec/code/settings/provenance do not match the sealed identity",
             )
 
         if not decision.accepted:
@@ -1137,6 +1202,8 @@ class HoldoutLedger:
             holdout.spec_hash,
             holdout.code_version,
             holdout.settings_digest,
+            holdout.source,
+            holdout.synthetic,
         )
         actual = (
             decision.dataset_id,
@@ -1144,6 +1211,8 @@ class HoldoutLedger:
             decision.candidate_spec_hash,
             decision.code_version,
             decision.settings_digest,
+            decision.source,
+            decision.synthetic,
         )
         if actual != expected:
             self._refuse(
@@ -1654,6 +1723,33 @@ def evaluate_holdout(
             detail=f"expected {expected!r}, got {actual!r}",
         )
 
+    sealed_provenance = (record.source, record.synthetic)
+    claimed_provenance = (config.source, config.synthetic)
+    if claimed_provenance != sealed_provenance:
+        ledger._refuse(
+            action="evaluate",
+            actor=actor,
+            reason="holdout_provenance_mismatch",
+            dataset_id=record.dataset_id,
+            dataset_checksum=record.dataset_checksum,
+            detail=(
+                f"sealed {sealed_provenance!r}, evaluation config claims {claimed_provenance!r}"
+            ),
+        )
+    if isinstance(data, DatasetBundle):
+        bundle_provenance = (data.manifest.source, data.manifest.synthetic)
+        if bundle_provenance != sealed_provenance:
+            ledger._refuse(
+                action="evaluate",
+                actor=actor,
+                reason="holdout_provenance_mismatch",
+                dataset_id=record.dataset_id,
+                dataset_checksum=record.dataset_checksum,
+                detail=(
+                    f"sealed {sealed_provenance!r}, dataset manifest says {bundle_provenance!r}"
+                ),
+            )
+
     if isinstance(data, DatasetBundle):
         if config.dataset_id is not None and config.dataset_id != record.dataset_id:
             ledger._refuse(
@@ -1831,6 +1927,8 @@ def evaluate_holdout(
             regime_coverage=regime_coverage,
             checksum="",
             created_at=_now(),
+            source=record.source,
+            synthetic=record.synthetic,
         )
         result = replace(result, checksum=_result_checksum(result))
     except HoldoutError as exc:
@@ -1956,8 +2054,10 @@ def _locked_section(
         stress=result.stress,
         created_at=result.created_at,
         # The section has its own layout version, independent of the richer
-        # LockedHoldoutResult record.
-        schema_version=1,
+        # LockedHoldoutResult record. Version 2 adds provenance.
+        schema_version=2,
+        source=result.source,
+        synthetic=result.synthetic,
     )
     return replace(draft, checksum=locked_oos_checksum(draft))
 
@@ -2039,6 +2139,8 @@ def verify_holdout_result(
         ("stale_settings", result.settings_digest, evidence.settings_digest),
         ("stale_symbol", result.symbol, evidence.symbol),
         ("stale_timeframe", result.timeframe, evidence.timeframe),
+        ("stale_source", result.source, evidence.source),
+        ("stale_synthetic", result.synthetic, evidence.synthetic),
     )
     for code, actual, expected in checks:
         if actual != expected:
@@ -2099,6 +2201,8 @@ def _copy_with_locked_oos(
         created_at=evidence.created_at,
         schema_version=evidence.schema_version,
         locked_oos=section,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
     )
 
 
