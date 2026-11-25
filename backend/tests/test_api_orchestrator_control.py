@@ -186,6 +186,25 @@ def test_post_without_a_database_is_409_and_creates_nothing(tmp_path: Path) -> N
     assert str(tmp_path) not in response.text
 
 
+def test_post_does_not_initialise_an_empty_existing_sqlite_file(tmp_path: Path) -> None:
+    target = tmp_path / "runs" / "orchestrator.sqlite3"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"")
+    before = _sha256(target)
+    app = create_app(
+        data_root=tmp_path / "data",
+        runs_root=tmp_path / "runs",
+        orchestrator_db=target,
+    )
+
+    response = TestClient(app).post(
+        "/api/orchestrator/control", json={"action": "pause", "reason": "must not initialise"}
+    )
+
+    assert response.status_code == 409, response.text
+    assert _sha256(target) == before
+
+
 def test_get_without_a_database_is_unconfigured_not_an_error(tmp_path: Path) -> None:
     app = create_app(data_root=tmp_path / "data", runs_root=tmp_path / "runs")
 
