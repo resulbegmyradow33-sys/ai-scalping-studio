@@ -155,6 +155,34 @@ _HOLDOUT_TOKENS: Final[frozenset[str]] = frozenset(
 _CURSOR_VERSION: Final[int] = 1
 _DEDUPE_PREFIX: Final[str] = f"{KIND_DISCOVERY_RUN}:proposal:"
 
+#: Keys a serialised discovery template may carry. Unknown keys are rejected so
+#: a typo in an operator's template file cannot silently fall back to a default.
+_TEMPLATE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "generations",
+        "gate",
+        "horizon",
+        "max_trials",
+        "patience",
+        "population",
+        "seed",
+        "stress",
+    }
+)
+
+#: Keys a serialised gate may carry. Mirrors :class:`GateCriteria` exactly.
+_GATE_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "max_drawdown",
+        "max_ece",
+        "min_expectancy_r",
+        "min_profit_factor",
+        "min_regime_coverage",
+        "min_trades",
+        "require_positive_cost_stress",
+    }
+)
+
 #: Fields every proposal message carries. The optional handler requires them.
 PROPOSAL_MESSAGE_REQUIRED_FIELDS: Final[frozenset[str]] = frozenset(
     {"proposal_id", "hypothesis_id", "symbol", "timeframe", "status"}
@@ -237,6 +265,47 @@ class DiscoveryTemplate:
             raise TypeError("horizon must be an int")
         if self.horizon < 1:
             raise ValueError("horizon must be >= 1")
+
+    @classmethod
+    def from_mapping(cls, document: Mapping[str, Any]) -> DiscoveryTemplate:
+        """Build a template from a JSON-style mapping, rejecting anything unknown.
+
+        ``max_trials``, ``seed``, ``gate`` and ``stress`` are required. The gate
+        and cost-stress policy decide what evidence a run must produce, so this
+        loader never substitutes a default for them; an operator who wants an
+        exploratory run must state an empty gate explicitly.
+        """
+        if not isinstance(document, Mapping):
+            raise TypeError(f"template must be a mapping, got {type(document).__name__}")
+        unknown = set(document) - _TEMPLATE_FIELDS
+        if unknown:
+            raise ValueError(f"unknown template fields: {sorted(unknown)}")
+        required = {"max_trials", "seed", "gate", "stress"}
+        missing = required - set(document)
+        if missing:
+            raise ValueError(f"missing required template fields: {sorted(missing)}")
+
+        gate_document = document["gate"]
+        if not isinstance(gate_document, Mapping):
+            raise TypeError(f"gate must be a mapping, got {type(gate_document).__name__}")
+        unknown_gate = set(gate_document) - _GATE_FIELDS
+        if unknown_gate:
+            raise ValueError(f"unknown gate fields: {sorted(unknown_gate)}")
+
+        stress = document["stress"]
+        if isinstance(stress, (str, bytes)) or not isinstance(stress, Sequence):
+            raise TypeError("stress must be a list of positive multipliers")
+
+        return cls(
+            max_trials=document["max_trials"],
+            seed=document["seed"],
+            gate=GateCriteria(**dict(gate_document)),
+            stress=tuple(stress),
+            population=document.get("population", 16),
+            generations=document.get("generations", 5),
+            patience=document.get("patience", 5),
+            horizon=document.get("horizon", 1),
+        )
 
     def payload(self, *, symbol: str, timeframe: str) -> dict[str, Any]:
         """A payload the current ``discovery.run`` handler accepts unchanged."""

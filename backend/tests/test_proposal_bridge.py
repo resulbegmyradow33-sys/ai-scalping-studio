@@ -293,6 +293,29 @@ def test_constants_and_kind_match_the_handler_module() -> None:
     assert MAX_DISCOVERY_GENERATIONS == HANDLER_MAX_GENERATIONS
 
 
+def test_template_from_mapping_is_strict_and_keeps_gate_stress_seed() -> None:
+    document: dict[str, Any] = {
+        "max_trials": 25,
+        "seed": 7,
+        "gate": {"min_trades": 10, "max_drawdown": 0.25},
+        "stress": [1.5, 2.0],
+        "population": 8,
+        "generations": 3,
+        "patience": 2,
+        "horizon": 2,
+    }
+    assert DiscoveryTemplate.from_mapping(document) == _template()
+
+    with pytest.raises(ValueError, match="missing required template fields"):
+        DiscoveryTemplate.from_mapping({"max_trials": 25, "seed": 7, "stress": [1.5]})
+    with pytest.raises(ValueError, match="unknown template fields"):
+        DiscoveryTemplate.from_mapping({**document, "gateway": {}})
+    with pytest.raises(ValueError, match="unknown gate fields"):
+        DiscoveryTemplate.from_mapping({**document, "gate": {"min_trade": 10}})
+    with pytest.raises(TypeError, match="stress"):
+        DiscoveryTemplate.from_mapping({**document, "stress": "1.5,2.0"})
+
+
 def test_scan_executes_no_discovery_and_creates_no_archive(
     index: KnowledgeIndex,
     proposals: ProposalStore,
