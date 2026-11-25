@@ -551,24 +551,41 @@ def decide(
     candidate = f"candidate {best_id[:12]}"
     value = best_metrics.get(metric)
     trades = best_metrics.get("trades")
-    if trades is not None:
-        closed = float(trades)
-        if min_best_trades > 0 and closed < min_best_trades:
-            return (
-                "no_trade",
-                (
-                    f"no tradable candidate: {candidate} closed {closed:g} trade(s), "
-                    f"below the {min_best_trades} required; NO TRADE is the recorded result"
-                ),
+    if min_best_trades > 0:
+        # A missing, malformed, fractional or non-finite count is not evidence
+        # that a candidate actually traded. Keep this public decision boundary
+        # fail-closed even when called outside evolve() with hand-built metrics.
+        try:
+            closed = float(trades)
+        except (TypeError, ValueError):
+            closed = math.nan
+        if (
+            trades is None
+            or not math.isfinite(closed)
+            or closed < min_best_trades
+            or not closed.is_integer()
+        ):
+            detail = (
+                "missing or invalid trade-count evidence"
+                if trades is None or not math.isfinite(closed) or not closed.is_integer()
+                else f"only {closed:g} closed trade(s)"
             )
-        if min_best_trades == 0 and closed == 0.0:
             return (
                 "no_trade",
                 (
-                    f"{candidate} is flat by construction (0 closed trades); "
+                    f"no tradable candidate: {candidate} has {detail}; "
+                    f"at least {min_best_trades} closed trade(s) are required; "
                     "NO TRADE is the recorded result"
                 ),
             )
+    elif trades is not None and float(trades) == 0.0:
+        return (
+            "no_trade",
+            (
+                f"{candidate} is flat by construction (0 closed trades); "
+                "NO TRADE is the recorded result"
+            ),
+        )
     if value is None:
         return (
             "no_change",
