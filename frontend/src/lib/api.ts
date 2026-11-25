@@ -21,6 +21,8 @@ import type {
   PaperOrder,
   PaperPage,
   PaperPosition,
+  PaperSessionCreateRequest,
+  PaperSessionCreated,
   PaperSessionItem,
   PaperSessionSummary,
   PaperTrade,
@@ -57,8 +59,8 @@ const ML_PREPARE_TIMEOUT_MS = 60_000;
 /** `/api/ml/evaluate` runs the simulator once per stress multiplier. */
 const ML_EVALUATE_TIMEOUT_MS = 300_000;
 
-/** `/api/paper/.../close` takes a short `BEGIN IMMEDIATE`; still not a cache hit. */
-const PAPER_CLOSE_TIMEOUT_MS = 15_000;
+/** `/api/paper` writes (open, close) take a short `BEGIN IMMEDIATE`; still not a cache hit. */
+const PAPER_WRITE_TIMEOUT_MS = 15_000;
 
 /**
  * A failed API call. `status` is the HTTP status, or `0` when the request never
@@ -258,11 +260,24 @@ export const api = {
   },
 
   // --- paper ledger ----------------------------------------------------------
-  // Reads are `mode=ro` on the backend and stay cheap; `close` is the only
-  // write this client performs. Every list is a bounded `{items,total,...}`.
+  // Reads are `mode=ro` on the backend and stay cheap; `open` and `close` are
+  // the only writes this client performs. Every list is a bounded
+  // `{items,total,...}`.
 
   paperSessions(limit = 100, offset = 0): Promise<PaperPage<PaperSessionItem>> {
     return request<PaperPage<PaperSessionItem>>(paperPagePath("/api/paper/sessions", limit, offset));
+  },
+
+  /**
+   * Record one running session. The reply carries the server-generated id; no
+   * runner is started and no champion is selected by this call.
+   */
+  openPaperSession(body: PaperSessionCreateRequest): Promise<PaperSessionCreated> {
+    return request<PaperSessionCreated>(
+      "/api/paper/sessions",
+      { method: "POST", body: JSON.stringify(body) },
+      PAPER_WRITE_TIMEOUT_MS,
+    );
   },
 
   paperSession(sessionId: string): Promise<PaperSessionSummary> {
@@ -274,7 +289,7 @@ export const api = {
     return request<PaperSessionSummary>(
       `${paperSessionBase(sessionId)}/close`,
       { method: "POST" },
-      PAPER_CLOSE_TIMEOUT_MS,
+      PAPER_WRITE_TIMEOUT_MS,
     );
   },
 
