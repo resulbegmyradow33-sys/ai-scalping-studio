@@ -592,6 +592,26 @@ export interface CalibrateResponse {
 export type PaperTimeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
 
 /**
+ * Body of `POST /api/paper/sessions`. The server generates the id and the
+ * ledger path is app configuration, so neither is expressible here. `config`
+ * is stored verbatim under `extra`; it does not configure a runner.
+ */
+export interface PaperSessionCreateRequest {
+  symbol: string;
+  timeframe: PaperTimeframe;
+  strategy: string;
+  model_version: string | null;
+  config?: Record<string, unknown>;
+}
+
+/** `201` from `POST /api/paper/sessions`; the id was chosen by the server. */
+export interface PaperSessionCreated {
+  session_id: string;
+  status: string;
+  started_at: string;
+}
+
+/**
  * One row of `GET /api/paper/sessions`. `model_version` carries the DSL spec
  * hash when the autonomous runner opened the session; it is `null` otherwise.
  */
