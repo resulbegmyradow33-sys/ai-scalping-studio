@@ -21,7 +21,10 @@ Honest limits
 * Search-wide counts follow ``(dataset_id, code_version)``. Two unrelated runs
   that share a dataset and code version are counted together. That can only
   make exposure look larger, which is the safe direction for a
-  multiple-testing guard.
+  multiple-testing guard. Dataset ids are compared through
+  :func:`scalping.discovery.ids.canonical_dataset_id`, so the search's
+  ``validation:<id>`` rows and evidence's ``<id>`` rows are one series while
+  the stored ``per_dataset`` keys keep their original spelling.
 * No policy decision is made here. This module returns exposure and rewrites
   ``trial_count``; ``scalping.discovery.promotion`` still owns every promotion
   threshold and refusal.
@@ -36,6 +39,7 @@ from typing import Any
 
 from scalping.discovery.archive import DiscoveryArchive, TrialStats
 from scalping.discovery.evidence import CandidateEvidence, evidence_checksum
+from scalping.discovery.ids import canonical_dataset_id
 
 __all__ = [
     "ExposureError",
@@ -193,7 +197,11 @@ def apply_to_evidence(
     for name in ("spec_hash", "dataset_id", "code_version"):
         claimed = getattr(evidence, name)
         archived = getattr(exposure, name)
-        if claimed != archived:
+        if name == "dataset_id":
+            same = canonical_dataset_id(claimed) == canonical_dataset_id(archived)
+        else:
+            same = claimed == archived
+        if not same:
             raise ExposureError(
                 "exposure_mismatch",
                 f"bundle {name} {claimed!r} does not match exposure {archived!r}",

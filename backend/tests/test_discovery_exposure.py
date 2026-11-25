@@ -31,6 +31,7 @@ from scalping.discovery import (
 CODE_VERSION = "test-exposure-2026-11-25"
 OTHER_CODE_VERSION = "test-exposure-2026-11-24"
 DATASET_ID = "validation:XAUUSD:M5:abcd1234"
+PLAIN_DATASET_ID = "XAUUSD:M5:abcd1234"
 OTHER_DATASET_ID = "validation:EURUSD:M5:abcd1234"
 CREATED_AT = "2026-11-25T10:00:00+00:00"
 
@@ -188,6 +189,28 @@ def test_trial_stats_filters_dataset_and_code_version(tmp_path: Path) -> None:
     assert on_version.dataset_id is None
     assert on_version.code_version == CODE_VERSION
     assert on_version.per_dataset == {DATASET_ID: 2, OTHER_DATASET_ID: 1}
+
+
+def test_trial_stats_counts_both_spellings_of_one_build(tmp_path: Path) -> None:
+    with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
+        anchor = _add(archive, 1, 2)
+        rival = _add(archive, 3, 4)
+        _record(archive, anchor, accepted=True, dataset_id=PLAIN_DATASET_ID)
+        _record(archive, rival, accepted=False, dataset_id=DATASET_ID)
+        _record(archive, anchor, accepted=True, dataset_id=OTHER_DATASET_ID)
+
+        stats = archive.trial_stats(anchor, dataset_id=PLAIN_DATASET_ID, code_version=CODE_VERSION)
+        exposure = exposure_for(archive, anchor, PLAIN_DATASET_ID, CODE_VERSION)
+
+    assert stats.total_attempts == 2
+    assert stats.accepted == 1
+    assert stats.rejected == 1
+    assert stats.distinct_candidates == 2
+    assert stats.spec_attempts == 1
+    # Counts keep the stored spelling; only the filter is canonical.
+    assert stats.per_dataset == {PLAIN_DATASET_ID: 1, DATASET_ID: 1}
+    assert exposure.trial_count == 2
+    assert exposure.per_dataset == {PLAIN_DATASET_ID: 1, DATASET_ID: 1}
 
 
 def test_repeated_triple_is_counted_as_deduped(tmp_path: Path) -> None:
@@ -367,6 +390,20 @@ def test_apply_refuses_a_mismatched_exposure(tmp_path: Path) -> None:
             apply_to_evidence(evidence, exposure)
 
     assert caught.value.code == "exposure_mismatch"
+
+
+def test_apply_accepts_canonically_equal_dataset_ids(tmp_path: Path) -> None:
+    archive, anchor, _ = _archive_with_search(tmp_path)
+    with archive:
+        exposure = exposure_for(archive, anchor, DATASET_ID, CODE_VERSION)
+        evidence = _bundle(anchor, dataset_id=PLAIN_DATASET_ID, trial_count=9)
+
+    updated = apply_to_evidence(evidence, exposure)
+
+    assert updated.trial_count == 2
+    # The bundle keeps its own spelling; only the comparison was canonical.
+    assert updated.dataset_id == PLAIN_DATASET_ID
+    assert updated.checksum == evidence_checksum(updated)
 
 
 def test_apply_refuses_a_tampered_bundle(tmp_path: Path) -> None:

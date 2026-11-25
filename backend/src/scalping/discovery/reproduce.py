@@ -85,7 +85,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Final
@@ -114,6 +114,7 @@ from scalping.discovery.evidence import (
 from scalping.discovery.evidence import (
     evidence_from_dict as canonical_evidence_from_dict,
 )
+from scalping.discovery.ids import canonical_dataset_id
 from scalping.discovery.protocols import canonical_json
 from scalping.discovery.run import code_version as current_code_version
 from scalping.features.build import FeatureFrame, build_features
@@ -140,6 +141,17 @@ _SPEC_SIDECAR_SUFFIX: Final[str] = ".spec.json"
 #: A checksum is a hex digest, and it is used as a directory name.
 _CHECKSUM_PATTERN: Final[re.Pattern[str]] = re.compile(r"[0-9a-f]{16,128}")
 
+#: CandidateEvidence fields this tree can round-trip. The provenance schema
+#: gained ``provenance_verified`` after the initial evidence shape, so the
+#: strict reader accepts it only when the dataclass defines it; the field is
+#: then copied through unchanged instead of being dropped or rejected.
+_CANDIDATE_EVIDENCE_FIELDS: Final[frozenset[str]] = frozenset(
+    field.name for field in fields(CandidateEvidence)
+)
+_EVIDENCE_CONFIG_FIELDS: Final[frozenset[str]] = frozenset(
+    field.name for field in fields(EvidenceConfig)
+)
+
 _EVIDENCE_KEYS: Final[tuple[str, ...]] = (
     "spec_hash",
     "spec_version",
@@ -163,7 +175,13 @@ _EVIDENCE_KEYS: Final[tuple[str, ...]] = (
     "locked_oos",
     "source",
     "synthetic",
-)
+) + (("provenance_verified",) if "provenance_verified" in _CANDIDATE_EVIDENCE_FIELDS else ())
+
+_OPTIONAL_EVIDENCE_KEYS: Final[tuple[str, ...]] = (
+    "locked_oos",
+    "source",
+    "synthetic",
+) + (("provenance_verified",) if "provenance_verified" in _CANDIDATE_EVIDENCE_FIELDS else ())
 _POLICY_KEYS: Final[tuple[str, ...]] = (
     "folds",
     "purge_bars",
@@ -476,7 +494,7 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
         data,
         _EVIDENCE_KEYS,
         "evidence",
-        optional=("locked_oos", "source", "synthetic"),
+        optional=_OPTIONAL_EVIDENCE_KEYS,
     )
     schema = _count(data["schema_version"], "schema_version")
     if schema != EVIDENCE_SCHEMA_VERSION:
@@ -491,7 +509,7 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
             locked = canonical_evidence_from_dict(data).locked_oos
         except EvidenceError as exc:
             raise EvidenceError("invalid_payload", f"locked_oos: {exc}") from exc
-    return CandidateEvidence(
+    evidence = CandidateEvidence(
         spec_hash=_text(data["spec_hash"], "spec_hash"),
         spec_version=_count(data["spec_version"], "spec_version"),
         complexity=_count(data["complexity"], "complexity"),
@@ -518,6 +536,14 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
         source=_optional_text(data.get("source"), "source"),
         synthetic=_optional_bool(data.get("synthetic"), "synthetic"),
     )
+    if "provenance_verified" in _CANDIDATE_EVIDENCE_FIELDS:
+        provenance: dict[str, Any] = {
+            "provenance_verified": _optional_bool(
+                data.get("provenance_verified"), "provenance_verified"
+            )
+        }
+        evidence = replace(evidence, **provenance)
+    return evidence
 
 
 # --- mismatch reporting -------------------------------------------------------
@@ -914,7 +940,7 @@ def _rebuild_dataset(features: FeatureFrame, manifest: DatasetManifest) -> Datas
 def _evidence_config(evidence: CandidateEvidence) -> EvidenceConfig:
     """Rebuild the fold configuration the bundle recorded."""
     policy = evidence.policy
-    return EvidenceConfig(
+    config = EvidenceConfig(
         code_version=evidence.code_version,
         symbol=evidence.symbol,
         timeframe=evidence.timeframe,
@@ -934,6 +960,12 @@ def _evidence_config(evidence: CandidateEvidence) -> EvidenceConfig:
         source=evidence.source,
         synthetic=evidence.synthetic,
     )
+    if "provenance_verified" in _EVIDENCE_CONFIG_FIELDS:
+        provenance: dict[str, Any] = {
+            "provenance_verified": getattr(evidence, "provenance_verified", None)
+        }
+        config = replace(config, **provenance)
+    return config
 
 
 def _identity_body(evidence: CandidateEvidence, *, drop_locked: bool) -> dict[str, Any]:
@@ -1092,7 +1124,7 @@ def reproduce_bundle(
             invalid=False,
             expected=evidence.checksum,
         )
-    if manifest.dataset_id != evidence.dataset_id:
+    if canonical_dataset_id(manifest.dataset_id) != canonical_dataset_id(evidence.dataset_id):
         raise ReproduceError(
             "dataset_mismatch",
             f"the artifact is dataset {manifest.dataset_id!r}, not {evidence.dataset_id!r}",

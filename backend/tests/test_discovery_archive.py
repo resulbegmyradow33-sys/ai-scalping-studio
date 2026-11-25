@@ -183,6 +183,32 @@ def test_trial_history_and_counter(tmp_path: Path) -> None:
         assert not archive.has_trial(record.candidate_id, OTHER_DATASET_ID)
 
 
+def test_trial_lookup_matches_the_manifest_spelling(tmp_path: Path) -> None:
+    plain = "XAUUSD:M5:abcd1234"
+    prefixed = f"validation:{plain}"
+    with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
+        record = _add(archive, _root())
+        archive.record_trial(
+            record.candidate_id,
+            _trial(1.5),
+            dataset_id=prefixed,
+            code_version=CODE_VERSION,
+            seed=1,
+        )
+
+        assert archive.has_trial(record.candidate_id, plain)
+        assert archive.has_trial(record.candidate_id, prefixed)
+        assert archive.has_trial(record.candidate_id, plain, code_version=CODE_VERSION)
+        assert not archive.has_trial(record.candidate_id, plain, code_version="other-code")
+        assert not archive.has_trial(record.candidate_id, f"test:{plain}")
+        assert not archive.has_trial(record.candidate_id, "XAUUSD:M15:abcd1234")
+
+        accepted = archive.accepted_trial(record.candidate_id, plain, code_version=CODE_VERSION)
+        assert accepted is not None
+        assert accepted.dataset_id == prefixed
+        assert archive.accepted_trial(record.candidate_id, plain, code_version="other-code") is None
+
+
 def test_best_honours_minimum_trials_and_acceptance(tmp_path: Path) -> None:
     with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
         once = _add(archive, ToyCandidate((1,)))

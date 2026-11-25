@@ -418,6 +418,19 @@ one evaluation: a second attempt is refused with `holdout_spent` before any
 policy work, and a failure after the unlock leaves it spent with no result.
 Nothing retries.
 
+**Dataset id namespace.** The same build can be written two ways: `discovery
+run` records trials under `validation:<manifest id>` because the evaluator
+requires the split marker, while `discovery evidence` stores the manifest id
+`<manifest id>`. Trial lookup therefore compares ids through
+`scalping.discovery.ids.canonical_dataset_id`, which removes exactly one leading
+`validation:` marker. Stored ids are never rewritten: trial rows, evidence rows
+and JSON records keep their original spelling for display and audit.
+`validation:X` and `X` are the same dataset for `has_trial`,
+`trial_stats`/exposure and accepted-trial matching; `test:X`, `holdout:X` and
+other prefixes stay different ids and remain refused. Symbol, timeframe,
+horizon and digest are compared exactly, and the strip is single-pass, so
+`validation:validation:X` cannot alias `X`.
+
 Every path returns a decision record (`accepted`, `rejected` or `refused`) with
 the stable code list, policy id/version/digest, evidence checksum and dataset
 identity. The owner approval token is checked only for non-emptiness and is never

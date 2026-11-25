@@ -65,6 +65,7 @@ from scalping.discovery.holdout import (
     evaluate_holdout,
     verify_holdout_result,
 )
+from scalping.discovery.ids import SPLIT_PREFIX, canonical_dataset_id
 from scalping.discovery.promotion import (
     PRODUCTION_POLICIES,
     PROMOTION_V1,
@@ -112,6 +113,7 @@ __all__ = [
     "PROMOTION_MODES",
     "PROMOTION_V1",
     "SCHEMA_VERSION",
+    "SPLIT_PREFIX",
     "STOP_REASONS",
     "AccessEntry",
     "AggregateEvidence",
@@ -165,6 +167,7 @@ __all__ = [
     "attach_holdout",
     "bootstrap_ci",
     "build_evidence",
+    "canonical_dataset_id",
     "canonical_digest",
     "canonical_json",
     "decide",
