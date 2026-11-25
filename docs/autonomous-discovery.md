@@ -640,6 +640,43 @@ Non-finite metrics are omitted rather than clamped: `profit_factor` is `inf`
 for wins without losses, and a gate that requires it then rejects with
 `missing_metric` instead of reading a fabricated number.
 
+## Read-only API
+
+`scalping.api.routes_discovery` mounts under `/api/discovery` and exposes the
+archive for evidence and promotion review. Every route is a `GET`; nothing here
+evaluates a candidate, runs a search, promotes, rolls back or schedules work.
+
+| Route | Returns |
+|---|---|
+| `GET /api/discovery/summary?scope=&limit=` | candidate/trial/decision totals, accepted/rejected and distinct-dataset trial counts, and every champion with `mode`, `policy_id`, `policy_version`, `policy_digest`, `evidence_checksum` and the champion's trial counts |
+| `GET /api/discovery/candidates?scope=&metric=&limit=&offset=` | candidates newest first with the spec hash (`candidate_id`), complexity, trial and accepted-trial counts, and the best accepted trial's `best_value`/`best_metrics` for `metric` (default `net_profit`) |
+| `GET /api/discovery/candidates/{id}` | the canonical spec, bounded newest-first trials (`dataset_id`, checksums, code version, seed, metrics, accepted, rejections), direct lineage edges and bounded decisions with `detail` |
+| `GET /api/discovery/trials?candidate_id=&dataset_id=&scope=&accepted=&limit=&offset=` | a bounded newest-first trial window across candidates |
+
+**Honest missing states.** A missing archive is `configured: false`; an existing
+file that cannot be opened or lacks the candidate/trial tables is
+`configured: true, readable: false` with every count and item omitted. A real
+zero means the archive was read and nothing matched. `champions_readable` is
+`false` when a champion table exists but lacks the columns a reader needs; an
+archive with no champion table is readable with an empty champion list.
+
+**Read-only by construction.** SQLite is opened with a `mode=ro` URI and
+`PRAGMA query_only = ON`. When no WAL sidecar exists the file is also opened
+`immutable=1`, so a review poll creates no `-wal`/`-shm` file and leaves the
+directory byte-identical; if a writer left a non-empty WAL, a plain `mode=ro`
+connection reads its committed rows instead. The archive is queried with plain
+SQL and is never migrated: a v1 archive answers with the columns it has and
+`None` for governance fields that postdate it.
+
+**Request boundary.** The archive path is server configuration only. Candidate
+ids must be 64 lowercase hex characters (the sha256 spec hash), metric names use
+the archive's conservative alphabet, and scope/dataset filters are validated
+data-id text. Every value is a bound SQL parameter. `limit` is `1..500`,
+`offset ≥ 0`, a malformed parameter is a `422`, an unknown candidate on the
+detail route is a `404`, and a configured but unreadable archive is a `409`.
+`scope` follows the archive's own rule: a trial belongs to it when every
+alphanumeric scope token appears in its `dataset_id`.
+
 ## What is deliberately absent
 
 - **Nested validation inside the evaluator.** It runs one candidate on one

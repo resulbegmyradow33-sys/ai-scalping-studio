@@ -238,6 +238,8 @@ def _make_evidence(
         "aggregate": _aggregate(items) if aggregate is None else aggregate,
         "checksum": "",
         "created_at": "2026-11-24T00:00:00+00:00",
+        "source": "test:fixture",
+        "synthetic": False,
     }
     values.update(overrides)
     draft = CandidateEvidence(**values)
@@ -262,6 +264,8 @@ def _locked_section(
         dataset_checksum=evidence.dataset_checksum,
         symbol=evidence.symbol,
         timeframe=evidence.timeframe,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
         spec_hash=evidence.spec_hash,
         spec_version=evidence.spec_version,
         complexity=evidence.complexity,

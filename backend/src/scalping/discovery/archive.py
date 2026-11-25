@@ -59,6 +59,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Final, Self
 
 from scalping.discovery._evidence_auth import verify as _verify_authorization
@@ -87,6 +88,7 @@ __all__ = [
     "DiscoveryArchive",
     "EvidenceRecord",
     "TrialRecord",
+    "TrialStats",
     "UnknownCandidateError",
 ]
 
@@ -437,6 +439,59 @@ class TrialRecord:
             "created_at": self.created_at,
             "dataset_checksum": self.dataset_checksum,
             "settings_digest": self.settings_digest,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class TrialStats:
+    """Read-only accounting of the trials the archive actually recorded.
+
+    The counts are **search-wide**, not per candidate: every evaluation touches
+    one candidate, and multiple-testing exposure is the number of evaluations
+    the search spent before it kept a winner. ``spec_hash`` anchors the query to
+    a candidate that exists, but the totals include every candidate whose trial
+    matches the ``dataset_id``/``code_version`` filters. Filtering by dataset
+    and code version is what makes the number comparable: a different dataset or
+    a changed evaluator is a different experiment series.
+
+    ``deduped`` counts recorded rows that repeat a
+    ``(candidate, dataset, code version)`` triple. The search skips duplicates
+    before evaluating, so a normal run reports ``0``; a direct archive writer
+    that records the same triple twice is counted rather than hidden.
+
+    ``spec_attempts`` is the anchor candidate's own share of the matching rows.
+    It answers "was this candidate evaluated on this dataset at all?" without
+    turning the exposure number back into a per-candidate count.
+    """
+
+    spec_hash: str
+    total_attempts: int
+    accepted: int
+    rejected: int
+    distinct_candidates: int
+    deduped: int
+    per_dataset: Mapping[str, int]
+    spec_attempts: int
+    dataset_id: str | None = None
+    code_version: str | None = None
+
+    @property
+    def attempts(self) -> int:
+        """Alias used by ``SearchResult``; same number as ``total_attempts``."""
+        return self.total_attempts
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "spec_hash": self.spec_hash,
+            "total_attempts": self.total_attempts,
+            "accepted": self.accepted,
+            "rejected": self.rejected,
+            "distinct_candidates": self.distinct_candidates,
+            "deduped": self.deduped,
+            "per_dataset": dict(sorted(self.per_dataset.items())),
+            "spec_attempts": self.spec_attempts,
+            "dataset_id": self.dataset_id,
+            "code_version": self.code_version,
         }
 
 
@@ -1280,6 +1335,63 @@ class DiscoveryArchive:
             .fetchone()
         )
         return 0 if row is None else int(row[0])
+
+    def trial_stats(
+        self,
+        spec_hash: str,
+        *,
+        dataset_id: str | None = None,
+        code_version: str | None = None,
+    ) -> TrialStats:
+        """Observed search exposure from the ``trials`` table, read-only.
+
+        ``spec_hash`` must be an archived candidate; it is the anchor the caller
+        is about to make a claim for. The totals are search-wide and count every
+        trial row that matches the optional ``dataset_id`` and ``code_version``
+        filters, so a caller cannot hide the other candidates the search spent.
+        An unknown spec is refused instead of returning zeros for a typo; a
+        known spec with no matching rows returns zeros and ``spec_attempts=0``.
+
+        No table, index or trigger is touched: the answer is derived from the
+        evidence already in the archive.
+        """
+        spec_hash = _require_text(spec_hash, "spec_hash")
+        if self.candidate(spec_hash) is None:
+            raise UnknownCandidateError(f"unknown candidate {spec_hash!r}")
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if dataset_id is not None:
+            clauses.append("dataset_id = ?")
+            parameters.append(_require_text(dataset_id, "dataset_id"))
+        if code_version is not None:
+            clauses.append("code_version = ?")
+            parameters.append(_require_text(code_version, "code_version"))
+        query = "SELECT candidate_id, dataset_id, code_version, accepted FROM trials"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY id"
+        rows = self._connection().execute(query, parameters).fetchall()
+
+        total_attempts = len(rows)
+        accepted = sum(1 for row in rows if int(row[3]) == 1)
+        distinct_candidates = len({str(row[0]) for row in rows})
+        evaluations = {(str(row[0]), str(row[1]), str(row[2])) for row in rows}
+        per_dataset: dict[str, int] = {}
+        for row in rows:
+            key = str(row[1])
+            per_dataset[key] = per_dataset.get(key, 0) + 1
+        return TrialStats(
+            spec_hash=spec_hash,
+            total_attempts=total_attempts,
+            accepted=accepted,
+            rejected=total_attempts - accepted,
+            distinct_candidates=distinct_candidates,
+            deduped=total_attempts - len(evaluations),
+            per_dataset=MappingProxyType(dict(sorted(per_dataset.items()))),
+            spec_attempts=sum(1 for row in rows if str(row[0]) == spec_hash),
+            dataset_id=dataset_id,
+            code_version=code_version,
+        )
 
     def has_trial(
         self, candidate_id: str, dataset_id: str, *, code_version: str | None = None

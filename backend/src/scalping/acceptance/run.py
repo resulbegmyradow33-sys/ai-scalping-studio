@@ -98,6 +98,11 @@ ACCEPTANCE_FIXTURE_SOURCE: Final[str] = "acceptance_fixture"
 #: The candidate the bounded discovery run itself selected.
 DISCOVERY_CANDIDATE_SOURCE: Final[str] = "discovery_best"
 
+#: Provenance recorded in the acceptance dataset manifest. It is deliberately
+#: named after the harness: a synthetic acceptance tape must never be mistakable
+#: for a real store, and the production policy refuses it by construction.
+ACCEPTANCE_SOURCE: Final[str] = "acceptance:synthetic"
+
 #: Stable stage order; a report with a missing or reordered stage is malformed.
 STAGE_NAMES: Final[tuple[str, ...]] = (
     "import_validate",
@@ -507,6 +512,8 @@ class _AcceptanceRun:
             validation_fraction=self.config.validation_fraction,
             purge_bars=self.config.purge_bars,
             embargo_bars=self.config.embargo_bars,
+            source=ACCEPTANCE_SOURCE,
+            synthetic=True,
         )
         manifest_path = save_manifest(self.run_dir / "dataset.json", bundle)
         self.features = features
@@ -731,6 +738,8 @@ class _AcceptanceRun:
                 spec_hash=self.evidence.spec_hash,
                 code_version=self.evidence.code_version,
                 settings_digest=self.evidence.settings_digest,
+                source=ACCEPTANCE_SOURCE,
+                synthetic=True,
             )
             ledger.seal(holdout_spec, actor="acceptance", reason="synthetic acceptance run")
             token = ledger.unlock(
@@ -753,6 +762,8 @@ class _AcceptanceRun:
                 features=self.features,
                 dataset_id=self.bundle.manifest.dataset_id,
                 dataset_checksum=self.bundle.manifest.checksum,
+                source=ACCEPTANCE_SOURCE,
+                synthetic=True,
             )
             result = module.evaluate_holdout(
                 self.bundle,
@@ -904,6 +915,8 @@ class _AcceptanceRun:
             search_budget=self.config.max_trials,
             trial_count=max(1, self.discovery.trials),
             window=self.config.window,
+            source=ACCEPTANCE_SOURCE,
+            synthetic=True,
         )
         return build_evidence(bundle, spec, config, features=features, settings=self.settings)
 
@@ -1028,6 +1041,7 @@ def _acceptance_policy(*, require_locked_oos: bool, max_trials: int) -> Promotio
         max_stress_degradation=10.0,
         require_locked_oos=require_locked_oos,
         max_selection_fold_share=0.0,
+        allow_synthetic=True,
     )
 
 

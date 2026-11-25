@@ -25,6 +25,7 @@ process, not an operating-system service.
 | `backend/src/scalping/orchestrator/resources.py` | Measured `ResourceGuard`: stdlib probe, limits, samples |
 | `backend/src/scalping/orchestrator/daemon.py` | `DaemonConfig`, `OrchestratorDaemon`, tick order, background loop, status |
 | `backend/src/scalping/orchestrator/paper_triggers.py` | Matured paper outcomes as a trigger; proposal-only handler |
+| `backend/src/scalping/orchestrator/paper_scheduler.py` | Evidence champions + stored bars → automatic `paper.advance`; persisted cursor |
 | `backend/src/scalping/orchestrator/proposal_handlers.py` | Approved experiment proposals as `discovery.run` triggers; optional `knowledge.proposals` handler |
 | `backend/tests/test_orchestrator_store.py` | Queue semantics, transitions, recovery |
 | `backend/tests/test_orchestrator_core.py` | Loop, controls, heavy job, guard, triggers |
@@ -34,6 +35,7 @@ process, not an operating-system service.
 | `backend/tests/test_data_triggers.py` | Market-data layout inference, dedupe across restart and crash, refusals, caps, CLI |
 | `backend/tests/test_paper_outcome_triggers.py` | Matured-outcome eligibility, cursor/pending ack, provenance, proposal-only handler |
 | `backend/tests/test_paper_outcome_cli.py` | `--watch-paper-ledger` wiring, repeatable flags, synthetic opt-in, restart dedupe, no implicit/HTTP source |
+| `backend/tests/test_paper_scheduler.py` | Evidence-only advances, one job per decision bar, restart and crash dedupe, ledger cursor, warm-up, gap-policy contract, CLI |
 | `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
 ## What is not in this slice
@@ -42,10 +44,11 @@ process, not an operating-system service.
   daemon thread inside whatever process calls `start()`. There is no launchd,
   systemd, supervisor, multi-worker scheduler or persisted timer. A process
   restart relies on `recover_interrupted` and each job's own `scheduled_at`.
-- **Paper execution is still caller/thread driven.** The daemon calls
-  `paper.advance` when a job is due; it does not own a market-data feed, a bar
-  clock or a trading loop. Running it against live/appended bars is the caller's
-  responsibility.
+- **Paper execution is caller/thread driven, including its trigger.** The daemon
+  calls `paper.advance` when a job is due; `--schedule-paper` decides *when* to
+  enqueue one by reading stored bars and the ledger cursor. Nothing owns a
+  market-data feed or a bar clock, so the scheduler cannot know that a bar has
+  closed until the bar is already stored, and it never creates one.
 - **The measured guard fences start, not growth.** It measures RAM/load/disk
   before a job starts. A job that grows after the check is not interrupted;
   `max_process_rss_mb` only refuses the next job.
@@ -186,6 +189,10 @@ uv run scalping.cli orchestrator run --forever --watch-data-dir data
 # paper.outcomes proposal for the next research cycle
 uv run scalping.cli orchestrator run --forever --watch-paper-ledger runs/paper.sqlite
 
+# enqueue paper.advance for every evidence champion with a newly decidable
+# stored bar; the scheduler reads bars and the ledger, never a live feed
+uv run scalping.cli orchestrator run --forever --schedule-paper
+
 # repeat the flag for several ledgers; a batch recorded as synthetic stays
 # refused unless --allow-synthetic is given explicitly
 uv run scalping.cli orchestrator run --forever \
@@ -206,9 +213,10 @@ only when `--watch-paper-ledger` names it.
 |---|---|---|---|---|
 | `--watch-dir DIR` | no | none | Bind one `FileTriggerSource`; each new/changed file enqueues `--watch-kind` | `--watch-data-dir`, `--no-scan` |
 | `--watch-data-dir DIR` | no | none | Bind one `DataFileTriggerSource`; new files enqueue `dataset.build` for the layout's `<symbol>/<timeframe>` | `--watch-dir`, `--no-scan` |
+| `--schedule-paper` | no | off | Bind one `PaperAdvanceScheduler`; each evidence champion with a new decidable stored bar enqueues `paper.advance` | `--no-scan` |
 | `--watch-paper-ledger PATH` | yes | none | Bind one `PaperOutcomeTriggerSource` per path and register the proposal-only `paper.outcomes` handler | `--no-scan` |
 | `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
-| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag |
+| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper` |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
 and the queue is filled by another process. `--watch-kind` defaults to
@@ -216,10 +224,11 @@ and the queue is filled by another process. `--watch-kind` defaults to
 `document_path`. A raw file payload cannot satisfy `dataset.build` (it needs
 `symbol` and `timeframe`), so `--watch-kind dataset.build` is a CLI error and
 points at `--watch-data-dir`. `--watch-dir` and `--watch-data-dir` are mutually
-exclusive; paper-ledger sources may be combined with either of them, and the
-resulting sources are scanned in the order the flags appear (the single
-directory watcher first, then the ledger paths). `--no-scan` is a CLI error
-with any watch flag.
+exclusive; `--schedule-paper` and paper-ledger sources may be combined with
+either of them, and the resulting sources are scanned in the order the flags
+appear (the single directory watcher first, then the paper scheduler, then the
+ledger paths). `--no-scan` is a CLI error with any watch flag or
+`--schedule-paper`.
 
 `--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
 store error). A job-level handler failure is a recorded job outcome and still
@@ -340,7 +349,8 @@ daemon. `autonomy/layout.tsx` gives the route its own document title
 - No OS service, no process supervision, no restart-on-crash. A supervisor or
   the operator restarts it, and recovery handles the interrupted rows.
 - Paper jobs are driven by the queue, not by a market clock; the daemon cannot
-  create bars or guarantee a cadence for `paper.advance`.
+  create bars or guarantee a cadence for `paper.advance`. `--schedule-paper`
+  only enqueues when a decidable bar is already stored.
 - Guard numbers describe this machine at this instant. They do not predict the
   next allocation and, on macOS, cannot see memory held by other processes.
 - Trigger sources are scanned sequentially in the calling thread; a slow hash of
@@ -723,7 +733,7 @@ the stored range.
 
 | Class | Example | Queue behaviour |
 |---|---|---|
-| Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
+| Permanent (`PermanentJobError`) | unknown field, missing field, wrong type, nonexistent document, unsupported format or unreadable PDF, unknown symbol/timeframe, missing gate, gate value out of range | `failed` on the first attempt; `handler_error` event has `"permanent": true` |
 | Permanent advance refusal (`paper.advance`) | `bar_order:` duplicate/unsorted stored bars, `session_conflict:` incompatible or unreplayable ledger session, `continuous_refused:` finished or inconsistent session | `failed` on the first attempt with the typed prefix in `jobs.error` |
 | Retryable advance refusal (`paper.advance`) | `bar_gap:` a bar is missing in the pending range | retryable with backoff; a later ingestion may close the gap |
 | Retryable (any other exception) | SQLite busy, I/O error, unexpected bug | bounded retry with exponential backoff |
@@ -788,8 +798,9 @@ spanning more than 31 days is not read at all and reports
 
 ### Honest limits
 
-- No scheduler thread, daemon or timer. A caller must invoke `run_once` or
-  `run_until_idle`.
+- No scheduler thread, daemon or timer in the handler layer. The daemon's
+  `--schedule-paper` source enqueues `paper.advance`; a caller that does not run
+  a daemon must invoke `run_once` or `run_until_idle` itself.
 - The resource guard still does not measure anything. `HEAVY_HANDLER_KINDS`
   names `dataset.build` and `discovery.run` for the caller's `heavy_kinds`, but
   peak RAM/CPU/disk on the M2 are unproven here.
@@ -934,6 +945,118 @@ removed and later re-added identical file is treated as seen.
 - **One process owns the cursor.** The job store is one local SQLite file, same
   as every other trigger source; two daemons over one database are unsupported
   here too.
+
+### Evidence champions (paper advance scheduler)
+
+`PaperAdvanceScheduler` is the runtime link between appended bars and the
+`paper.advance` handler. It is a `TriggerSource`, so the daemon's existing tick
+scans it like any other source; nothing new runs in the loop.
+
+```python
+from scalping.orchestrator.paper_scheduler import PaperAdvanceScheduler
+
+scheduler = PaperAdvanceScheduler(
+    store=store,
+    data_root=context.data_root,
+    archive_path=context.discovery_archive_path,
+    ledger_path=context.paper_ledger_path,
+)
+```
+
+| Field | Value |
+|---|---|
+| `kind` | `paper.advance` (the registered handler's kind) |
+| `dedupe_key` | `paper.advance:{scope}:{last_bar_ts}` |
+| payload | `symbol`, `timeframe`, `bars` — exactly the handler's contract |
+| `max_retries` | `1` by default |
+| cursor | `state["trigger.paper.advance:{archive}:{ledger}"]` |
+
+#### Evidence only
+
+The scope list is the discovery archive's `champions` table, read in bounded
+pages with a persisted rotation offset. Opening an existing archive runs the
+archive's own schema handling (a legacy database may be migrated); a *missing*
+archive is never created. Each scope is passed through `ChampionProvider`, so
+the scheduler schedules only an **evidence** champion promoted by a policy in
+the production allow-list. Everything else is a `paper.advance_refused` event
+and no job:
+
+| `reason` | Meaning |
+|---|---|
+| `no_archive` | no discovery archive at the configured path |
+| `archive_unavailable` | the archive exists but cannot be opened or queried |
+| `no_champion` | the scope has no promotion yet |
+| `no_evidence_champion` | the champion is exploratory or manual |
+| `invalid_champion` | the stored payload is not a valid, self-consistent spec |
+| `invalid_scope` | the scope is not exactly `<registered symbol>:<supported timeframe>` |
+| `no_bars` / `bars_unavailable` | no stored bars, or the store could not be read |
+| `ledger_unavailable` | the ledger exists but cannot be read |
+| `warming_up` | fewer bars than the first decision index needs |
+| `awaiting_bar` | the cursor is still on the newest decidable bar |
+
+Reasons are recorded once per `(scope, reason)` transition, so a periodic scan
+does not flood the log. There is no legacy fallback: the module never imports or
+names the handwritten strategy families, and a refused scope stays refused until
+its state changes.
+
+#### When a bar is "new"
+
+The ledger is the cursor. The scheduler derives the session id the continuous
+runner will use (`auto-{symbol}-{timeframe}-{hash[:16]}`) and reads the newest
+recorded signal timestamp with one aggregate query. It never trusts an
+in-memory counter.
+
+- With a cursor, the store is read **from** that timestamp. The newest stored
+  bar is always provisional — the simulator needs a following bar to evaluate
+  stops and targets — so an advance needs at least **two** stored bars after the
+  cursor. One appended bar waits; the second makes the previous tail decidable.
+- With no cursor (no ledger, or a new champion hash), the cold-start rule is the
+  runner's own: the first decision index is
+  `max(valid_from + window - 1, window - 1)` with `valid_from = min(WARMUP,
+  bars)`; before that the scope is `warming_up`.
+- `last_bar_ts` in the key is the newest **decidable** bar, never the
+  provisional tail. When several bars arrive between scans the target moves and
+  a second job may be created; the ledger cursor is the idempotency boundary, so
+  that second job appends no signal already recorded. One decision bar can
+  never produce two signals.
+
+#### Dedupe and crash safety
+
+Two layers, the same shape as the other sources:
+
+1. The cursor records the last emitted `(scope, last_bar_ts)` key; a poll that
+   sees the same bar emits nothing, so a steady state is quiet.
+2. The job `dedupe_key` is `paper.advance:{scope}:{last_bar_ts}`. A crash
+   between `scan` and `seen` leaves the cursor unpersisted; the next scan
+   recomputes the same key and the store returns the existing job instead of a
+   second one. A process restart therefore cannot double-advance.
+
+`seen` persists only the acknowledged triggers. An unacknowledged trigger moves
+to `pending_ack` and is re-emitted at the start of the next scan; the job key
+still keeps it one job. A terminal handler failure leaves the key acknowledged:
+an operator requeue is the explicit recovery, and the cursor is not silently
+rewound.
+
+#### Bounded scans, no feed, no clock
+
+- **At most `max_scopes`** champions are read per scan (default 100, maximum
+  1000), with a rotation offset persisted in the cursor so a larger archive is
+  covered over successive scans. Truncation writes
+  `paper.advance_deferred` with the counts.
+- **Warm reads are bounded by the cursor**: only partitions from the cursor
+  month onward are read. A cold start reads the stored slice once to count the
+  warm-up and find the tail; after the first advance the cursor makes every scan
+  incremental.
+- **No market clock.** Whether a bar is "new" comes from stored timestamps and
+  the ledger, never from wall time. Nothing is polled, slept on or fetched
+  here; the daemon's poll decides when `scan()` runs, and a bar that is not yet
+  stored cannot be seen.
+- **No gap bypass.** The payload has only `symbol`, `timeframe` and `bars`, so
+  the scheduler cannot choose a permissive gap policy or a larger budget. A
+  `paper.advance` job still runs the continuous runner's default `strict`
+  policy, and a missing instant is refused there, not silently skipped.
+- **One local process.** The cursor and the queue are SQLite files owned by one
+  writer at a time, like every other trigger source.
 
 ### Matured paper outcomes (P5 slice 2)
 
@@ -1295,6 +1418,7 @@ uv run mypy src
 uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
   tests/test_orchestrator_cancel.py tests/test_orchestrator_handlers.py \
   tests/test_orchestrator_resources.py tests/test_orchestrator_daemon.py \
+  tests/test_paper_scheduler.py tests/test_paper_outcome_cli.py \
   tests/test_orchestrator_integration.py -q
 uv run pytest
 ```
@@ -1438,7 +1562,15 @@ paper seam: one source per repeatable `--watch-paper-ledger`, a proposal-only
 result with no discovery job, default synthetic refusal plus the explicit
 opt-in on both source and handler, cursor and store-key dedupe across a CLI
 restart, no source without the flag (even at `<archive-root>/paper.sqlite`) and
-no HTTP binding.
+no HTTP binding. `test_paper_scheduler.py` pins the other paper seam: an
+evidence champion with a new decidable stored bar enqueues exactly one
+`paper.advance`; the same bar is not requeued across a poll, a restart or a
+crash between `scan` and `seen`; the ledger cursor and the provisional tail
+gate the next advance; exploratory/manual/no-champion scopes, an invalid scope,
+a missing archive and an unreadable ledger are audited refusals with no job and
+no legacy fallback; the payload is exactly the handler's three fields so the
+gap policy cannot be bypassed; the warm-up window is respected; and the
+`--schedule-paper` CLI flag enqueues the job without ever reading a feed.
 
 ### Integration coverage (Phase 18)
 

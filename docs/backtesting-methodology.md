@@ -9,6 +9,53 @@ the single simulator, which owns sizing, fills, stops and risk. The modules
 here only read the closed `Trade` list or rerun the same policy with different
 execution costs. There is no second accounting implementation.
 
+## Panel: the Backtesting page (`/backtesting`)
+
+The dashboard page is a thin client over two existing endpoints. It adds no
+accounting of its own: every displayed number is the response's `metrics`.
+
+| Purpose | Endpoint | What it returns |
+|---|---|---|
+| Run selector | `GET /api/runs` | registry rows; the page keeps only `status == completed` |
+| Replay | `POST /api/backtest` | `{run_id, symbol}` → `{report_path, metrics}` |
+
+The request model has exactly two fields. There is no cost-multiplier input on
+this page because `BacktestRequest` does not accept one; cost stress and
+walk-forward live on `POST /api/evaluate`, which the page does not call.
+
+The response has no equity or trade array. `BacktestResponse` is `report_path`
+plus `metrics`; the page renders an equity block only if a future response adds
+a finite `equity` array, and otherwise prints an explicit "API does not return
+an equity curve" state. It never rebuilds a curve from `net_profit` or
+`max_drawdown`.
+
+`metrics_payload` maps non-finite floats (a `profit_factor` of `inf`) to JSON
+`null`; the metric cards show those as `—`. The route answers `404` for an
+unknown run, `409` for a live or failed run (it cannot be replayed), and `422`
+for a malformed symbol; each becomes a labelled error rather than a result.
+
+Monte Carlo trade-sequence analysis remains CLI-only
+(`scalping.cli backtest montecarlo`); no HTTP route exposes it, so the page
+shows a "CLI only" note and no distribution chart. The same note names
+`POST /api/evaluate` as the separate home of walk-forward and cost stress.
+
+Accessibility: the selector is a labelled `<select>` with a hint, the
+available-run table has a `<caption>` and `scope="col"`/`scope="row"` headers
+inside a focusable scroll region, results are announced through one polite live
+region, and the equity block is a focusable `role="region"` with a text summary
+in its caption.
+
+Tests cover the loaded state, a missing run list (`404`), a run-list API error,
+a `404`/`409` backtest, an absent metrics object, the optional equity array,
+symbol validation, and the CLI-only note. `frontend/e2e/pages.spec.ts` adds the
+no-runs branch.
+
+What this page proves: that a stored policy can be replayed through the
+backtest endpoint and that the returned metrics are displayed unchanged. What
+it does not prove: that the policy is profitable, out-of-sample-valid or
+promotable. Those require the walk-forward, cost-stress and holdout evidence
+described below.
+
 ## Monte Carlo trade-sequence analysis
 
 `scalping.backtest.montecarlo` answers one question: given the trades we
@@ -144,12 +191,12 @@ correctly, never that the candidate has an edge.
 
 | Section | Fields |
 |---|---|
-| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget` |
+| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget`, `source`, `synthetic` |
 | policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
-| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, `source`/`synthetic`, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
@@ -159,6 +206,30 @@ code version or execution-settings digest is detectable before a policy reads a
 metric. `settings_digest` hashes the contract, risk and cost blocks, because
 settings are not in the dataset manifest and two bundles priced differently must
 not share identity.
+
+`source` and `synthetic` are the dataset sidecar provenance and belong to the
+identity and the checksum: the same numbers on a synthetic tape are a different
+experiment from the same numbers on real bars. `EvidenceConfig` accepts both,
+`build_evidence` propagates them from the manifest, and a config value that
+contradicts the manifest fails with `provenance_mismatch`. A missing manifest
+field stays `None` (unknown) and is never defaulted to `False`; see
+[`provenance-audit-2026-11-24.md`](provenance-audit-2026-11-24.md).
+
+### Provenance gate
+
+Promotion is fail-closed on provenance, not merely informative about it:
+
+| Bundle provenance | `PROMOTION_V1` | non-production policy with `allow_synthetic=True` |
+|---|---|---|
+| `synthetic is False` | accepted (other gates still apply) | accepted |
+| `synthetic is None` | rejected, `provenance_unknown` | rejected, `provenance_unknown` |
+| `synthetic is True` | rejected, `synthetic_data` | accepted only while the policy is not registered as production |
+
+The production policy cannot be constructed with `allow_synthetic=True`. The
+champion comparison also requires candidate and champion provenance to match,
+and an attached locked-OOS section must repeat the bundle's provenance. The
+holdout ledger seals `source`/`synthetic` with the dataset identity, so the
+spend cannot silently switch tapes.
 
 The schema version is stored and must equal the module's current version.
 
@@ -507,6 +578,66 @@ evaluate the test split.
 The exact replay of a producer-written bundle is also exercised end to end by
 `tests/test_discovery_persist.py`: save, load, `reproduce_bundle`, equal
 checksums.
+
+## Search exposure from the archive (discovery)
+
+`scalping.discovery.exposure` turns the archive into the authority on how many
+trials a search actually spent. A bundle's `trial_count` is written by its
+caller, and the bundle checksum only proves the file was not edited afterwards;
+it cannot prove the number was true when it was written. Self-declared counts
+are therefore insufficient for the promotion caps and for any multiple-testing
+correction: a candidate can claim one trial after a search scored hundreds, and
+every downstream guard then reads the smaller number.
+
+The rule is: **the archive's `trials` table is the denominator, and a claim
+below it is refused.** The derivation is read-only; no table, index or trigger
+is added.
+
+```python
+from scalping.discovery.exposure import apply_to_evidence, exposure_for
+
+exposure = exposure_for(
+    archive,
+    evidence.spec_hash,
+    evidence.dataset_id,
+    evidence.code_version,
+)
+evidence = apply_to_evidence(evidence, exposure)   # new checksummed bundle
+```
+
+`archive.trial_stats(spec_hash, dataset_id=..., code_version=...)` counts every
+trial row in the archive for the same dataset and code version, not only the
+anchor candidate's rows:
+`total_attempts`, `accepted`, `rejected`, `distinct_candidates`, `deduped`
+(repeated `(candidate, dataset, code version)` rows), `per_dataset`, and the
+anchor's own share as `spec_attempts`. An unknown spec is an
+`UnknownCandidateError`; a known spec with no matching rows reports zeros.
+
+`exposure_for` refuses with `missing_trial_evidence` when the anchor itself has
+no trial on that dataset and code version, so another candidate's trials are
+never borrowed as its evidence. The returned `SearchExposure` carries the
+observed `trial_count`, `search_budget` (the archive proves at least this many
+attempts; it stores no declared cap), `distinct_candidates` and the
+accepted/rejected split.
+
+`apply_to_evidence` replaces the bundle's `trial_count` with the archive count
+and recomputes the checksum, leaving the input bundle untouched. It refuses a
+claim **lower** than the archive count with `trial_count_understated`: quietly
+lowering the claim to the truth would hide that the caller lied, and accepting
+it would leave the multiple-testing guard reading a number the archive
+disproves. A claim at or above the archive count is reduced to the archive count
+because the archive is the evidence; a `search_budget` below that count is
+raised so the bundle stays internally consistent. Identity mismatches
+(`exposure_mismatch`) and a bundle whose stored checksum does not match its
+contents (`checksum_mismatch`) are refused before the bundle can be re-signed.
+
+Honest limits: the archive only sees what was written to it, so the derived
+count is a floor, never a ceiling. Trials run without an archive, deleted rows
+or a search that changed code mid-run remain invisible. Grouping by
+`(dataset_id, code_version)` also counts unrelated runs that share both, which
+can only overstate exposure, the safe direction for a multiple-testing guard.
+The rewrite does not promote anything; the versioned promotion policy still owns
+every threshold and refusal.
 
 ## Multiple-testing and data-snooping control (discovery)
 

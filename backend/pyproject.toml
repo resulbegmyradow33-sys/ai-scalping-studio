@@ -20,6 +20,12 @@ dependencies = [
   "xgboost>=2.1",
 ]
 
+[project.optional-dependencies]
+# Optional: PDF text extraction for knowledge ingestion. The core install and
+# the trading runtime never require it; without it a PDF is reported as
+# ``status="unsupported"`` with an install hint.
+pdf = ["pypdf>=5"]
+
 [dependency-groups]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "mypy>=1.11"]
 
@@ -51,4 +57,9 @@ python_version = "3.12"
 
 [[tool.mypy.overrides]]
 module = ["sklearn.*", "joblib.*"]
+ignore_missing_imports = true
+
+# Optional extra: mypy must pass on a core install where pypdf is absent.
+[[tool.mypy.overrides]]
+module = ["pypdf", "pypdf.*"]
 ignore_missing_imports = true

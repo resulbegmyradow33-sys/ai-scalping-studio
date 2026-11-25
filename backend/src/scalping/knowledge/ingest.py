@@ -5,11 +5,12 @@ before extracting anything, so a parser failure never loses the original. The
 checksum identifies the document: importing the same bytes twice reuses the
 stored copy and reports ``duplicate=True`` instead of writing a second one.
 
-Only the Python standard library is used. PDF is deliberately unsupported in
-this slice: :class:`UnsupportedFormat` names the missing optional parser rather
-than quietly adding a dependency. A parser that fails for another reason is
-recorded as ``status="extraction_failed"`` with the exception message; a record
-is always returned for an existing file, never an empty silent drop.
+Every format except PDF uses only the Python standard library. PDF text
+extraction is an optional extra: when ``pypdf`` is not installed the ingestor
+reports ``status="unsupported"`` with the install hint instead of quietly
+requiring a dependency. A parser that fails for another reason is recorded as
+``status="extraction_failed"`` with the exception message; a record is always
+returned for an existing file, never an empty silent drop.
 
 Extracted text is inert data. Nothing in this module interprets it as a
 strategy, a signal or an order.
@@ -18,6 +19,7 @@ strategy, a signal or an order.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import os
 import re
 import shutil
@@ -41,6 +43,7 @@ __all__ = [
     "DocumentIngestor",
     "DocumentRecord",
     "ExtractionError",
+    "PdfExtraction",
     "Section",
     "TextExtractor",
     "UnsupportedFormat",
@@ -48,6 +51,14 @@ __all__ = [
 
 #: Directory below the ingestion root that holds preserved originals.
 SOURCES_DIRNAME = "sources"
+
+#: Recorded in ``status="unsupported"`` when the optional PDF parser is absent.
+PDF_INSTALL_HINT = (
+    "PDF text extraction needs the optional pypdf extra: run "
+    "`uv sync --extra pdf` from the backend directory (or "
+    "`pip install 'scalping[pdf]'`). The PDF is preserved as-is; it is never "
+    "read as plain bytes and no text is invented."
+)
 
 #: Version of the extraction behaviour, recorded with every document. Bump it
 #: when a parser change alters the text a document produces. Version 2 adds
@@ -112,6 +123,21 @@ class Section:
 
 
 @dataclass(frozen=True, slots=True)
+class PdfExtraction:
+    """Per-page PDF text plus the pages that carried none.
+
+    ``sections`` holds one section per page that produced text; each label is
+    ``page <n>`` with the 1-based physical page index. ``empty_pages`` names
+    the pages whose text was blank: a scanned image or an empty page, never
+    filled in with invented text.
+    """
+
+    sections: tuple[Section, ...]
+    page_count: int
+    empty_pages: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentRecord:
     """Everything known about one imported document.
 
@@ -136,6 +162,8 @@ class DocumentRecord:
     error: str | None = None
     sections: tuple[Section, ...] = field(default_factory=tuple)
     tables: tuple[TableRecord, ...] = field(default_factory=tuple)
+    #: Non-fatal extraction notes, for example PDF pages that had no text.
+    warnings: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def extracted(self) -> bool:
@@ -170,6 +198,7 @@ class DocumentRecord:
             "error": self.error,
             "section_count": len(self.sections),
             "table_count": len(self.tables),
+            "warnings": list(self.warnings),
         }
 
 
@@ -463,11 +492,82 @@ class _DocxExtractor:
         return found
 
 
+def _pypdf_available() -> bool:
+    """Whether the optional PDF parser is importable, without importing it."""
+    try:
+        return importlib.util.find_spec("pypdf") is not None
+    except (ImportError, ValueError):  # a broken or shadowed install is "absent"
+        return False
+
+
+class _PdfExtractor:
+    """PDF text through the optional ``pypdf`` package, page by page.
+
+    The import happens inside :meth:`extract_pdf`, so installation is the only
+    thing that changes: the core install never imports ``pypdf`` and a missing
+    package is an :class:`UnsupportedFormat`, not an ``ImportError``.
+    """
+
+    name = "pypdf"
+    version = PARSER_VERSION
+    suffixes = frozenset({".pdf"})
+
+    def extract(self, path: Path) -> list[Section]:
+        return list(self.extract_pdf(path).sections)
+
+    def extract_pdf(self, path: Path) -> PdfExtraction:
+        try:
+            from pypdf import PdfReader
+            from pypdf.errors import PdfReadError
+        except ImportError as exc:  # pragma: no cover - guarded by _pypdf_available
+            raise UnsupportedFormat(".pdf", PDF_INSTALL_HINT) from exc
+
+        try:
+            reader = PdfReader(str(path))
+            if reader.is_encrypted:
+                try:
+                    reader.decrypt("")
+                except Exception as exc:  # pypdf's decrypt errors vary
+                    raise ExtractionError("PDF is encrypted; decryption is not supported") from exc
+                if reader.is_encrypted:
+                    raise ExtractionError("PDF is encrypted; decryption is not supported")
+            page_count = len(reader.pages)
+            sections: list[Section] = []
+            empty_pages: list[int] = []
+            for number in range(1, page_count + 1):
+                try:
+                    raw = reader.pages[number - 1].extract_text() or ""
+                except Exception as exc:  # one bad page must not hide the rest
+                    raise ExtractionError(
+                        f"PDF page {number} could not be read: {type(exc).__name__}: {exc}"
+                    ) from exc
+                text = _normalise_text(raw)
+                if text:
+                    sections.append(Section(heading="", label=f"page {number}", text=text))
+                else:
+                    empty_pages.append(number)
+        except PdfReadError as exc:
+            raise ExtractionError(f"not a readable PDF: {exc}") from exc
+
+        if not sections:
+            if page_count == 0:
+                raise ExtractionError("PDF has no pages")
+            listed = ", ".join(str(page) for page in empty_pages)
+            raise ExtractionError(
+                f"no extractable text in {page_count} PDF page(s); pages {listed} appear "
+                "scanned or blank, and OCR is not implemented"
+            )
+        return PdfExtraction(tuple(sections), page_count, tuple(empty_pages))
+
+
+_PDF_EXTRACTOR = _PdfExtractor()
+
 _EXTRACTORS: tuple[TextExtractor, ...] = (
     _PlainTextExtractor(),
     _MarkdownExtractor(),
     _HtmlExtractor(),
     _DocxExtractor(),
+    _PDF_EXTRACTOR,
 )
 
 #: Extension to recorded format name, including formats with no extractor yet.
@@ -486,16 +586,11 @@ _TABLE_FORMATS: frozenset[str] = frozenset({"docx", "html", "markdown"})
 
 
 def _extractor_for(suffix: str) -> TextExtractor:
+    if suffix == ".pdf" and not _pypdf_available():
+        raise UnsupportedFormat(suffix, PDF_INSTALL_HINT)
     for extractor in _EXTRACTORS:
         if suffix in extractor.suffixes:
             return extractor
-    if suffix == ".pdf":
-        raise UnsupportedFormat(
-            suffix,
-            "PDF text extraction needs an optional parser; none is installed in this "
-            "offline slice. Install an approved parser and register an extractor rather "
-            "than treating the PDF as text.",
-        )
     raise UnsupportedFormat(suffix, f"no extractor for {suffix or 'a file without extension'}")
 
 
@@ -586,6 +681,7 @@ class DocumentIngestor:
         parser = "none"
         parser_version = PARSER_VERSION
         docx_payload: bytes | None = None
+        warnings: tuple[str, ...] = ()
 
         try:
             extractor = _extractor_for(suffix)
@@ -594,6 +690,14 @@ class DocumentIngestor:
             if isinstance(extractor, _DocxExtractor):
                 extracted, docx_payload = extractor.extract_with_payload(stored)
                 sections = tuple(extracted)
+            elif isinstance(extractor, _PdfExtractor):
+                pdf = extractor.extract_pdf(stored)
+                sections = pdf.sections
+                warnings = tuple(
+                    f"PDF page {number} has no extractable text (scanned image or "
+                    "blank page); OCR is not implemented"
+                    for number in pdf.empty_pages
+                )
             else:
                 sections = tuple(extractor.extract(stored))
             if not sections:
@@ -624,13 +728,15 @@ class DocumentIngestor:
             error=error,
             sections=sections,
             tables=tables,
+            warnings=warnings,
         )
 
     def extract(self, path: str | Path) -> list[Section]:
         """Extract without copying; raises instead of returning a failed record.
 
-        Useful for a caller that already owns the file. PDF still raises
-        :class:`UnsupportedFormat`.
+        Useful for a caller that already owns the file. PDF raises
+        :class:`UnsupportedFormat` only when the optional ``pypdf`` extra is
+        absent; a readable PDF returns one section per page with text.
         """
         source = _validate_source(path)
         extractor = _extractor_for(source.suffix.lower())
