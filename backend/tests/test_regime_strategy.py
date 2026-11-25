@@ -13,7 +13,7 @@ from datetime import UTC, datetime, timedelta
 import polars as pl
 import pytest
 
-from scalping.regime import strategy_regime_table, trades_with_regime
+from scalping.regime import regime_metrics, strategy_regime_table, trades_with_regime
 from scalping.types import Side, Trade
 
 T0 = datetime(2026, 1, 5, tzinfo=UTC)
@@ -145,3 +145,49 @@ def test_missing_or_duplicate_labels_are_rejected() -> None:
     ).cast({"ts": pl.Datetime("us", "UTC")})
     with pytest.raises(ValueError, match="duplicate"):
         trades_with_regime([trade(T0, 1.0)], duplicate)
+
+
+def test_regime_metrics_describe_one_run_per_regime() -> None:
+    labels = labels_map({T0: "a", T0 + timedelta(minutes=10): "b"})
+    trades = [
+        trade(T0 + timedelta(minutes=1), 1.0, pnl=100.0),
+        trade(T0 + timedelta(minutes=2), -0.5, pnl=-50.0),
+        trade(T0 + timedelta(minutes=11), 0.5, pnl=50.0),
+    ]
+
+    stats = {row["regime"]: row for row in regime_metrics(trades, labels).to_dicts()}
+
+    first = stats["a"]
+    assert first["trades"] == 2
+    assert first["wins"] == 1
+    assert first["win_rate"] == pytest.approx(0.5)
+    assert first["expectancy_r"] == pytest.approx(0.25)
+    assert first["total_r"] == pytest.approx(0.5)
+    assert first["total_pnl"] == pytest.approx(50.0)
+    assert first["profit_factor"] == pytest.approx(2.0)
+    assert first["avg_hold_minutes"] == pytest.approx(5.0)
+
+    second = stats["b"]
+    assert second["trades"] == 1
+    assert second["profit_factor"] is None
+
+
+def test_regime_metrics_keep_unknown_and_empty_contracts() -> None:
+    labels = labels_map({T0: "a"})
+    before = trade(T0 - timedelta(minutes=1), 1.0, pnl=100.0)
+    rows = regime_metrics([before], labels).to_dicts()
+    assert [row["regime"] for row in rows] == ["unknown"]
+
+    empty = regime_metrics([], labels)
+    assert empty.height == 0
+    assert empty.columns == [
+        "regime",
+        "trades",
+        "wins",
+        "win_rate",
+        "expectancy_r",
+        "total_r",
+        "total_pnl",
+        "profit_factor",
+        "avg_hold_minutes",
+    ]

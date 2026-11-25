@@ -19,7 +19,7 @@ from scalping.regime.models import (
     fit_predict,
 )
 from scalping.regime.rules import REGIME_COLUMNS, RegimeConfig, classify
-from scalping.regime.strategy import strategy_regime_table, trades_with_regime
+from scalping.regime.strategy import regime_metrics, strategy_regime_table, trades_with_regime
 
 __all__ = [
     "MODEL_NAMES",
@@ -33,6 +33,7 @@ __all__ = [
     "classify",
     "dwell_stats",
     "fit_predict",
+    "regime_metrics",
     "strategy_regime_table",
     "trades_with_regime",
     "transition_matrix",

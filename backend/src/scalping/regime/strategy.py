@@ -21,7 +21,7 @@ from polars.datatypes import DataType, DataTypeClass
 
 from scalping.types import Trade
 
-__all__ = ["UNKNOWN_REGIME", "strategy_regime_table", "trades_with_regime"]
+__all__ = ["UNKNOWN_REGIME", "regime_metrics", "strategy_regime_table", "trades_with_regime"]
 
 UNKNOWN_REGIME: Final[str] = "unknown"
 
@@ -150,3 +150,78 @@ def strategy_regime_table(
         "total_pnl",
         "profit_factor",
     )
+
+_REGIME_SCHEMA: Final[dict[str, DataType | DataTypeClass]] = {
+    "regime": pl.String,
+    "trades": pl.Int64,
+    "wins": pl.Int64,
+    "win_rate": pl.Float64,
+    "expectancy_r": pl.Float64,
+    "total_r": pl.Float64,
+    "total_pnl": pl.Float64,
+    "profit_factor": pl.Float64,
+    "avg_hold_minutes": pl.Float64,
+}
+
+
+def regime_metrics(
+    trades: Sequence[Trade],
+    labels: pl.DataFrame,
+    *,
+    regime_column: str = "regime",
+) -> pl.DataFrame:
+    """One-run metrics per regime: win rate, expectancy, PnL, PF and hold time.
+
+    ``strategy_regime_table`` answers "which strategy suits this regime"; this
+    function describes **one run's trades** by the regime current at entry.
+    ``profit_factor`` is ``null`` for a bucket with wins but no losses; a trade
+    before the first label lands in ``unknown``.
+    """
+    per_trade = trades_with_regime(trades, labels, regime_column=regime_column)
+    if per_trade.is_empty():
+        return pl.DataFrame(schema=_REGIME_SCHEMA)
+    wins = pl.when(pl.col("r_multiple") > 0).then(1).otherwise(0)
+    gross_win = pl.when(pl.col("pnl") > 0).then(pl.col("pnl")).otherwise(0.0)
+    gross_loss = pl.when(pl.col("pnl") < 0).then(-pl.col("pnl")).otherwise(0.0)
+    hold = (
+        (pl.col("exit_ts") - pl.col("entry_ts")).dt.total_seconds() / 60.0
+    ).alias("hold_minutes")
+    table = (
+        per_trade.with_columns(hold)
+        .group_by("regime")
+        .agg(
+            pl.len().alias("trades"),
+            wins.sum().alias("wins"),
+            pl.col("r_multiple").mean().alias("expectancy_r"),
+            pl.col("r_multiple").sum().alias("total_r"),
+            pl.col("pnl").sum().alias("total_pnl"),
+            pl.col("hold_minutes").mean().alias("avg_hold_minutes"),
+            gross_win.sum().alias("_gross_win"),
+            gross_loss.sum().alias("_gross_loss"),
+        )
+        .with_columns(
+            (pl.col("wins") / pl.col("trades")).alias("win_rate"),
+            pl.when(pl.col("_gross_loss") > 0)
+            .then(pl.col("_gross_win") / pl.col("_gross_loss"))
+            .when(pl.col("_gross_win") > 0)
+            .then(pl.lit(None, dtype=pl.Float64))
+            .otherwise(0.0)
+            .alias("profit_factor"),
+            pl.col("trades").cast(pl.Int64),
+            pl.col("wins").cast(pl.Int64),
+        )
+        .drop("_gross_win", "_gross_loss")
+        .sort("regime")
+    )
+    return table.select(
+        "regime",
+        "trades",
+        "wins",
+        "win_rate",
+        "expectancy_r",
+        "total_r",
+        "total_pnl",
+        "profit_factor",
+        "avg_hold_minutes",
+    )
+
