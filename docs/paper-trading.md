@@ -408,9 +408,29 @@ choosing them silently would turn missing data into an invisible assumption.
 The two real gaps recorded in PR #140 (M1 `2021-05-24T04:04` and H1
 `2009-05-25T17:00→22:00`) still fail closed by default and need the opt-in.
 
-The orchestrator's `paper.advance` handler constructs its runner without a
-policy argument, so a job still runs `strict`. Selecting a policy from the job
-payload is not wired in this slice; the runner API is.
+The orchestrator's `paper.advance` payload now accepts an optional
+`gap_policy` field. Omitting it preserves `strict`; the only accepted values
+are `strict`, `session_aware` and `skip_with_report`. The chosen policy is
+passed to `ContinuousPaperRunner`, becomes part of the session identity, and
+is returned with `gaps_skipped`, `missing_bars` and `gaps_recorded` in the
+job result. An unknown value is a permanent invalid-payload failure.
+
+Example queue payload (explicit opt-in; use only after verifying the feed):
+
+```json
+{
+  "symbol": "XAUUSD",
+  "timeframe": "M1",
+  "bars": 100,
+  "gap_policy": "session_aware"
+}
+```
+
+The gap policy does not repair missing data. It skips only the missing
+timestamps allowed by that policy, writes an append-only gap record, and never
+creates synthetic OHLCV bars. Keep `strict` unless the operator has evidence
+that the missing bars were not expected to print. A session cannot be resumed
+under a different gap policy.
 
 ### Matured outcomes
 
