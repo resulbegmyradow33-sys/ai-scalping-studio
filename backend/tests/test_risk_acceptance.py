@@ -655,7 +655,8 @@ def orchestrated(tmp_path: Path) -> tuple[Orchestrator, JobStore, HandlerContext
 
 
 def test_paper_advance_request_has_no_risk_field() -> None:
-    assert [field.name for field in fields(PaperAdvanceRequest)] == ["symbol", "timeframe", "bars"]
+    assert [field.name for field in fields(PaperAdvanceRequest)] == ["symbol", "timeframe", "bars", "gap_policy"]
+    assert "risk" not in {field.name for field in fields(PaperAdvanceRequest)}
     with pytest.raises(PayloadError):
         PaperAdvanceRequest.from_payload(
             {"symbol": SYMBOL, "timeframe": TIMEFRAME, "bars": 5, "risk": {"risk_pct": 0.5}}
