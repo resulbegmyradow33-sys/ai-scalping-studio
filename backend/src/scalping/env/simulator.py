@@ -189,6 +189,19 @@ class StepResult(NamedTuple):
     info: dict[str, Any]
 
 
+class _BarPrep(NamedTuple):
+    """State ``step`` will have after its pre-entry rolls, without mutating."""
+
+    equity_now: float
+    spread_points: float | None
+    session: date
+    day_start_equity: float
+    week: tuple[int, int]
+    week_start_equity: float
+    consecutive_losses: int
+    paused_until: datetime | None
+
+
 class Simulator:
     """Single-account backtest loop over a :class:`FeatureFrame`.
 
@@ -388,6 +401,58 @@ class Simulator:
         """Whether the current decision bar's data is usable for an entry."""
         return self._data_quality_at(self._i)
 
+    def _prepare_bar_state(self, bar: Bar) -> _BarPrep:
+        """Project the rolls ``step`` performs before an entry, without mutating.
+
+        The mask must see the same state the loop will act on: the current
+        bar's spread, an expired pause latch and the 17:00/ISO-week anchor
+        resets. ``step`` applies this projection; ``action_masks`` only reads it.
+        """
+        equity_now = self._equity()
+        spread_points = self._spread_points_at(self._i)
+        paused_until = self.paused_until
+        consecutive_losses = self.consecutive_losses
+        if paused_until is not None and bar.ts >= paused_until:
+            paused_until = None
+            consecutive_losses = 0
+        session = self.risk.session_anchor(bar.ts)
+        day_start_equity = self.day_start_equity
+        if session != self.session:
+            day_start_equity = equity_now
+            if self.risk.risk.pause_bars == 0:
+                # A zero-pause consecutive-loss block lasts until the anchor
+                # resets; the roll is that reset.
+                consecutive_losses = 0
+        week = self.risk.week_anchor(bar.ts)
+        week_start_equity = self.week_start_equity
+        if week != self.week:
+            week_start_equity = equity_now
+        return _BarPrep(
+            equity_now=equity_now,
+            spread_points=spread_points,
+            session=session,
+            day_start_equity=day_start_equity,
+            week=week,
+            week_start_equity=week_start_equity,
+            consecutive_losses=consecutive_losses,
+            paused_until=paused_until,
+        )
+
+    def _projected_account(self, bar: Bar) -> AccountState:
+        """The account snapshot the next entry will be judged against."""
+        prep = self._prepare_bar_state(bar)
+        state = self.broker.state(self.balance, prep.day_start_equity)
+        return replace(
+            state,
+            week_start_equity=prep.week_start_equity,
+            peak_equity=self._peak,
+            consecutive_losses=prep.consecutive_losses,
+            paused_until=prep.paused_until,
+            spread_points=prep.spread_points,
+            slippage_points=self._slippage_points_at(self._i),
+            data_quality_ok=self._data_quality_at(self._i),
+        )
+
     def action_masks(self) -> np.ndarray:
         """Boolean availability of HOLD, BUY, SELL and CLOSE at this bar.
 
@@ -404,8 +469,10 @@ class Simulator:
           minimum;
         * flat while every entry is blocked: HOLD only.
 
-        The mask never hides an action the loop would accept; if it allows BUY
-        or SELL, ``step`` executes that entry.
+        It is evaluated against the same projected rolls ``step`` applies
+        (current-bar spread, pause expiry, 17:00 and ISO-week anchors), so it
+        never hides an action the loop will accept and never allows an entry the
+        loop will reject.
         """
         mask = np.zeros(N_ACTIONS, dtype=bool)
         mask[_HOLD] = True
@@ -432,7 +499,7 @@ class Simulator:
         bar = self._bar(self._i)
         if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
             return "session_closed"
-        account = self._account()
+        account = self._projected_account(bar)
         allowed, reason = self.risk.allow_new_extended(account, bar.ts)
         if not allowed:
             return reason or "risk_blocked"
@@ -520,22 +587,15 @@ class Simulator:
 
         bar = self._bar(self._i)
         self.broker.atr = self._atr(self._i)
-        self.spread_points = self._spread_points_at(self._i)
-        self._expire_pause(bar.ts)
-        equity_now = self._equity()
-        session = self.risk.session_anchor(bar.ts)
-        if session != self.session:
-            self.day_start_equity = equity_now
-            self.session = session
-            if self.risk.risk.pause_bars == 0:
-                # A zero-pause consecutive-loss block lasts until the anchor
-                # resets; the roll is that reset.
-                self.consecutive_losses = 0
-        week = self.risk.week_anchor(bar.ts)
-        if week != self.week:
-            self.week = week
-            self.week_start_equity = equity_now
-        self._equity_before = equity_now
+        prep = self._prepare_bar_state(bar)
+        self.spread_points = prep.spread_points
+        self.paused_until = prep.paused_until
+        self.consecutive_losses = prep.consecutive_losses
+        self.day_start_equity = prep.day_start_equity
+        self.session = prep.session
+        self.week = prep.week
+        self.week_start_equity = prep.week_start_equity
+        self._equity_before = prep.equity_now
 
         trade, opened, blocked = self._apply(action, bar)
 
