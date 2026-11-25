@@ -13,6 +13,7 @@ import { useEffect, useState } from "react";
 import type { FormEvent } from "react";
 
 import { CoverageBar } from "@/components/coverage-bar";
+import { DataQualityPanel } from "@/components/data-quality-panel";
 import { ProvenancePanel } from "@/components/provenance-panel";
 import { ProviderCard } from "@/components/provider-card";
 import { useDataStatus } from "@/hooks/use-data-status";
@@ -230,6 +231,8 @@ export default function DataPage() {
       {/* An empty store has nothing to describe; an old store with rows and no
           sidecar gets the explicit missing state instead of a guess. */}
       {rows > 0 && <ProvenancePanel provenance={status?.provenance} />}
+
+      <DataQualityPanel symbol={cleanSymbol} />
 
       <form
         data-testid="download-form"

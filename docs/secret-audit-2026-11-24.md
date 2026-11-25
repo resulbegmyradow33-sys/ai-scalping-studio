@@ -7,9 +7,9 @@ dependency was added.
 
 Result: **no credential, provider key, private key, broker login or `.env`
 content is committed, and none was found in history.** The two remaining issues
-are structural, not leaks: `.gitignore` is narrower than the secret surface, and
-CI has no secret gate of its own. Both are low severity and listed below with
-a recommendation each.
+were structural, not leaks: `.gitignore` was narrower than the secret surface,
+and CI had no secret gate of its own. Both are low severity. F-2 is closed (see
+below) and F-3's pytest gate now runs inside the existing `backend` CI job.
 
 ## What was run
 
@@ -89,13 +89,43 @@ These are the places a leak usually hides, and each is already handled:
 Nothing to rotate and nothing to scrub. The exposure window is empty. No
 provider-side revocation is required.
 
-### F-2 — `.gitignore` covers `.env` but not the rest of the secret surface (Low, structural)
+### F-2 — `.gitignore` covers `.env` but not the rest of the secret surface (Low, structural) — closed
 
-Checked 2026-11-24 against `.gitignore` (`e7eb53c`, 2026-11-22), which has one
-pattern on line 15: `.env`.
+**Status: closed** on branch `feat/githarden` (base `main` = `626409f`,
+2026-11-25). The recommendation below was applied with `id_ed25519*` and
+`.netrc` included from the original list:
 
 ```
-$ git check-ignore -q <path>
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.netrc
+secrets.json
+credentials.yml
+credentials.yaml
+.npmrc
+*.p12
+*.pfx
+*.keystore
+*.jks
+```
+
+`backend/tests/test_gitignore_hygiene.py` pins the rules: `git check-ignore
+--no-index` must report every representative secret path as ignored and
+`frontend/.env.example` as not ignored, and `git ls-files -ci
+--exclude-standard` must stay empty so no tracked file becomes invisible to
+`git status`. Negative control: deleting the `*.key` rule fails the test and
+names `certs/server.key`.
+
+Checked 2026-11-24 against `.gitignore` (`e7eb53c`, 2026-11-22), which had a
+single rule: `.env`.
+
+```
+$ git check-ignore -q <path>    # pre-fix state, the finding
 IGNORED   .env
 NOT-IGN   .env.local
 NOT-IGN   .env.production
@@ -111,7 +141,8 @@ copying `.env` to `.env.local`, or a tool dropping a `*.pem` into the tree, then
 `git add -A` sweeping it in. No such file exists today; `git status` is clean and
 the tree tracks only `frontend/.env.example`.
 
-Recommended ignore additions (owner approval needed, not applied here):
+Ignore additions as originally filed (owner-approved and applied now; status
+block above):
 
 ```
 .env.*
@@ -213,5 +244,7 @@ Three independent methods (gitleaks working tree, gitleaks full history, manual
 added-line plus entropy sweep) agree: the repository has never committed a
 credential. The MT5 path is a disabled skeleton with no login, tokens are
 generated at runtime and stored hashed, and the only public env variable points
-at localhost. Close the two structural gaps — widen `.gitignore`, keep the new
-pytest gate in CI — and the next leak fails locally instead of shipping.
+at localhost. F-2 is closed — `.gitignore` now covers the secret surface and
+`test_gitignore_hygiene.py` pins it — and the pytest secret gate already runs in
+the `backend` CI job. Local pre-commit scanning remains optional hardening, not
+an open leak.

@@ -162,6 +162,43 @@ not share identity.
 
 The schema version is stored and must equal the module's current version.
 
+### Determinism contract
+
+The bundle checksum must be a function of the inputs, not of how many threads
+the runtime happens to use. Two implementation choices enforce that:
+
+- **Checksummed sums never rely on Polars' threaded `group_by().sum()`.** A
+  parallel aggregation merges partial sums in an order that follows the thread
+  pool and the column's chunk layout, so its last bits can move between two
+  runs of the same input (issue #145). Per-regime rows are therefore reduced in
+  Python over rows sorted by `(regime, entry_ts)`, using `math.fsum` for net
+  profit, total R and expectancy. An exactly rounded sum is independent of
+  addend order. The pooled profit factor uses the same reduction. The pooled
+  total R and expectancy keep NumPy's single-threaded pairwise sum, which is
+  deterministic for a fixed array; the bootstrap matches that statistic so a
+  point estimate cannot fall outside its own interval for arithmetic reasons.
+- **The locked-OOS section uses the same reducer.** `scalping.discovery.holdout`
+  imports `_regime_rows` from the evidence module, so its sealed regime rows
+  get the same order-independent arithmetic and the same identity behaviour.
+
+Thread-count independence is tested by building the same evidence in fresh
+interpreters with `POLARS_MAX_THREADS=1` and `=4` and requiring identical
+checksums, regime rows and trade counts. Pinning the pool is not required.
+
+What the contract does **not** promise:
+
+- **Same environment only.** Changing the bars, dataset artifact, code-version
+  digest, settings, seed or library version can change a checksum, and is meant
+  to. A different NumPy/BLAS build, CPU architecture or Python patch level can
+  still move a floating-point result; exact order-independent sums remove one
+  class of drift, not every class. Cross-machine equality is not claimed.
+- **Floating point is compared exactly.** The checksum is over canonical JSON,
+  with no tolerance band. A last-bit difference is a mismatch, because a
+  tolerant comparison would hide exactly the drift the contract exposes.
+- **Determinism is not validation.** Identical arithmetic on the same history
+  is not independent out-of-sample evidence, not a promotion and not a
+  profitability claim.
+
 ### Fold geometry
 
 Rows are `DatasetBundle` positions. The discovery timeline starts at the first
@@ -721,8 +758,11 @@ path.
 
 - **Same environment only.** Determinism assumes the same bars, artifact, code
   version digest, settings, seed and library set. NumPy/BLAS builds, CPU
-  threading or a different Python patch level can move a floating-point result
-  and change a checksum. That is reported as a mismatch, not hidden.
+  architecture or a different Python patch level can move a floating-point
+  result and change a checksum. That is reported as a mismatch, not hidden.
+  Polars thread count is not one of these inputs: checksummed regime sums are
+  order-independent by construction, so one thread and many threads agree (see
+  "Determinism contract").
 - **Deterministic seeds, not statistical replication.** The bootstrap and the
   simulator use fixed seeds, so the same inputs give the same numbers. That
   says the arithmetic replays; it does not say the result would repeat on
