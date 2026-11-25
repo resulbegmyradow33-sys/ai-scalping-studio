@@ -29,6 +29,56 @@ export interface DataStatus {
   provenance?: Provenance | null;
 }
 
+/** Verdict of `GET /api/data/quality`; `status_rule` names the deciding check. */
+export type DataQualityStatus = "ok" | "warn" | "fail";
+
+/** One validator issue behind the quality counts. */
+export interface DataQualityIssue {
+  code: string;
+  severity: string;
+  count: number;
+  detail: string;
+  sample: string[];
+}
+
+/** The validator settings the reported run actually used. */
+export interface DataQualityThresholds {
+  gap_threshold_minutes: number;
+  outlier_return_z: number;
+  outlier_volume_z: number;
+  outlier_min_rows: number;
+}
+
+/**
+ * Read-only quality report for one stored slice.
+ *
+ * A count is `null` when the check did not run (unconfigured slice, or an
+ * outlier pass skipped below its row floor). Zero always means "checked and
+ * clean"; a component must never print a number for a null count.
+ */
+export interface DataQuality {
+  symbol: string;
+  timeframe: string;
+  configured: boolean;
+  status: DataQualityStatus;
+  status_rule: string;
+  status_detail: string;
+  rows: number;
+  first_ts: string | null;
+  last_ts: string | null;
+  duplicates: number | null;
+  gaps: number | null;
+  ohlc_violations: number | null;
+  crossed_quotes: number | null;
+  negative_spread: number | null;
+  negative_volume: number | null;
+  outliers: number | null;
+  outliers_checked: boolean;
+  provenance: Provenance | null;
+  thresholds: DataQualityThresholds;
+  issues: DataQualityIssue[];
+}
+
 /** Sidecar metadata written next to a store partition. */
 export interface Provenance {
   dataset_id: string;
@@ -240,6 +290,12 @@ export interface DecisionPayload {
   action: DecisionAction;
   strategy: string;
   blocked: string | null;
+  /** What produced the strategy label: legacy card, DSL champion or fallback. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** True when the runner refused to trade because the legacy fallback is off. */
+  no_trade?: boolean;
+  /** Safe reason code for a NO TRADE decision. */
+  reason?: string;
 }
 
 export interface EquityPayload {
@@ -276,7 +332,7 @@ export type SimMessageType = SimMessage["type"];
 
 // --- strategy card -----------------------------------------------------------
 
-/** Parameters the promoted flow-momentum rule replays. */
+/** Parameters the legacy flow-momentum rule replays. */
 export interface RuleParams {
   timeframe: string;
   flow_quantile: number;
@@ -312,6 +368,16 @@ export interface ForwardResult {
 export interface StrategyCard {
   active: boolean;
   strategy: string;
+  /** What actually ran: legacy card, a DSL champion, or the fallback path. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** Never a validation claim; the legacy path reports `legacy-heuristic`. */
+  validation?: string;
+  /** Safe reason code when `classification` is `fallback`. */
+  fallback_reason?: string;
+  /** Whether the M1 momentum fallback is enabled in this process. */
+  legacy_fallback?: boolean;
+  /** The rule that actually produced the stream, e.g. `flow_momentum`. */
+  active_rule?: string;
   timeframe?: string;
   symbol?: string;
   params?: RuleParams;
@@ -630,7 +696,11 @@ export interface AutonomyOrchestratorStatus {
   last_event?: AutonomyLastEvent | null;
 }
 
-/** One scope's champion; `mode` is `evidence`, `exploratory` or `manual`. */
+/**
+ * One scope's champion. `mode` comes from the archived payload; the backend
+ * falls back to `dsl` when the payload names no mode, so a champion row here
+ * does not prove the payload declared it.
+ */
 export interface AutonomyChampion {
   scope: string;
   candidate_id: string;
@@ -638,6 +708,16 @@ export interface AutonomyChampion {
   promoted_at?: string | null;
   policy_id?: string | null;
   policy_digest?: string | null;
+}
+
+/**
+ * `GET /api/autonomy/champions`; `items` is absent when the archive or its
+ * champion table is unreadable. `readable: false` is not "no champions".
+ */
+export interface AutonomyChampionList {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyChampion[] | null;
 }
 
 /** Archived trial/gate counts; absent tables leave the count missing. */

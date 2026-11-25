@@ -9,6 +9,11 @@ project does not yet follow strict semantic versioning.
 
 - Repository made public. Server-side `main` protection, secret scanning,
   push protection and CodeQL are now enabled at no cost.
+- Discovery search requires `min_best_trades` (default 1) closed trades before
+  a candidate can be the run's best, so an empty gate can no longer rank a
+  zero-trade flat policy first. `no_trade` now distinguishes "gate rejected
+  everything" from "no tradable candidate", and the archive records the
+  `reason_code`.
 
 ### Added
 

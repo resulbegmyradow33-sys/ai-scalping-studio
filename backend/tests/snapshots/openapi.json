@@ -574,6 +574,62 @@
         "ok"
       ]
     },
+    "OrchestratorControlChange": {
+      "enums": {
+        "action": [
+          "pause",
+          "resume",
+          "safe_mode_on",
+          "safe_mode_off",
+          "disable_research",
+          "enable_research"
+        ]
+      },
+      "properties": {
+        "action": "enum[pause|resume|safe_mode_on|safe_mode_off|disable_research|enable_research]",
+        "actor": "string",
+        "at": "string",
+        "reason": "string | null"
+      },
+      "required": [
+        "action",
+        "actor",
+        "at"
+      ]
+    },
+    "OrchestratorControlRequest": {
+      "enums": {
+        "action": [
+          "pause",
+          "resume",
+          "safe_mode_on",
+          "safe_mode_off",
+          "disable_research",
+          "enable_research"
+        ]
+      },
+      "properties": {
+        "action": "enum[pause|resume|safe_mode_on|safe_mode_off|disable_research|enable_research]",
+        "reason": "string | null"
+      },
+      "required": [
+        "action"
+      ]
+    },
+    "OrchestratorControlState": {
+      "properties": {
+        "configured": "boolean",
+        "last_change": "OrchestratorControlChange | null",
+        "paused": "boolean | null",
+        "readable": "boolean",
+        "research_disabled": "boolean | null",
+        "safe_mode": "boolean | null"
+      },
+      "required": [
+        "configured",
+        "readable"
+      ]
+    },
     "PaperEquityPage": {
       "properties": {
         "items": "array<PaperEquityPoint>",
@@ -1123,6 +1179,13 @@
         "422": "HTTPValidationError"
       }
     },
+    "GET /api/orchestrator/control": {
+      "query": {},
+      "request": null,
+      "responses": {
+        "200": "OrchestratorControlState"
+      }
+    },
     "GET /api/paper/sessions": {
       "query": {
         "limit": "integer",
@@ -1279,6 +1342,14 @@
       "request": "MLTrainRequest",
       "responses": {
         "202": "MLTrainResponse",
+        "422": "HTTPValidationError"
+      }
+    },
+    "POST /api/orchestrator/control": {
+      "query": {},
+      "request": "OrchestratorControlRequest",
+      "responses": {
+        "200": "OrchestratorControlState",
         "422": "HTTPValidationError"
       }
     },

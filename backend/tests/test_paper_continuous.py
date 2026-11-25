@@ -558,6 +558,45 @@ def test_provenance_survives_a_ledger_reopen(tmp_path: Path) -> None:
         assert batch.rows
 
 
+def test_session_created_before_provenance_still_resumes(tmp_path: Path) -> None:
+    """A pre-provenance session (unknown) keeps running; unknown never becomes real.
+
+    ``docs/paper-trading.md`` provenance rule 3: a session recorded before the
+    sidecar existed still resumes, and its unknown pair is not upgraded when a
+    later ingest writes a real sidecar. The known-change refusal is tested
+    separately; this pins the unknown side of the same rule.
+    """
+    root = tmp_path / "data"
+    bars = make_bars(200)
+    write(root, bars)
+    ledger_path = tmp_path / "paper.db"
+
+    with PaperLedger(ledger_path) as ledger:
+        runner = make_runner(ledger, root)
+        runner.advance()
+        session_id = runner.session_id
+        record = ledger.session(session_id)
+        assert record is not None
+        assert session_provenance(record.config) == (None, None)
+
+    # A later ingest records a real (non-synthetic) source. The session was
+    # created before the record existed, so this is not a known change.
+    record_provenance(root, bars, source="dukascopy", synthetic=False)
+    write(root, make_bars(220))
+
+    with PaperLedger(ledger_path) as ledger:
+        runner = make_runner(ledger, root)
+        runner.advance()
+        record = ledger.session(session_id)
+        assert record is not None
+        assert session_provenance(record.config) == (None, None)
+        batch = matured_outcomes(ledger, session_id)
+
+    assert batch.source is None
+    assert batch.synthetic is None
+    assert all(row.source is None and row.synthetic is None for row in batch.rows)
+
+
 def test_outcome_fingerprint_changes_with_provenance(tmp_path: Path) -> None:
     def fingerprint(name: str, provenance: dict[str, object]) -> str:
         path = tmp_path / f"{name}.db"

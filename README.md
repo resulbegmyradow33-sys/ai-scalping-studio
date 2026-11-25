@@ -21,6 +21,9 @@ LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
+- [`docs/runbook.md`](docs/runbook.md) — operator runbook: install, daily flows,
+  orchestrator, audited local controls, legacy-fallback switch, troubleshooting
+  and safety rules.
 - [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
   the exact commands that reproduce each claim.
 - [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
@@ -105,7 +108,9 @@ npm run dev -- -p 3001
 ```
 
 Open `http://127.0.0.1:3001`. Without a strategy card the panel replays the
-legacy M1 momentum rule; the data screen can generate synthetic bars.
+legacy M1 momentum rule by default during migration. Open PR #177 adds
+`--no-legacy-fallback` for fail-closed UI testing; it does not change the
+autonomous paper path. See the runbook for details and merge status.
 
 To use the validated rule, copy the seed card and start with a flow store:
 
@@ -132,8 +137,9 @@ uv run python -m scalping.cli discovery run --root ../data-ticks5-store \
   --symbol XAUUSD --timeframe M5 --max-trials 64 --seed 0
 ```
 
-Main is red on `tests/test_api_autonomy.py` as of 2026-11-24; the cause and the
-latest green CI run id are recorded in `STATUS.md`.
+The latest verified `main` snapshot is `e17d820` (2026-11-25), with
+backend, frontend and both CodeQL language checks green. `STATUS.md` records
+the exact commit, merged changes, open PRs and remaining validation gaps.
 
 ## Data
 

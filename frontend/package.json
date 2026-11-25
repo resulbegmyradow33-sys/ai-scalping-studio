@@ -8,6 +8,8 @@
     "start": "next start",
     "test": "vitest run",
     "e2e": "playwright test",
+    "e2e:live": "E2E_LIVE_API=1 playwright test",
+    "e2e:install": "playwright install chromium",
     "lint": "eslint ."
   },
   "dependencies": {

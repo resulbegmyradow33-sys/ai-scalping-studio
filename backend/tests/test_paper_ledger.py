@@ -115,7 +115,7 @@ def test_init_schema_is_idempotent(tmp_path: Path) -> None:
         assert book.init_schema() == SCHEMA_VERSION
         assert book.init_schema() == SCHEMA_VERSION
         rows = book.connection.execute("SELECT version FROM schema_version").fetchall()
-        assert [int(row["version"]) for row in rows] == [SCHEMA_VERSION]
+        assert [int(row["version"]) for row in rows] == list(range(1, SCHEMA_VERSION + 1))
         tables = {
             str(row["name"])
             for row in book.connection.execute(
@@ -435,6 +435,27 @@ def test_conflicting_provenance_spellings_are_refused() -> None:
     with pytest.raises(ValueError, match="different values"):
         session_provenance({"source": "csv", "provenance": {"source": "synthetic"}})
     assert session_provenance({"source": "csv", "provenance": {"source": "csv"}}) == ("csv", None)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {"source": "csv", "synthetic": False},
+        {"provenance": {"source": "csv", "synthetic": False}},
+        {"data": {"source": "csv", "synthetic": False}},
+        {"extra": {"source": "csv", "synthetic": False}},
+        {"extra": {"provenance": {"source": "csv", "synthetic": False}}},
+        {"extra": {"data": {"source": "csv", "synthetic": False}}},
+    ],
+)
+def test_every_documented_provenance_spelling_is_read(config: dict[str, object]) -> None:
+    """``docs/orchestrator.md`` promises all six spellings keep reading.
+
+    A session config written before the canonical ``extra.provenance`` block
+    still has to report its source and flag, so an upgrade does not turn known
+    evidence into unknown.
+    """
+    assert session_provenance(config) == ("csv", False)
 
 
 def test_foreign_keys_are_enforced(tmp_path: Path) -> None:

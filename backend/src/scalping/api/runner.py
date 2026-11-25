@@ -60,7 +60,7 @@ from scalping.data.registry import session_for
 from scalping.data.store import ParquetStore
 from scalping.env.simulator import Simulator
 from scalping.features.build import FeatureFrame, build_features
-from scalping.strategy.card import PolicyCard, load_card
+from scalping.strategy.card import CARD_CLASSIFICATION, PolicyCard, load_card
 from scalping.strategy.flow import flow_series, flow_thresholds
 from scalping.strategy.rule import FlowMomentumRule
 from scalping.strategy.signals import strategy_signals
@@ -69,8 +69,12 @@ from scalping.types import Position, Side, Trade
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "CLASSIFICATION_FALLBACK",
+    "CLASSIFICATION_LEGACY",
     "DEFAULT_SYMBOL",
+    "LEGACY_VALIDATION",
     "MIN_BARS",
+    "NO_TRADE_STRATEGY",
     "RING_SIZE",
     "TIMEFRAME",
     "NoDataError",
@@ -90,6 +94,24 @@ DEFAULT_SYMBOL: Final[str] = "XAUUSD"
 
 #: Label recorded on trades and ``decision`` messages.
 STRATEGY: Final[str] = "momentum"
+
+#: Classification labels on the card payload (issue #139). ``dsl`` is reserved
+#: for a future DSL champion card; nothing can produce it while the loader only
+#: accepts ``flow_momentum``.
+CLASSIFICATION_LEGACY: Final[str] = CARD_CLASSIFICATION
+CLASSIFICATION_DSL: Final[str] = "dsl"
+CLASSIFICATION_FALLBACK: Final[str] = "fallback"
+
+#: The only validation claim the legacy path may make. Never "validated".
+LEGACY_VALIDATION: Final[str] = "legacy-heuristic"
+
+#: Strategy label when the legacy fallback is disabled and no card runs.
+NO_TRADE_STRATEGY: Final[str] = "no_trade"
+
+#: Safe, path-free reasons reported by the card endpoint and the stream.
+FALLBACK_NO_CARD: Final[str] = "no_strategy_card"
+FALLBACK_CARD_UNUSABLE: Final[str] = "strategy_card_not_buildable"
+FALLBACK_DISABLED: Final[str] = "legacy_fallback_disabled"
 
 #: Bars required before the simulator has its first decision bar.
 #: ``Simulator`` starts at ``valid_from + WINDOW - 1`` = 60 + 59 = 119.
@@ -194,6 +216,8 @@ class SimulationRunner:
         ring_size: int = RING_SIZE,
         flow_root: str | Path | None = None,
         card_path: str | Path | None = None,
+        *,
+        allow_legacy_fallback: bool = True,
     ) -> None:
         if ring_size <= 0:
             raise ValueError("ring_size must be positive")
@@ -206,6 +230,13 @@ class SimulationRunner:
         self._card: PolicyCard | None = None
         self._rule: FlowMomentumRule | None = None
         self._strategy = STRATEGY
+        # Migration switch: on keeps the historical M1 replay, off fails closed
+        # with NO TRADE. Either way the classification says what actually ran.
+        self._allow_legacy_fallback = allow_legacy_fallback
+        self._classification = CLASSIFICATION_FALLBACK
+        self._fallback_reason: str | None = None
+        self._loaded_once = False
+        self._card_applied = False
         # The card carries its own stop/target/timeout; the simulator must use
         # those, not the app-wide defaults.
         self._run_settings = settings
@@ -328,9 +359,7 @@ class SimulationRunner:
     def _sync(self, conn: SimConnection) -> dict[str, Any] | None:
         """Return a status frame when this cursor must re-handshake."""
         with self._lock:
-            if conn.session_id != self._session_id and (
-                conn.last_sent > 0 or conn.awaiting_status
-            ):
+            if conn.session_id != self._session_id and (conn.last_sent > 0 or conn.awaiting_status):
                 # A start/reset rewound the sequence under a live client, or a
                 # control action asked for a status across that rewind. The
                 # cursor goes back to 0, and the handshake advertises that same
@@ -377,16 +406,44 @@ class SimulationRunner:
         }
 
     def strategy_card(self) -> dict[str, Any]:
-        """The active card, or ``{"active": False}`` when the legacy rule runs."""
+        """The card payload plus what is actually replaying right now.
+
+        ``active`` is true only when the runner used the card on its last load
+        (or no start has happened yet and the card exists). A card that could
+        not be built reports ``active: false`` with a ``fallback_reason``
+        instead of the old misreport. ``classification`` is ``legacy`` for this
+        card format and ``fallback`` for either fallback path; ``validation``
+        never claims more than ``legacy-heuristic``.
+        """
         card = load_card(self._card_path)
+        forward = self._forward_result()
+        # Before the first start the endpoint reports the card as active, as it
+        # always did; after a start only the load's own outcome counts.
+        fallback = self._loaded_once and not self._card_applied
         if card is None:
             return {
                 "active": False,
-                "strategy": STRATEGY,
+                "strategy": NO_TRADE_STRATEGY if not self._allow_legacy_fallback else STRATEGY,
                 "timeframe": TIMEFRAME,
-                "forward": self._forward_result(),
+                "classification": CLASSIFICATION_FALLBACK,
+                "validation": LEGACY_VALIDATION,
+                "active_rule": NO_TRADE_STRATEGY if not self._allow_legacy_fallback else STRATEGY,
+                "legacy_fallback": self._allow_legacy_fallback,
+                "fallback_reason": self._fallback_reason or FALLBACK_NO_CARD,
+                "forward": forward,
             }
-        return {"active": True, **card.to_dict(), "forward": self._forward_result()}
+        payload: dict[str, Any] = {
+            "active": not fallback,
+            **card.to_dict(),
+            "classification": CLASSIFICATION_LEGACY if not fallback else CLASSIFICATION_FALLBACK,
+            "validation": LEGACY_VALIDATION,
+            "active_rule": card.strategy if not fallback else self._strategy,
+            "legacy_fallback": self._allow_legacy_fallback,
+            "forward": forward,
+        }
+        if fallback:
+            payload["fallback_reason"] = self._fallback_reason or FALLBACK_CARD_UNUSABLE
+        return payload
 
     def _card_settings(self, card: PolicyCard) -> Settings:
         params = card.params
@@ -410,14 +467,17 @@ class SimulationRunner:
                 self._symbol,
                 params.timeframe,
             )
+            self._fallback_reason = FALLBACK_CARD_UNUSABLE
             return None
         settings = self._card_settings(card)
         features = build_features(frame, settings.costs)
         if features.X.shape[0] < MIN_BARS:
             logger.warning("strategy card frame has only %d usable rows", features.X.shape[0])
+            self._fallback_reason = FALLBACK_CARD_UNUSABLE
             return None
         if self._flow_root is None:
             logger.warning("strategy card is active but no flow root is configured")
+            self._fallback_reason = FALLBACK_CARD_UNUSABLE
             return None
         flow = flow_series(self._flow_root, self._symbol, params.timeframe, frame)
         threshold = flow_thresholds(flow, params.flow_window, params.flow_quantile)
@@ -427,21 +487,33 @@ class SimulationRunner:
         return features
 
     def _load_features(self) -> FeatureFrame:
+        self._loaded_once = True
+        self._card_applied = False
+        self._fallback_reason = FALLBACK_NO_CARD
         self._card = load_card(self._card_path)
         if self._card is not None:
             try:
                 features = self._load_card_features(self._card)
             except (OSError, ValueError, KeyError) as exc:
+                # Full detail stays in the log: an exception message can carry
+                # a filesystem path and the status body must not.
                 logger.warning("strategy card could not be applied: %s", exc)
+                self._fallback_reason = FALLBACK_CARD_UNUSABLE
                 features = None
             if features is not None:
                 self._strategy = self._card.strategy
+                self._classification = CLASSIFICATION_LEGACY
+                self._fallback_reason = None
+                self._card_applied = True
                 return features
-        # No promoted card (or it could not be built): replay the original
-        # five-bar momentum rule on M1, which is what the v1 panel shipped.
+        # No usable card. Replay the original five-bar momentum rule on M1 only
+        # when the migration switch allows it; otherwise hold with a reason.
         self._rule = None
         self._run_settings = self._settings
-        self._strategy = STRATEGY
+        self._strategy = STRATEGY if self._allow_legacy_fallback else NO_TRADE_STRATEGY
+        self._classification = CLASSIFICATION_FALLBACK
+        if not self._allow_legacy_fallback:
+            self._fallback_reason = FALLBACK_DISABLED
         frame = self._store.read(self._symbol, TIMEFRAME)
         if frame.is_empty():
             raise NoDataError(
@@ -627,12 +699,21 @@ class SimulationRunner:
         rule_blocked = None
         if blocked is None and self._rule is not None:
             rule_blocked = self._rule.blocked_reason(index)
+        no_trade_reason = None
+        if self._rule is None and not self._allow_legacy_fallback:
+            no_trade_reason = self._fallback_reason or FALLBACK_DISABLED
 
         self._emit("bar", _bar_payload(features, index))
-        self._emit(
-            "decision",
-            {"action": int(action), "strategy": sim.strategy, "blocked": blocked or rule_blocked},
-        )
+        decision: dict[str, Any] = {
+            "action": int(action),
+            "strategy": sim.strategy,
+            "blocked": blocked or rule_blocked or no_trade_reason,
+            "classification": self._classification,
+        }
+        if no_trade_reason is not None:
+            decision["no_trade"] = True
+            decision["reason"] = no_trade_reason
+        self._emit("decision", decision)
         position: Position | None = info["position"]
         opened: Position | None = info["opened"]
         trade: Trade | None = info["trade"]
@@ -655,6 +736,9 @@ class SimulationRunner:
     def _action(self, index: int, features: FeatureFrame) -> int:
         if self._rule is not None:
             return self._rule.act(index)
+        if not self._allow_legacy_fallback:
+            # Fail closed: no card, no legacy rule, no trade.
+            return _HOLD
         if index < _MOMENTUM_BARS:
             return _HOLD
         close = float(features.ohlc[index, 3])

@@ -502,6 +502,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         seed=args.seed,
         evaluate_test=args.evaluate_test,
         include_flat=args.include_flat,
+        calibrate=args.calibrate,
     )
     result = train_classifier(
         features,
@@ -520,6 +521,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
             "test": result.split_counts["test"],
             "validation_metrics": result.validation,
             "baseline": result.baseline,
+            "calibration": result.calibration,
             "test_metrics": result.test,
             "model_path": str(model_path),
             "metrics_path": str(metrics_path),
@@ -703,6 +705,7 @@ def _cmd_discovery_run(args: argparse.Namespace) -> None:
             patience=args.patience,
             max_lookback=args.max_lookback,
             max_depth=args.max_depth,
+            min_best_trades=args.min_best_trades,
         )
         result = run_discovery(config, root=args.root)
     except (DiscoveryRunError, ValueError) as exc:
@@ -1110,6 +1113,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
             create_app(
                 data_root=Path(args.root),
                 flow_root=Path(args.flow_root) if args.flow_root else None,
+                legacy_fallback=args.legacy_fallback,
             ),
             host=args.host,
             port=port,
@@ -1355,6 +1359,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--include-flat",
         action="store_true",
         help="keep exact-zero returns as a third class (usually harmful)",
+    )
+    ml_train.add_argument(
+        "--calibrate",
+        choices=("none", "temperature"),
+        default="none",
+        help="fit temperature scaling on validation rows (never on test)",
     )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
@@ -1623,6 +1633,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="comma-separated cost multipliers (default 1.5,2.0; '' disables)",
     )
     d_run.add_argument("--min-trades", type=int, default=0)
+    d_run.add_argument(
+        "--min-best-trades",
+        type=int,
+        default=1,
+        help="closed trades a candidate needs to be the run's best "
+        "(0 disables the rule; compatibility and flat-policy runs only)",
+    )
     d_run.add_argument("--min-expectancy-r", type=float, default=0.0)
     d_run.add_argument("--min-profit-factor", type=float, default=0.0)
     d_run.add_argument("--max-drawdown", type=float, default=0.0)
@@ -1752,6 +1769,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--flow-root",
         default=None,
         help="tick-flow side store; enables the promoted flow-momentum card",
+    )
+    serve.add_argument(
+        "--legacy-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "replay the legacy M1 momentum rule when no strategy card applies "
+            "(default: on during migration; --no-legacy-fallback reports NO TRADE)"
+        ),
     )
     serve.set_defaults(handler=_cmd_serve)
 
