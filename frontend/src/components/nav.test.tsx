@@ -43,4 +43,14 @@ describe("Nav", () => {
     expect(link).toHaveAttribute("href", "/strategies");
     expect(link).toHaveAttribute("aria-current", "page");
   });
+
+  it("links to the backtesting page", () => {
+    navigation.pathname = "/performance";
+    render(<Nav />);
+
+    expect(screen.getByRole("link", { name: "Backtesting" })).toHaveAttribute(
+      "href",
+      "/backtesting",
+    );
+  });
 });
