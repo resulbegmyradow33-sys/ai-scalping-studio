@@ -10,8 +10,9 @@ link depends on:
   a crash between ``scan`` and ``seen`` converges on the existing job;
 * a missing or non-evidence champion, an invalid scope, an unreadable ledger
   and an empty store are refusals with an audit event, never a legacy fallback;
-* the payload is the handler's contract, so the scheduler cannot choose a
-  permissive gap policy or raise a budget;
+* the payload carries the configured gap policy, the default stays strict and
+  the cursor refuses a restart under a different policy;
+* a known synthetic store is refused unless the explicit opt-in is given;
 * the warm-up window and the provisional tail are respected.
 """
 
@@ -29,6 +30,7 @@ import pytest
 from promotion_evidence import evidence_for
 from promotion_support import promote_for_tests, registered_test_policies
 from scalping import cli
+from scalping.data.provenance import build_provenance, save_provenance
 from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.discovery.archive import DiscoveryArchive
@@ -36,9 +38,16 @@ from scalping.discovery.champion import scope_for
 from scalping.discovery.promotion import PROMOTION_V1, EvidenceIdentity
 from scalping.discovery.protocols import TrialResult
 from scalping.orchestrator import JobStore, Orchestrator, scan_once
-from scalping.orchestrator.handlers import KIND_PAPER_ADVANCE as HANDLER_KIND
-from scalping.orchestrator.handlers import MAX_PAPER_BARS
+from scalping.orchestrator.handlers import (
+    KIND_PAPER_ADVANCE as HANDLER_KIND,
+)
+from scalping.orchestrator.handlers import (
+    MAX_PAPER_BARS,
+    HandlerContext,
+    register_default_handlers,
+)
 from scalping.orchestrator.paper_scheduler import (
+    DEFAULT_GAP_POLICY,
     EVENT_DEFERRED,
     EVENT_REFUSED,
     KIND_PAPER_ADVANCE,
@@ -49,8 +58,11 @@ from scalping.orchestrator.paper_scheduler import (
     REASON_NO_ARCHIVE,
     REASON_NO_CHAMPION,
     REASON_NO_EVIDENCE_CHAMPION,
+    REASON_PROVENANCE_UNAVAILABLE,
+    REASON_SYNTHETIC,
     REASON_WARMING_UP,
     PaperAdvanceScheduler,
+    SchedulerPolicyMismatch,
 )
 from scalping.paper.ledger import PaperLedger
 from scalping.strategy.dsl import (
@@ -182,6 +194,8 @@ def scheduler(
     *,
     scopes: tuple[str, ...] | None = None,
     max_scopes: int = 100,
+    gap_policy: str = "strict",
+    allow_synthetic: bool = False,
 ) -> PaperAdvanceScheduler:
     return PaperAdvanceScheduler(
         store=JobStore(tmp_path / "orchestrator.sqlite3"),
@@ -190,6 +204,8 @@ def scheduler(
         ledger_path=tmp_path / "archive" / "paper.sqlite",
         scopes=scopes,
         max_scopes=max_scopes,
+        gap_policy=gap_policy,
+        allow_synthetic=allow_synthetic,
     )
 
 
@@ -231,10 +247,11 @@ def test_new_decision_bar_enqueues_exactly_one_advance(tmp_path: Path) -> None:
     assert len(outcome.queued) == 1
     job = outcome.queued[0]
     assert job.kind == KIND_PAPER_ADVANCE
-    assert set(job.payload) == {"symbol", "timeframe", "bars"}
+    assert set(job.payload) == {"symbol", "timeframe", "bars", "gap_policy"}
     assert job.payload["symbol"] == SYMBOL
     assert job.payload["timeframe"] == TIMEFRAME
     assert 1 <= job.payload["bars"] <= MAX_ADVANCE_BARS
+    assert job.payload["gap_policy"] == DEFAULT_GAP_POLICY == "strict"
     assert job.dedupe_key == (
         f"{KIND_PAPER_ADVANCE}:{scope_for(SYMBOL, TIMEFRAME)}:"
         f"{last_decidable_ts(tmp_path / 'data').isoformat()}"
@@ -423,22 +440,205 @@ def test_unparseable_ledger_cursor_is_refused(tmp_path: Path) -> None:
     assert event_details(batch.store, EVENT_REFUSED)[-1]["reason"] == REASON_LEDGER_UNAVAILABLE
 
 
-def test_payload_cannot_bypass_the_gap_policy(tmp_path: Path) -> None:
-    data = bars(DAY)
-    # Remove one bar in the middle: the runner's strict default must see the gap.
-    hole = data.with_row_index().filter(pl.col("index") != 300).drop("index")
-    ParquetStore(tmp_path / "data").write(SYMBOL, TIMEFRAME, hole)
+def holed_bars() -> pl.DataFrame:
+    """One day of M1 bars with a single in-session bar removed."""
+    return bars(DAY).with_row_index().filter(pl.col("index") != 300).drop("index")
+
+
+def handler_orchestrator(batch: PaperAdvanceScheduler) -> Orchestrator:
+    """The real handlers over the same roots the scheduler reads."""
+    context = HandlerContext(
+        data_root=batch.data_root,
+        runs_root=batch.archive_path.parent.parent,
+        archive_root=batch.ledger_path.parent,
+        use_feature_cache=False,
+    )
+    orchestrator = Orchestrator(batch.store)
+    register_default_handlers(orchestrator, context)
+    return orchestrator
+
+
+def test_payload_carries_the_default_gap_policy(tmp_path: Path) -> None:
+    write_bars(tmp_path / "data")
     seed_archive(archive_path(tmp_path))
     batch = scheduler(tmp_path)
 
     outcome = scan_once(Orchestrator(batch.store), [batch])
 
     assert len(outcome.queued) == 1
-    assert set(outcome.queued[0].payload) == {"symbol", "timeframe", "bars"}
+    payload = outcome.queued[0].payload
+    assert set(payload) == {"symbol", "timeframe", "bars", "gap_policy"}
+    assert payload["gap_policy"] == DEFAULT_GAP_POLICY == "strict"
     source = Path("src/scalping/orchestrator/paper_scheduler.py").read_text(encoding="utf-8")
-    assert "gap_policy" not in source
     assert "FlowMomentumRule" not in source
     assert "scalping.strategy" not in source
+
+
+def test_configured_gap_policy_is_carried_in_the_payload(tmp_path: Path) -> None:
+    write_bars(tmp_path / "data")
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path, gap_policy="session_aware")
+
+    outcome = scan_once(Orchestrator(batch.store), [batch])
+
+    assert len(outcome.queued) == 1
+    assert outcome.queued[0].payload["gap_policy"] == "session_aware"
+
+
+@pytest.mark.parametrize("policy", ["ignore", "", "STRICT"])
+def test_invalid_gap_policy_is_refused_at_construction(tmp_path: Path, policy: str) -> None:
+    with pytest.raises(ValueError, match="gap_policy"):
+        scheduler(tmp_path, gap_policy=policy)
+
+
+def test_gap_policy_and_synthetic_opt_in_are_validated(tmp_path: Path) -> None:
+    kwargs = {
+        "store": JobStore(tmp_path / "orchestrator.sqlite3"),
+        "data_root": tmp_path / "data",
+        "archive_path": archive_path(tmp_path),
+        "ledger_path": tmp_path / "archive" / "paper.sqlite",
+    }
+    with pytest.raises(TypeError, match="gap_policy"):
+        PaperAdvanceScheduler(gap_policy=1, **kwargs)  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="allow_synthetic"):
+        PaperAdvanceScheduler(allow_synthetic=1, **kwargs)  # type: ignore[arg-type]
+
+
+def test_cursor_persists_the_policy_and_a_restart_keeps_it(tmp_path: Path) -> None:
+    write_bars(tmp_path / "data")
+    seed_archive(archive_path(tmp_path))
+    first = scheduler(tmp_path, gap_policy="session_aware")
+    outcome = scan_once(Orchestrator(first.store), [first])
+    assert len(outcome.queued) == 1
+
+    raw = first.store.get_state(first.cursor_key)
+    assert raw is not None
+    document = json.loads(raw)
+    assert document["version"] == 2
+    assert document["gap_policy"] == "session_aware"
+
+    restarted = scheduler(tmp_path, gap_policy="session_aware")
+    again = scan_once(Orchestrator(restarted.store), [restarted])
+    assert again.queued == () and again.duplicates == ()
+    assert len(jobs(first.store)) == 1
+
+    changed = scheduler(tmp_path, gap_policy="strict")
+    with pytest.raises(SchedulerPolicyMismatch, match="gap_policy"):
+        changed.scan()
+
+
+def test_legacy_cursor_without_a_policy_is_read_as_strict(tmp_path: Path) -> None:
+    write_bars(tmp_path / "data")
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path)
+    batch.store.set_state(batch.cursor_key, json.dumps({"version": 1, "offset": 0}))
+
+    with pytest.raises(SchedulerPolicyMismatch, match="pre-policy"):
+        scheduler(tmp_path, gap_policy="session_aware").scan()
+
+    outcome = scan_once(Orchestrator(batch.store), [batch])
+    assert len(outcome.queued) == 1
+    assert outcome.queued[0].payload["gap_policy"] == "strict"
+    upgraded = json.loads(batch.store.get_state(batch.cursor_key) or "{}")
+    assert upgraded["gap_policy"] == "strict"
+
+
+def test_cursor_with_an_unknown_policy_is_refused(tmp_path: Path) -> None:
+    write_bars(tmp_path / "data")
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path)
+    batch.store.set_state(
+        batch.cursor_key,
+        json.dumps({"version": 2, "offset": 0, "gap_policy": "ignore"}),
+    )
+
+    with pytest.raises(SchedulerPolicyMismatch, match="invalid gap_policy"):
+        batch.scan()
+
+
+def test_known_synthetic_store_is_refused_unless_allowed(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    data = bars(DAY)
+    ParquetStore(data_root).write(SYMBOL, TIMEFRAME, data)
+    save_provenance(
+        data_root,
+        build_provenance(
+            data,
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="synthetic",
+            synthetic=True,
+        ),
+    )
+    seed_archive(archive_path(tmp_path))
+
+    refused = scheduler(tmp_path)
+    outcome = scan_once(Orchestrator(refused.store), [refused])
+    assert outcome.queued == ()
+    assert event_details(refused.store, EVENT_REFUSED)[-1]["reason"] == REASON_SYNTHETIC
+
+    allowed = scheduler(tmp_path, allow_synthetic=True)
+    outcome = scan_once(Orchestrator(allowed.store), [allowed])
+    assert len(outcome.queued) == 1
+    assert outcome.queued[0].payload["gap_policy"] == "strict"
+
+
+def test_unreadable_provenance_is_refused_not_guessed(tmp_path: Path) -> None:
+    data_root = tmp_path / "data"
+    write_bars(data_root)
+    sidecar = data_root / "_meta" / SYMBOL / f"{TIMEFRAME}.json"
+    sidecar.parent.mkdir(parents=True)
+    sidecar.write_text("not json", encoding="utf-8")
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path)
+
+    outcome = scan_once(Orchestrator(batch.store), [batch])
+
+    assert outcome.queued == ()
+    assert event_details(batch.store, EVENT_REFUSED)[-1]["reason"] == (
+        REASON_PROVENANCE_UNAVAILABLE
+    )
+
+
+def test_session_aware_policy_reaches_the_handler_end_to_end(tmp_path: Path) -> None:
+    ParquetStore(tmp_path / "data").write(SYMBOL, TIMEFRAME, holed_bars())
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path, gap_policy="session_aware")
+    orchestrator = handler_orchestrator(batch)
+
+    scan = scan_once(orchestrator, [batch])
+    assert len(scan.queued) == 1
+    job = scan.queued[0]
+    assert job.payload["gap_policy"] == "session_aware"
+
+    run = orchestrator.run_once()
+    row = batch.store.get(job.id)
+    assert row is not None and row.result is not None
+    assert run.status == "succeeded"
+    result = row.result["data"]
+    assert result["gap_policy"] == "session_aware"
+    assert result["gaps_skipped"] == 1
+    assert result["missing_bars"] == 1
+    assert result["gaps_recorded"] == 1
+    assert result["bars_advanced"] > 0
+
+
+def test_default_strict_policy_still_refuses_the_same_gap_end_to_end(tmp_path: Path) -> None:
+    ParquetStore(tmp_path / "data").write(SYMBOL, TIMEFRAME, holed_bars())
+    seed_archive(archive_path(tmp_path))
+    batch = scheduler(tmp_path)
+    orchestrator = handler_orchestrator(batch)
+
+    scan = scan_once(orchestrator, [batch])
+    assert len(scan.queued) == 1
+    job = scan.queued[0]
+    assert job.payload["gap_policy"] == "strict"
+
+    run = orchestrator.run_once()
+    row = batch.store.get(job.id)
+    assert row is not None
+    assert run.status == "retry"
+    assert "bar_gap" in (row.error or "")
 
 
 def test_bounded_scope_scan_rotates_and_audits(tmp_path: Path) -> None:
@@ -496,9 +696,39 @@ def test_cli_schedule_paper_enqueues_one_advance(
     assert payload["tick"]["scan"]["queued"]
     store = JobStore(tmp_path / "orchestrator.sqlite3")
     try:
-        assert len(store.list_jobs(kind=KIND_PAPER_ADVANCE)) == 1
+        listed = store.list_jobs(kind=KIND_PAPER_ADVANCE)
+        assert len(listed) == 1
+        assert listed[0].payload["gap_policy"] == "strict"
     finally:
         store.close()
+
+
+def test_cli_paper_gap_policy_reaches_the_job(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_bars(tmp_path / "data")
+    seed_archive(archive_path(tmp_path))
+
+    code = cli.main(_cli_args(tmp_path, "--schedule-paper", "--paper-gap-policy", "session_aware"))
+    assert code == 0
+    capsys.readouterr()
+    store = JobStore(tmp_path / "orchestrator.sqlite3")
+    try:
+        listed = store.list_jobs(kind=KIND_PAPER_ADVANCE)
+        assert len(listed) == 1
+        assert listed[0].payload["gap_policy"] == "session_aware"
+    finally:
+        store.close()
+
+
+def test_cli_paper_gap_policy_requires_the_scheduler(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    code = cli.main(_cli_args(tmp_path, "--paper-gap-policy", "session_aware"))
+
+    assert code == 2
+    error = json.loads(capsys.readouterr().err.strip())
+    assert "paper-gap-policy" in str(error)
 
 
 def test_cli_schedule_paper_cannot_skip_the_scan(

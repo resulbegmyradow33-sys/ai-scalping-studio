@@ -22,11 +22,17 @@ Contract
   is ``max(valid_from + window - 1, window - 1)`` with
   ``valid_from = min(WARMUP, bars)``.
 * **Payload is the handler's.** The trigger carries exactly ``symbol``,
-  ``timeframe`` and ``bars`` — the fields ``PaperAdvanceRequest`` accepts. It
-  cannot select a gap policy, raise a limit or name a strategy: a
-  ``paper.advance`` job still runs the continuous runner's default ``strict``
-  policy. A gap in the stored slice therefore reaches the runner unchanged and
-  is refused there; the scheduler does not skip it to manufacture an advance.
+  ``timeframe``, ``bars`` and the configured ``gap_policy`` — the fields
+  ``PaperAdvanceRequest`` accepts. It cannot raise a limit or name a strategy.
+  The policy is chosen once when the scheduler is constructed, validated
+  against the ledger's allow-list and persisted in the cursor, so a restart
+  cannot silently change it: a cursor recorded under one policy is refused by a
+  scheduler configured with another. The default stays ``strict``; a store with
+  a real feed gap needs the explicit ``session_aware`` opt-in.
+* **Known synthetic bars are not scheduled** unless ``allow_synthetic=True``.
+  The scheduler reads the store's provenance sidecar; a missing sidecar is
+  unknown (not a refusal), while a recorded ``synthetic: true`` is demo data,
+  not market evidence.
 
 Dedupe
 ------
@@ -74,6 +80,7 @@ from typing import Final
 
 import polars as pl
 
+from scalping.data.provenance import load_provenance
 from scalping.data.registry import TIMEFRAMES, get_symbol
 from scalping.data.store import ParquetStore
 from scalping.discovery.archive import ArchiveError, DiscoveryArchive
@@ -86,9 +93,10 @@ from scalping.discovery.champion import (
 from scalping.features.build import WARMUP
 from scalping.orchestrator.store import JobStore
 from scalping.orchestrator.triggers import Trigger
-from scalping.paper.ledger import LedgerError, PaperLedger
+from scalping.paper.ledger import GAP_POLICIES, LedgerError, PaperLedger
 
 __all__ = [
+    "DEFAULT_GAP_POLICY",
     "DEFAULT_MAX_RETRIES",
     "EVENT_DEFERRED",
     "EVENT_REFUSED",
@@ -106,8 +114,11 @@ __all__ = [
     "REASON_NO_BARS",
     "REASON_NO_CHAMPION",
     "REASON_NO_EVIDENCE_CHAMPION",
+    "REASON_PROVENANCE_UNAVAILABLE",
+    "REASON_SYNTHETIC",
     "REASON_WARMING_UP",
     "PaperAdvanceScheduler",
+    "SchedulerPolicyMismatch",
 ]
 
 #: The job kind this source produces. Kept as a literal so importing this module
@@ -133,6 +144,12 @@ REASON_BARS_UNAVAILABLE: Final[str] = "bars_unavailable"
 REASON_LEDGER_UNAVAILABLE: Final[str] = "ledger_unavailable"
 REASON_WARMING_UP: Final[str] = "warming_up"
 REASON_AWAITING_BAR: Final[str] = "awaiting_bar"
+#: The store's provenance sidecar names synthetic data and the scheduler was not
+#: given the explicit ``allow_synthetic=True`` opt-in.
+REASON_SYNTHETIC: Final[str] = "synthetic_data"
+#: The provenance sidecar exists but cannot be read; scheduling a scope whose
+#: data identity is unknown would hide the one fact the record exists for.
+REASON_PROVENANCE_UNAVAILABLE: Final[str] = "provenance_unavailable"
 
 #: The handler's own ceiling on ``bars``; a budget above it would be rejected.
 MAX_ADVANCE_BARS: Final[int] = 100_000
@@ -145,7 +162,19 @@ MAX_SCOPES_LIMIT: Final[int] = 1_000
 DEFAULT_MAX_RETRIES: Final[int] = 1
 #: Default observation window; matches ``ContinuousPaperRunner``'s default.
 DEFAULT_WINDOW: Final[int] = 60
-_CURSOR_VERSION: Final[int] = 1
+#: The runner's historical default. A scheduler that predates the policy field
+#: was always strict, so an old cursor is read as strict.
+DEFAULT_GAP_POLICY: Final[str] = "strict"
+_CURSOR_VERSION: Final[int] = 2
+
+
+class SchedulerPolicyMismatch(ValueError):
+    """The configured gap policy differs from the one recorded in the cursor.
+
+    The cursor is the durable record of the policy a scan already used. Reading
+    it with a different configuration would silently re-interpret pending
+    advances, so the scheduler refuses instead of choosing a side.
+    """
 
 
 @dataclass(slots=True)
@@ -162,6 +191,10 @@ class _Cursor:
     offset: int = 0
     #: Scopes emitted by the scan that has not been acknowledged yet.
     new_scopes: set[str] = field(default_factory=set)
+    #: The policy this cursor was written under. A legacy document without the
+    #: field is strict and flagged as not recorded.
+    gap_policy: str = DEFAULT_GAP_POLICY
+    policy_recorded: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +224,17 @@ class PaperAdvanceScheduler:
     ``window`` is the observation window used for the cold-start warm-up check.
     It matches the runner's default and does not change an existing session's
     identity.
+
+    ``gap_policy`` is forwarded in every emitted payload and becomes part of
+    the paper session identity. It defaults to ``strict`` and is persisted in
+    the cursor; a restart that asks for a different policy is refused with
+    :class:`SchedulerPolicyMismatch`. Changing the policy is therefore an
+    explicit operator action (a fresh ledger/cursor or a new scheduling path),
+    never an accident of a restart.
+
+    ``allow_synthetic`` is the explicit opt-in for a store whose provenance
+    sidecar records ``synthetic: true``. The default keeps demo bars out of the
+    paper path; an absent sidecar stays unknown and is not refused.
     """
 
     def __init__(
@@ -205,6 +249,8 @@ class PaperAdvanceScheduler:
         max_scopes: int = MAX_SCOPES,
         priority: int = 0,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        gap_policy: str = DEFAULT_GAP_POLICY,
+        allow_synthetic: bool = False,
         name: str | None = None,
         cursor_key: str | None = None,
     ) -> None:
@@ -228,6 +274,14 @@ class PaperAdvanceScheduler:
             raise TypeError("max_retries must be an int")
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if not isinstance(gap_policy, str):
+            raise TypeError(f"gap_policy must be a str, got {type(gap_policy).__name__}")
+        if gap_policy not in GAP_POLICIES:
+            raise ValueError(
+                f"gap_policy must be one of {sorted(GAP_POLICIES)}, got {gap_policy!r}"
+            )
+        if not isinstance(allow_synthetic, bool):
+            raise TypeError(f"allow_synthetic must be a bool, got {type(allow_synthetic).__name__}")
         explicit = _explicit_scopes(scopes)
 
         self.store = store
@@ -239,6 +293,8 @@ class PaperAdvanceScheduler:
         self.max_scopes = max_scopes
         self.priority = int(priority)
         self.max_retries = max_retries
+        self.gap_policy = gap_policy
+        self.allow_synthetic = allow_synthetic
         self.name = name or f"paper.advance:{self.archive_path}"
         self.cursor_key = cursor_key or (
             f"trigger.paper.advance:{self.archive_path.resolve()}:{self.ledger_path.resolve()}"
@@ -251,6 +307,13 @@ class PaperAdvanceScheduler:
     def scan(self) -> list[Trigger]:
         """Return one advance trigger per scope with a new decision bar."""
         cursor = self._load_cursor()
+        if cursor.gap_policy != self.gap_policy:
+            legacy = "" if cursor.policy_recorded else " (a pre-policy cursor ran strict)"
+            raise SchedulerPolicyMismatch(
+                f"cursor {self.cursor_key!r} recorded gap_policy"
+                f" {cursor.gap_policy!r}, not the configured {self.gap_policy!r}{legacy};"
+                " a restart cannot change the policy silently"
+            )
         self._pending = cursor
         cursor.new_scopes = set()
         triggers: list[Trigger] = []
@@ -303,6 +366,7 @@ class PaperAdvanceScheduler:
             "not_queued": dict(sorted(pending.not_queued.items())),
             "pending_ack": dict(sorted(pending.pending_ack.items())),
             "offset": pending.offset,
+            "gap_policy": pending.gap_policy,
         }
         self.store.set_state(
             self.cursor_key,
@@ -388,6 +452,8 @@ class PaperAdvanceScheduler:
             )
             return
         symbol, timeframe = resolved
+        if self._synthetic_refused(symbol, timeframe, cursor, scope):
+            return
         if archive is None:
             # Only reachable with explicit scopes and no readable archive.
             self._note(
@@ -442,6 +508,7 @@ class PaperAdvanceScheduler:
                     "symbol": symbol,
                     "timeframe": timeframe,
                     "bars": min(max(decidable, 1), MAX_ADVANCE_BARS),
+                    "gap_policy": self.gap_policy,
                 },
                 priority=self.priority,
                 max_retries=self.max_retries,
@@ -546,6 +613,35 @@ class PaperAdvanceScheduler:
             return None
         return pending[-2], len(pending) - 1
 
+    def _synthetic_refused(
+        self,
+        symbol: str,
+        timeframe: str,
+        cursor: _Cursor,
+        scope: str,
+    ) -> bool:
+        """Whether this scope's recorded provenance forbids scheduling it."""
+        try:
+            recorded = load_provenance(self.data_root, symbol, timeframe)
+        except (OSError, TypeError, ValueError) as exc:
+            self._note(
+                cursor,
+                scope,
+                REASON_PROVENANCE_UNAVAILABLE,
+                f"{type(exc).__name__}: {exc}",
+            )
+            return True
+        if recorded is None or not recorded.synthetic or self.allow_synthetic:
+            return False
+        self._note(
+            cursor,
+            scope,
+            REASON_SYNTHETIC,
+            "stored bars are recorded as synthetic; allow_synthetic=False treats"
+            " demo data as not paper-tradeable market evidence",
+        )
+        return True
+
     def _note(self, cursor: _Cursor, scope: str, reason: str, detail: str) -> None:
         """Record a refusal once per scope until its reason changes."""
         if cursor.not_queued.get(scope) == reason:
@@ -559,19 +655,36 @@ class PaperAdvanceScheduler:
     def _load_cursor(self) -> _Cursor:
         raw = self.store.get_state(self.cursor_key)
         if raw is None:
-            return _Cursor()
+            # No cursor yet: nothing was emitted, so the configured policy is the
+            # first one and there is no earlier choice to preserve.
+            return _Cursor(gap_policy=self.gap_policy)
         try:
             parsed = json.loads(raw)
         except ValueError:
-            return _Cursor()  # a corrupt cursor costs a re-read; dedupe still holds
+            # A corrupt cursor costs a re-read; the queue dedupe still holds. No
+            # prior policy can be trusted from an unreadable document.
+            return _Cursor(gap_policy=self.gap_policy)
         if not isinstance(parsed, dict):
-            return _Cursor()
+            return _Cursor(gap_policy=self.gap_policy)
         offset = parsed.get("offset")
+        raw_policy = parsed.get("gap_policy")
+        if raw_policy is None:
+            # A version-1 cursor predates the field and was always strict.
+            policy, recorded = DEFAULT_GAP_POLICY, False
+        elif isinstance(raw_policy, str) and raw_policy in GAP_POLICIES:
+            policy, recorded = raw_policy, True
+        else:
+            raise SchedulerPolicyMismatch(
+                f"cursor {self.cursor_key!r} records an invalid gap_policy"
+                f" {raw_policy!r}; refusing to scan rather than guess"
+            )
         return _Cursor(
             emitted=_text_map(parsed.get("emitted")),
             not_queued=_text_map(parsed.get("not_queued")),
             pending_ack=_text_map(parsed.get("pending_ack")),
             offset=0 if isinstance(offset, bool) or not isinstance(offset, int) else max(offset, 0),
+            gap_policy=policy,
+            policy_recorded=recorded,
         )
 
 
