@@ -341,11 +341,12 @@ def test_min_best_trades_is_a_threshold_not_a_zero_check(tmp_path: Path) -> None
     assert result.best_metrics["net_profit"] == -2.0
 
 
-def test_fractional_trade_count_is_not_tradable(tmp_path: Path) -> None:
-    class FractionalTradeEvaluator:
+@pytest.mark.parametrize("trade_count", [1.5, float("nan"), float("inf")])
+def test_invalid_trade_count_is_not_tradable(tmp_path: Path, trade_count: float) -> None:
+    class InvalidTradeCountEvaluator:
         def evaluate(self, candidate, *, dataset_id, code_version, budget):
             return TrialResult(
-                metrics={"net_profit": 99.0, "trades": 1.5},
+                metrics={"net_profit": 99.0, "trades": trade_count},
                 accepted=True,
             )
 
@@ -353,7 +354,7 @@ def test_fractional_trade_count_is_not_tradable(tmp_path: Path) -> None:
     with _open(tmp_path, "archive") as archive:
         result = evolve(
             _SequenceFactory((ToyCandidate((1,)),)),
-            FractionalTradeEvaluator(),
+            InvalidTradeCountEvaluator(),
             archive,
             config,
         )
