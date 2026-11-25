@@ -165,6 +165,35 @@ The payload always carries `descriptive_only: True` and no promotion flag.
 - No profitability claim. A better prediction row still has to pass the
   simulator, the cost stress and a regime-coverage gate.
 
+## Out-of-distribution rows
+
+`scalping.ensemble.OODDetector` fits a diagonal-shrunk Gaussian on the
+**training features** and scores each decision row with its Mahalanobis
+distance. Rows above the training quantile (default `0.99`) are flagged
+`unknown`.
+
+```python
+from scalping.ensemble import OODConfig, OODDetector
+
+detector = OODDetector(OODConfig(quantile=0.99)).fit(train_features)
+decision = engine.decide(
+    probabilities, disagreement=0.10, unknown=bool(detector.is_ood(row))
+)
+```
+
+Rules:
+
+- `unknown=True` blocks a **new** entry with reason `out_of_distribution`;
+- with an open position the normal hold/exit rules still decide — an OOD score
+  is not a risk model and cannot force a close;
+- the detector needs the same feature order and width as training; a mismatch
+  is an error, not a silent zero;
+- `to_dict()` records quantile, threshold, feature count and training rows for
+  a report. The detector itself is not persisted; that is Phase 10.
+
+The score is descriptive. A low score does not mean the row is tradeable, and a
+high score does not predict a loss.
+
 ## Decision rules
 
 `DecisionEngine.decide()` returns a `Decision` with `action`, `probabilities`,
@@ -220,8 +249,8 @@ win, the simpler member stays; that is the Phase 9 exit criterion.
   regime. Only the weights change.
 - **Temperature scaling.** No post-hoc calibration of member or ensemble
   probabilities. ECE/MCE are reported, not optimised.
-- **Drift and OOD scoring.** No feature/prediction drift monitor, no
-  out-of-distribution score, no confidence bands beyond disagreement.
+- **Drift monitoring.** Feature/prediction drift over time is not tracked;
+  OOD scoring is a per-row distance against the training distribution.
 - **Persistence and API.** Decisions are not written to a store and not served.
   The decision log schema exists as `Decision.to_dict()`; storage is Phase 10.
 - **Cost-aware veto inside the engine.** Costs and the simulator gate live
