@@ -1074,6 +1074,7 @@ def _cmd_serve(args: argparse.Namespace) -> None:
             create_app(
                 data_root=Path(args.root),
                 flow_root=Path(args.flow_root) if args.flow_root else None,
+                legacy_fallback=args.legacy_fallback,
             ),
             host=args.host,
             port=port,
@@ -1702,6 +1703,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--flow-root",
         default=None,
         help="tick-flow side store; enables the promoted flow-momentum card",
+    )
+    serve.add_argument(
+        "--legacy-fallback",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "replay the legacy M1 momentum rule when no strategy card applies "
+            "(default: on during migration; --no-legacy-fallback reports NO TRADE)"
+        ),
     )
     serve.set_defaults(handler=_cmd_serve)
 

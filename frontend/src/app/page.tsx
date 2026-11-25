@@ -21,6 +21,7 @@ import { useStrategyCard } from "@/hooks/use-strategy-card";
 import { API_BASE } from "@/lib/api";
 import type { Timeframe } from "@/lib/chart-data";
 import { formatMoney, formatNumber, formatPct } from "@/lib/format";
+import { isLegacyStrategy } from "@/lib/strategy-labels";
 import type { ControlAction, SimState } from "@/lib/types";
 
 const TIMEFRAMES: readonly Timeframe[] = ["M1", "M5", "M15"];
@@ -240,6 +241,9 @@ export default function SimulatorPage() {
               label="Seçili strateji"
               testId="strategy-value"
               value={sim.lastDecision?.strategy ?? "—"}
+              hint={
+                isLegacyStrategy(sim.lastDecision?.strategy) ? "legacy baseline" : undefined
+              }
             />
             <StatCard
               label="Bloklanan aksiyon"

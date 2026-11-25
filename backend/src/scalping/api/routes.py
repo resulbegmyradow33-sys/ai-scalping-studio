@@ -69,7 +69,12 @@ from scalping.data.registry import SYMBOLS, TIMEFRAMES
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import ValidationReport, validate_bars
 from scalping.regime import classify
-from scalping.strategy.calibrate import calibrate, card_from_report
+from scalping.strategy.calibrate import (
+    AUDIT_FILENAME,
+    calibrate,
+    card_from_report,
+    record_calibration,
+)
 from scalping.strategy.card import save_card
 from scalping.strategy.flow import flow_series
 
@@ -655,13 +660,29 @@ async def strategy_calibrate(body: CalibrateRequest, request: Request) -> dict[s
             incumbent=incumbent,
         )
         payload = report.to_dict()
-        if report.promoted and not body.dry_run:
+        card_written = report.promoted and not body.dry_run
+        if card_written:
             card = card_from_report(
                 report,
                 symbol=body.symbol,
                 note="holdout reused across nightly runs; treat later promotions as weaker evidence",
             )
             save_card(card_path, card)
+        audit = record_calibration(
+            card_path.parent / AUDIT_FILENAME,
+            actor=f"api:{request.client.host}" if request.client is not None else "api",
+            dry_run=body.dry_run,
+            report=report,
+            symbol=body.symbol,
+            timeframe=body.timeframe,
+            card_written=card_written,
+            card_path=card_path,
+        )
+        payload["audit"] = {
+            "at": audit["at"],
+            "actor": audit["actor"],
+            "dry_run": audit["dry_run"],
+        }
         payload["card"] = runner.strategy_card()
         return payload
 
