@@ -92,12 +92,14 @@ No RL result is reported alone. The comparison set:
 
 1. **hold** — the simulator with no trades;
 2. **random** — same action distribution, same episode;
-3. **rule** — the validated `flow_momentum` card, replayed by the same
-   simulator;
+3. **rule** — the `ret_5` momentum baseline replayed by the same simulator
+   (the validated `flow_momentum` card is a separate comparison);
 4. the previous checkpoint / champion.
 
-Evaluation is chronological and out-of-sample; cost stress and an untouched
-forward store remain the gate. Prediction metrics from the neural network
+`train` writes `baseline_hold_net_profit`, `baseline_rule_net_profit` and
+`baseline_random_net_profit` into the run manifest; the random arm is seeded by
+the run seed. Evaluation is chronological and out-of-sample; cost stress and an
+untouched forward store remain the gate. Prediction metrics from the neural network
 framework are not a trading result.
 
 Reported results (H1, real spread, sequential simulator; see

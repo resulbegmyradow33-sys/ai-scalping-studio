@@ -566,6 +566,8 @@ def test_zero_step_run_has_null_action_distribution_and_is_degenerate(tmp_path):
     assert metrics["reward_mean_normalized"] == metrics["reward_mean"]
     assert manifest["degenerate"] is True
     assert manifest["baseline_hold_net_profit"] == pytest.approx(0.0)
+    assert "baseline_rule_net_profit" in manifest
+    assert "baseline_random_net_profit" in manifest
     assert manifest["reward_mean_normalized"] == metrics["reward_mean"]
 
 
