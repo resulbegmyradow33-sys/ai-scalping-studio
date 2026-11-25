@@ -51,6 +51,7 @@ from scalping.ensemble.regime import (
     fit_regime_weights,
     regime_selection_report,
 )
+from scalping.ensemble.selection import PromotionChoice, select_simpler_winner
 
 __all__ = [
     "Action",
@@ -62,6 +63,7 @@ __all__ = [
     "MemberFactory",
     "OOFResult",
     "Position",
+    "PromotionChoice",
     "RegimeSelectionConfig",
     "RegimeWeightTable",
     "RegimeWeightedEnsemble",
@@ -77,4 +79,5 @@ __all__ = [
     "fit_oof",
     "fit_regime_weights",
     "regime_selection_report",
+    "select_simpler_winner",
 ]

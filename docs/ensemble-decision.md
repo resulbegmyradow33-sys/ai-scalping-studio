@@ -165,6 +165,23 @@ The payload always carries `descriptive_only: True` and no promotion flag.
 - No profitability claim. A better prediction row still has to pass the
   simulator, the cost stress and a regime-coverage gate.
 
+## Simpler-winner selection
+
+`select_simpler_winner(table, metric="accuracy", min_gain=0.0)` takes the
+`compare_to_best_member` table and makes the keep/reject choice explicit:
+
+- the ensemble is kept only when it **strictly** beats the best member by
+  `min_gain`;
+- a tie keeps the single member — an ensemble must earn its complexity;
+- `accuracy` and `balanced_accuracy` are higher-is-better; `log_loss` is
+  lower-is-better;
+- the result records `choice`, `reason`, `metric`, `ensemble_gain` and
+  `best_member`, so a report can explain the decision.
+
+This is a selection rule for research reports, not a promotion. Promotion still
+requires the simulator, cost stress and the gate; the simpler member stays until
+those pass.
+
 ## Decision rules
 
 `DecisionEngine.decide()` returns a `Decision` with `action`, `probabilities`,

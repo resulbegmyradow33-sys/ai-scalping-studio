@@ -215,7 +215,7 @@ branches; cite them as evidence, not as repository files.
 - [ ] Out-of-distribution/unknown regime detection.
 - [x] Decision engine: BUY/SELL/HOLD/NO TRADE (ordered gates, reason required).
 - [ ] PARTIAL: `Decision` kaydı model/probability/disagreement/regime/reason taşıyor; kalıcı log yok.
-- [ ] PARTIAL: karşılaştırma var; 'daha basit olanı tut' otomatik değil.
+- [x] Karşılaştırma ve otomatik 'daha basit olanı tut' seçimi (`select_simpler_winner`).
 - [x] `docs/ensemble-decision.md`.
 
 ## Phase 10 — Autonomous learning and registry
