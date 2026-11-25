@@ -328,4 +328,19 @@ def test_old_manifest_json_defaults_to_unknown() -> None:
 
 
 def test_evidence_schema_is_bumped_for_the_new_identity() -> None:
-    assert EVIDENCE_SCHEMA_VERSION == 4
+    # Version 4 added source/synthetic; version 5 adds provenance_verified.
+    assert EVIDENCE_SCHEMA_VERSION == 5
+
+
+def test_the_verification_flag_round_trips_through_the_bundle_json() -> None:
+    draft = replace(bundle(), checksum="", provenance_verified=True)
+    evidence = replace(draft, checksum=evidence_checksum(draft))
+
+    payload = evidence.to_dict()
+
+    assert payload["provenance_verified"] is True
+    rebuilt = evidence_from_dict(payload)
+    assert rebuilt.provenance_verified is True
+    assert rebuilt.source == "test:real"
+    assert rebuilt.synthetic is False
+    assert evidence_checksum(rebuilt) == evidence_checksum(evidence)

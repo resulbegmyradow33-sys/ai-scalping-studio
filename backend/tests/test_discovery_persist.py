@@ -26,10 +26,12 @@ import polars as pl
 import pytest
 
 from scalping.config import Settings
+from scalping.data.provenance import build_provenance, save_provenance
 from scalping.data.store import ParquetStore
 from scalping.datasets.artifact import ARTIFACT_FILE, save_dataset_arrays
 from scalping.datasets.builder import build_dataset
 from scalping.discovery import persist as persist_module
+from scalping.discovery import reproduce as reproduce_module
 from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidenceConfig,
@@ -44,6 +46,7 @@ from scalping.discovery.persist import (
     save_dataset_artifact,
     save_evidence_bundle,
 )
+from scalping.discovery.promotion import PROMOTION_V1, evaluate_promotion
 from scalping.discovery.reproduce import (
     ReproduceError,
     ReproduceMismatch,
@@ -356,6 +359,170 @@ def test_persist_evidence_run_reports_missing_bars(tmp_path: Path) -> None:
         )
 
     assert exc.value.code == "bars_missing"
+
+
+# --- store provenance --------------------------------------------------------
+
+
+def test_evidence_copies_verified_store_provenance(tmp_path: Path) -> None:
+    """A matching sidecar is the only source of a real provenance claim."""
+    context = stored_context(tmp_path)
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="csv:provenance-test",
+            synthetic=False,
+        ),
+    )
+    out = tmp_path / "candidate.evidence.json"
+
+    result = persist_evidence_run(
+        context["store_root"],
+        out,
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    assert result.evidence.source == "csv:provenance-test"
+    assert result.evidence.synthetic is False
+    assert result.evidence.provenance_verified is True
+    assert result.provenance_verified is True
+    assert result.warnings == ()
+    payload = result.to_dict()
+    assert payload["source"] == "csv:provenance-test"
+    assert payload["synthetic"] is False
+    assert payload["provenance_verified"] is True
+    assert payload["warnings"] == []
+
+
+def test_evidence_leaves_provenance_unknown_without_a_sidecar(tmp_path: Path) -> None:
+    """No sidecar means unknown; a missing file is never read as real bars."""
+    context = stored_context(tmp_path)
+
+    result = persist_evidence_run(
+        context["store_root"],
+        tmp_path / "candidate.evidence.json",
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    assert result.evidence.source is None
+    assert result.evidence.synthetic is None
+    assert result.evidence.provenance_verified is None
+    assert result.provenance_verified is None
+    assert result.warnings == ()
+
+
+def test_evidence_rejects_a_stale_sidecar_and_records_a_warning(tmp_path: Path) -> None:
+    """A sidecar that no longer hashes the slice cannot label the dataset."""
+    context = stored_context(tmp_path)
+    store = ParquetStore(context["store_root"])
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="csv:stale",
+            synthetic=False,
+        ),
+    )
+    # Same row count and timestamp span, one changed close: only the checksum
+    # can catch that the sidecar no longer describes the stored bars.
+    changed = context["frame"].clone()
+    closes = changed["close"].to_list()
+    closes[10] = closes[10] + 1.0
+    changed = changed.with_columns(pl.Series("close", closes))
+    store.write(SYMBOL, TIMEFRAME, changed)
+
+    result = persist_evidence_run(
+        context["store_root"],
+        tmp_path / "candidate.evidence.json",
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    assert result.evidence.source is None
+    assert result.evidence.synthetic is None
+    assert result.evidence.provenance_verified is False
+    assert result.provenance_verified is False
+    assert len(result.warnings) == 1
+    assert "checksum" in result.warnings[0]
+
+
+@pytest.mark.skipif(
+    "provenance_verified" not in reproduce_module._EVIDENCE_KEYS,
+    reason="reproduce.py round-trip is owned by the F2 change; enable with the field",
+)
+def test_reproduce_keeps_verified_provenance(tmp_path: Path) -> None:
+    context = stored_context(tmp_path)
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="csv:round-trip",
+            synthetic=False,
+        ),
+    )
+    out = tmp_path / "candidate.evidence.json"
+    persisted = persist_evidence_run(
+        context["store_root"],
+        out,
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    rebuilt = reproduce_bundle(out, store_root=context["store_root"])
+
+    assert isinstance(rebuilt, CandidateEvidence)
+    assert rebuilt.source == persisted.evidence.source == "csv:round-trip"
+    assert rebuilt.synthetic is persisted.evidence.synthetic is False
+    assert rebuilt.provenance_verified is True
+    assert rebuilt.checksum == persisted.checksum
+
+
+def test_a_synthetic_sidecar_is_carried_and_promotion_refuses_it(tmp_path: Path) -> None:
+    context = stored_context(tmp_path)
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="synthetic:fixture",
+            synthetic=True,
+        ),
+    )
+
+    result = persist_evidence_run(
+        context["store_root"],
+        tmp_path / "candidate.evidence.json",
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    assert result.evidence.source == "synthetic:fixture"
+    assert result.evidence.synthetic is True
+    assert result.evidence.provenance_verified is True
+
+    decision = evaluate_promotion(result.evidence, PROMOTION_V1)
+    assert decision.accepted is False
+    assert "synthetic_data" in {rejection.code for rejection in decision.rejections}
 
 
 # --- overwrite refusal and atomicity ----------------------------------------
