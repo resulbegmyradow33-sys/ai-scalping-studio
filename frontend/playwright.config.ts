@@ -1,20 +1,26 @@
 import { defineConfig, devices } from "@playwright/test";
 
 /**
- * End-to-end smoke tests.
+ * End-to-end tests. Two projects, one server:
  *
- * The API is not managed here: run `make e2e-backend` first, which reseeds
- * `./e2e-data` with synthetic XAUUSD M1 and serves it on :8000. Playwright only
- * starts the Next dev server. The API allows CORS from :3000 only, so changing
- * `PLAYWRIGHT_PORT` also needs that origin on the backend.
+ * - `smoke` (default, `npm run e2e`) needs no backend. `pages.spec.ts` mocks
+ *   `/api/*` and the simulator socket in the browser.
+ * - `live-api` (`E2E_LIVE_API=1 npm run e2e`, or `npm run e2e:live`) runs
+ *   `simulator.spec.ts` against a real API. Run `make e2e-backend` first, which
+ *   reseeds `./e2e-data` with synthetic XAUUSD M1 and serves it on :8000.
+ *
+ * Playwright only starts the Next dev server. The API allows CORS from :3000
+ * only, so changing `PLAYWRIGHT_PORT` also needs that origin on the backend.
  */
 const PORT = process.env.PLAYWRIGHT_PORT ?? "3000";
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? `http://localhost:${PORT}`;
+const LIVE_API = process.env.E2E_LIVE_API === "1";
 
 export default defineConfig({
   testDir: "./e2e",
   fullyParallel: false,
-  // One worker: the simulator is process-wide state on the single API worker.
+  // One worker: the live simulator is process-wide state on the single API
+  // worker, and a single Next dev compiler avoids per-page cold-build races.
   workers: 1,
   retries: 0,
   timeout: 60_000,
@@ -24,7 +30,23 @@ export default defineConfig({
     baseURL: BASE_URL,
     trace: "retain-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "smoke",
+      testMatch: /pages\.spec\.ts/,
+      use: { ...devices["Desktop Chrome"] },
+    },
+    // Opt-in: the live suite needs `make e2e-backend` in another terminal.
+    ...(LIVE_API
+      ? [
+          {
+            name: "live-api",
+            testMatch: /simulator\.spec\.ts/,
+            use: { ...devices["Desktop Chrome"] },
+          },
+        ]
+      : []),
+  ],
   webServer: {
     command: `npm run dev -- -p ${PORT}`,
     url: BASE_URL,

@@ -52,7 +52,7 @@ def test_schema_is_idempotent_and_reports_search_backend(tmp_path: Path) -> None
     second = KnowledgeIndex(path)
     assert second.schema_version == SCHEMA_VERSION
     rows = second.connection.execute("SELECT version FROM schema_version").fetchall()
-    assert [int(row[0]) for row in rows] == [SCHEMA_VERSION]
+    assert [int(row[0]) for row in rows] == list(range(1, SCHEMA_VERSION + 1))
     assert second.connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
     second.close()
 

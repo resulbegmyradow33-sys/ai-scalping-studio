@@ -30,10 +30,10 @@ Implemented:
   the feature cache and paper-trades a validated DSL `StrategySpec` without a
   hand-written policy; see “Autonomous DSL runner”.
 - `scalping.paper.continuous.ContinuousPaperRunner` — advances the same session
-  as new bars are stored, refuses gaps and ordering defects, and exposes
-  `matured_outcomes` / `outcome_fingerprint` for the research loop. The
-  orchestrator's `paper.advance` job is the wired entry point; see
-  “Continuous operation”.
+  as new bars are stored, applies a configurable gap policy (default `strict`)
+  and refuses ordering defects, and exposes `matured_outcomes` /
+  `outcome_fingerprint` for the research loop. The orchestrator's
+  `paper.advance` job is the wired entry point; see “Continuous operation”.
 - Restart safety: reopening a ledger and resuming a session replays the
   recorded actions, verifies the account against the stored state and only then
   appends. Duplicate history is impossible by construction.
@@ -71,6 +71,7 @@ with `ON DELETE CASCADE`.
 | `positions` | Position lifecycle | session, order, side, lot, entry ts/price, SL, TP, status, close ts/price |
 | `trades` | Closed trades | session, side, entry ts/price, exit ts/price, lot, P&L, R multiple, exit reason |
 | `equity_curve` | Account marks | session, ts, balance, equity |
+| `paper_gaps` | Tolerated cadence gaps (append-only) | session, `from_ts`, `to_ts`, `missing_bars`, `policy`, `recorded_at` |
 
 Why `positions` exists although the brief lists the other six tables: fills
 alone cannot reconstruct SL/TP, and `resume` must return the state needed to
@@ -339,22 +340,77 @@ one-bar latency of continuous operation, not a skipped bar.
 
 ### Gap and ordering policy
 
+`ContinuousPaperRunner` takes a keyword-only `gap_policy`. It is a
+`GapPolicy` literal with three values; the default is `strict`, so every caller
+that predates the option keeps the historical refusal.
+
+| Policy | Missing instants inside the open session | Jump across a closed window | Audit |
+|---|---|---|---|
+| `strict` (default) | refused: `BarGapError`, nothing written | allowed; not a data gap | — |
+| `session_aware` | skipped; the next stored bar is decided | allowed; not recorded | `paper_gaps` |
+| `skip_with_report` | skipped, even for an unregistered symbol | allowed; not recorded | `paper_gaps` |
+
 Before anything is written:
 
 - the whole stored slice must be strictly increasing by `ts` and free of
-  duplicates, otherwise `BarOrderError`;
-- the range from the ledger cursor to the newest bar must contain one bar per
-  timeframe slot, otherwise `BarGapError`;
-- a jump is allowed only when the missing instants fall inside the symbol's
-  closed session window from the registry (a weekend or a daily close). A symbol
-  that is not in the registry gets the strict cadence check; a timeframe with no
-  known bar size is checked for ordering only.
+  duplicates, otherwise `BarOrderError`, under every policy;
+- every stored bar must lie exactly on the timeframe grid. An off-grid bar (a
+  half-slot shift, an extra bar between slots) is `BarGapError` under every
+  policy: a gap is a missing slot, not a shifted or extra bar;
+- the pending range from the ledger cursor to the newest bar is scanned for
+  missing instants. A jump whose missing instants **all** fall outside the
+  symbol's weekly session window from the registry (a weekend or a daily close)
+  holds no market bars, so it is allowed under every policy and is not
+  recorded. Only missing instants inside the open session are data gaps;
+- `session_aware` requires the symbol to be in the registry, because otherwise
+  "inside the session" cannot be decided; it refuses with `BarGapError` and
+  points at `skip_with_report`. `skip_with_report` treats every unaccounted
+  instant as missing, records it, and is the explicit opt-in for a symbol with
+  no session window;
+- a timeframe with no known bar size (not in the registry's `TIMEFRAMES`)
+  defines no slot. Only ordering is checked, so no gap can be detected and no
+  policy changes that.
 
-A gap is refused rather than skipped: silently filling it would change the
-bar-to-signal alignment and invent decisions on bars that were never stored.
-Backfill the missing partition and call `advance()` again. History before the
-cursor is not re-checked for cadence (it is already reflected in decisions), but
+A tolerated gap is skipped, never filled. The next stored bar is the next
+decision bar; feature lookbacks then span more wall-clock time across the gap,
+but no OHLCV, signal, order or equity mark is invented for a missing instant.
+Every tolerated gap is appended to `paper_gaps` as
+`(session_id, from_ts, to_ts, missing_bars, policy, recorded_at)`:
+
+- `from_ts` is the last stored bar before the gap, `to_ts` the next stored bar;
+- `missing_bars` counts expected **in-session** slots between them, never
+  weekend or daily-close slots;
+- the table is append-only (no update or delete path) and unique on
+  `(session_id, from_ts, to_ts)`. Re-running `advance()` after a crash is
+  idempotent: the same gap returns the same row, while a retry that disagrees
+  about `missing_bars` or `policy` raises `LedgerError` instead of rewriting
+  history.
+
+The gap row is written after the session row exists and before that call's
+signals. A crash in between leaves the gap audited and the retry appends the
+signals; a gap seen only during warm-up is recorded by the first call that
+creates the session, because the whole pending range is rescanned until the
+first signal exists. History before the cursor is not re-scanned for cadence
+(those bars are already reflected in decisions and in the recorded gap), but
 ordering is checked across the whole slice.
+
+The policy is part of the session identity: it is stored in the session config
+under `extra.gap_policy`, and resuming a session under a different policy raises
+`SessionMismatchError`. A session created before the field existed ran strict
+and resumes as strict.
+
+**Why `strict` stays the default.** A real gap means the feature lookbacks and
+the bar-to-signal alignment were computed with fewer bars than the session
+calendar implies. Only an operator who has verified that the feed genuinely did
+not print those bars should accept that loss in the trade history.
+`skip_with_report` and `session_aware` make the choice explicit and auditable;
+choosing them silently would turn missing data into an invisible assumption.
+The two real gaps recorded in PR #140 (M1 `2021-05-24T04:04` and H1
+`2009-05-25T17:00→22:00`) still fail closed by default and need the opt-in.
+
+The orchestrator's `paper.advance` handler constructs its runner without a
+policy argument, so a job still runs `strict`. Selecting a policy from the job
+payload is not wired in this slice; the runner API is.
 
 ### Matured outcomes
 
@@ -420,8 +476,10 @@ the default, because synthetic data must not become real market evidence.
   matrix for the stored slice and replays the recorded actions. This is exact
   and cheap for a paper session of a few thousand bars, but it is linear in
   session length; snapshot resume or session rollover is future work.
-- **No gap repair.** A gap is a refusal. The runner does not fetch, interpolate
-  or invent the missing bar.
+- **Skipping is not repair.** `session_aware`/`skip_with_report` skip a missing
+  instant and audit it; they never fetch, interpolate or invent the bar.
+  `strict` refuses. The missing data remains an ingest problem, and the audit
+  row is the record that the trade history ran without it.
 - **No champion selection.** `spec` is supplied by the caller; this module does
   not choose it and has no legacy fallback.
 - **No real money.** No network client, credentials or order routing exists in
