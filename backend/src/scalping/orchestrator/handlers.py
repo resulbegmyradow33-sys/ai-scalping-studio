@@ -99,9 +99,10 @@ from scalping.paper.continuous import (
     BarOrderError,
     ContinuousError,
     ContinuousPaperRunner,
+    GapPolicy,
     SessionMismatchError,
 )
-from scalping.paper.ledger import PaperLedger, PositionRecord
+from scalping.paper.ledger import GAP_POLICIES, PaperLedger, PositionRecord
 from scalping.paper.runner import ResumeError
 from scalping.registry.gate import GateCriteria
 
@@ -630,14 +631,21 @@ class PaperAdvanceRequest:
     symbol: str
     timeframe: str
     bars: int
+    gap_policy: GapPolicy = "strict"
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, Any]) -> PaperAdvanceRequest:
-        _strict(payload, frozenset({"symbol", "timeframe", "bars"}))
+        _strict(payload, frozenset({"symbol", "timeframe", "bars", "gap_policy"}))
+        gap_policy = _optional(payload, "gap_policy", "strict")
+        if not isinstance(gap_policy, str) or gap_policy not in GAP_POLICIES:
+            raise PayloadError(
+                f"gap_policy must be one of {sorted(GAP_POLICIES)}, got {gap_policy!r}"
+            )
         return cls(
             symbol=_token(_required(payload, "symbol"), "symbol"),
             timeframe=_token(_required(payload, "timeframe"), "timeframe"),
             bars=_integer(_required(payload, "bars"), "bars", minimum=1, maximum=MAX_PAPER_BARS),
+            gap_policy=gap_policy,  # type: ignore[arg-type]
         )
 
 
@@ -1014,6 +1022,7 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
                     store_root=context.data_root,
                     cache=context.use_feature_cache,
                     scope=scope,
+                    gap_policy=request.gap_policy,
                 )
             except ValueError as exc:
                 raise PermanentJobError(
@@ -1054,6 +1063,10 @@ def _paper_advance_handler(context: HandlerContext) -> Handler:
                 "candidate_id": champion.candidate_id,
                 "promotion_id": champion.promotion_id,
                 "bars_requested": request.bars,
+                "gap_policy": advance.gap_policy,
+                "gaps_skipped": advance.gaps_skipped,
+                "missing_bars": advance.missing_bars,
+                "gaps_recorded": advance.gaps_recorded,
                 "bars_advanced": advance.new_bars,
                 "bars_this_call": advance.new_bars,
                 "new_signals": advance.new_signals,
