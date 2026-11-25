@@ -395,10 +395,11 @@ budget and seed.
 ### 3.3 Controls
 
 Controls are persisted rows in the queue's `state` table and are read on every
-iteration, so they survive a restart. The current build exposes audited local
-owner controls through `GET` and `POST /api/orchestrator/control`; these
-requests change persisted flags only. They do not start/stop the daemon, enqueue
-jobs, cancel jobs, or promote a strategy.
+iteration, so they survive a restart. Open PR #175 adds audited local owner
+controls through `GET` and `POST /api/orchestrator/control`. The commands
+below apply after #175 is merged (or while testing its branch). These requests
+change persisted flags only: they do not start/stop the daemon, enqueue jobs,
+cancel jobs, or promote a strategy.
 
 Start the API on loopback (the default):
 
@@ -540,8 +541,9 @@ do not leave an unattended run on it.
 6. **Fail closed.** No champion, unreadable champion, invalid spec, missing
    evidence or missing archive means NO TRADE with a reason. Never add a fallback
    to the legacy handwritten rule in the autonomous path. The interactive API
-   replay has a separate migration-only M1 momentum fallback enabled by default;
-   disable it explicitly when testing fail-closed UI behavior:
+   replay has a separate migration-only M1 momentum fallback enabled by default.
+   Open PR #177 adds an explicit switch for fail-closed UI testing; after it is
+   merged, use:
 
    ```bash
    uv run --project backend python -m scalping.cli serve --root data --no-legacy-fallback
@@ -573,8 +575,8 @@ do not leave an unattended run on it.
 | `orchestrator run --once` | one tick | `status`, `tick` |
 | `orchestrator run --forever` | supervised loop | `started` / `stopped` / `failed` + `daemon` |
 | `GET /api/autonomy/status` | read-only dashboard | `paper`, `orchestrator`, `champions`, `discoveries`, `data` |
-| `GET /api/orchestrator/control` | read persisted owner controls | `configured`, `readable`, `paused`, `safe_mode`, `research_disabled`, `last_change` |
-| `POST /api/orchestrator/control` | audited local control transition | same state fields; `409` unavailable DB, `422` invalid request |
+| `GET /api/orchestrator/control` (PR #175) | read persisted owner controls | `configured`, `readable`, `paused`, `safe_mode`, `research_disabled`, `last_change` |
+| `POST /api/orchestrator/control` (PR #175) | audited local control transition | same state fields; `409` unavailable DB, `422` invalid request |
 | `GET /api/autonomy/jobs` | queue window | `configured`, `readable`, `items[]`, `total` |
 | `GET /api/paper/sessions` | ledger sessions | `items[]`, `total`, `limit`, `offset` |
 
