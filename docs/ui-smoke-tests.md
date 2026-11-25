@@ -1,8 +1,8 @@
 # UI smoke tests (Playwright)
 
-`frontend/e2e/pages.spec.ts` is a browser smoke suite for the eight top-level
-screens: `/`, `/data`, `/intelligence`, `/training`, `/performance`, `/paper`,
-`/labs/ml` and `/autonomy`.
+`frontend/e2e/pages.spec.ts` is a browser smoke suite for the nine top-level
+screens: `/`, `/data`, `/intelligence`, `/training`, `/performance`,
+`/backtesting`, `/paper`, `/labs/ml` and `/autonomy`.
 
 It runs **without a backend**. Every `/api/*` call is answered by a fixture in
 the spec and the simulator WebSocket is routed without a server, so results do
