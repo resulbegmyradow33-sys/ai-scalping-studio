@@ -20,6 +20,7 @@ interface Call {
   path: string;
   search: string;
   method: string;
+  body?: string;
 }
 
 type Handler = () => Response | Promise<Response>;
@@ -185,6 +186,7 @@ beforeEach(() => {
         path: url.pathname,
         search: url.search,
         method: init?.method ?? "GET",
+        body: typeof init?.body === "string" ? init.body : undefined,
       });
       const handler = routes[key];
       if (handler === undefined) return json({ detail: `no route ${key}` }, 404);
@@ -565,6 +567,216 @@ describe("PaperTradingPage", () => {
       await vi.advanceTimersByTimeAsync(30_000);
     });
     expect(detailCalls).toBe(settled);
+  });
+
+  it("draws the equity window with a text alternative and a window summary", async () => {
+    routeSessions([sessionItem()]);
+    routeDetail(RUNNING, {
+      equity: [
+        { ts: "2026-11-24T08:05:00Z", balance: 10000, equity: 10000 },
+        { ts: "2026-11-24T08:35:00Z", balance: 10020, equity: 10010 },
+        { ts: "2026-11-24T09:05:00Z", balance: 10040, equity: 10030 },
+      ],
+    });
+
+    renderPage();
+    await flush();
+
+    const figure = screen.getByTestId("paper-equity-figure");
+    const chart = within(figure).getByRole("img", { name: /Özkaynak eğrisi/ });
+    expect(chart.querySelector("polyline")?.getAttribute("points")?.trim().split(/\s+/)).toHaveLength(
+      3,
+    );
+    // The svg title is the text alternative and names the window's change.
+    expect(chart).toHaveAccessibleName(/pencerede değişim \+\$30,00/);
+
+    expect(screen.getByTestId("paper-equity-first")).toHaveTextContent("$10.000,00");
+    expect(screen.getByTestId("paper-equity-last")).toHaveTextContent("$10.030,00");
+    expect(screen.getByTestId("paper-equity-change")).toHaveTextContent("+$30,00");
+    expect(screen.getByTestId("paper-equity-change-pct")).toHaveTextContent("+%0,30");
+    expect(screen.getByTestId("paper-equity-points")).toHaveTextContent("3");
+
+    // The window delta is labelled as a delta, not as the account's total P&L.
+    expect(figure).toHaveTextContent("toplam P&L değildir");
+  });
+
+  it("shows an explicit no-chart state when the ledger has no equity marks", async () => {
+    routeSessions([sessionItem()]);
+    routeDetail(RUNNING, { equity: [] });
+
+    renderPage();
+    await flush();
+
+    const figure = screen.getByTestId("paper-equity-figure");
+    expect(figure.querySelector("svg")).toBeNull();
+    expect(screen.getByTestId("paper-equity-chart-empty")).toHaveTextContent("eğri çizilmez");
+    expect(screen.queryByTestId("paper-equity-summary")).toBeNull();
+    // No first/last/change value is invented for an empty curve.
+    expect(figure.textContent).not.toContain("$");
+  });
+
+  it("refuses to draw marks whose timestamp cannot be parsed", async () => {
+    routeSessions([sessionItem()]);
+    routeDetail(RUNNING, {
+      equity: [{ ts: "not-a-timestamp", balance: 10000, equity: 10010 }],
+    });
+
+    renderPage();
+    await flush();
+
+    const figure = screen.getByTestId("paper-equity-figure");
+    expect(figure.querySelector("svg")).toBeNull();
+    expect(screen.getByTestId("paper-equity-chart-invalid")).toHaveTextContent(
+      "eğri çizilmedi",
+    );
+    expect(screen.queryByTestId("paper-equity-summary")).toBeNull();
+    expect(figure.textContent).not.toContain("$");
+  });
+
+  it("records a session from the form, refreshes the list and focuses the notice", async () => {
+    const sessions: PaperSessionItem[] = [];
+    routes["/api/paper/sessions?limit=20&offset=0"] = () => json(page(sessions));
+    routes["/api/paper/sessions"] = () => {
+      sessions.push(sessionItem({ session_id: "new-session-1" }));
+      return json(
+        { session_id: "new-session-1", status: "running", started_at: STARTED },
+        201,
+      );
+    };
+    routeDetail("new-session-1");
+
+    renderPage();
+    await flush();
+
+    expect(screen.getByTestId("paper-sessions-empty")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/Sembol/), { target: { value: " XAUUSD " } });
+    fireEvent.change(screen.getByLabelText(/Zaman dilimi/), { target: { value: "M15" } });
+    fireEvent.change(screen.getByLabelText(/Strateji/), { target: { value: "manual" } });
+    fireEvent.change(screen.getByLabelText(/Yapılandırma/), {
+      target: { value: '{"note":"x"}' },
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Oturumu kaydet" }));
+    });
+    await flush();
+
+    const post = calls.find(
+      (call) => call.method === "POST" && call.path === "/api/paper/sessions",
+    );
+    expect(post).toBeDefined();
+    expect(JSON.parse(post?.body ?? "{}")).toEqual({
+      symbol: "XAUUSD",
+      timeframe: "M15",
+      strategy: "manual",
+      // An empty field is `null` on the wire, not an invented version string.
+      model_version: null,
+      config: { note: "x" },
+    });
+
+    // The list is re-read after the write, and the 201 session is selected.
+    const listGets = calls.filter(
+      (call) => call.method === "GET" && call.path === "/api/paper/sessions",
+    );
+    expect(listGets).toHaveLength(2);
+    expect(screen.getByTestId("paper-detail-status")).toHaveTextContent("Çalışıyor");
+
+    const notice = screen.getByTestId("paper-start-notice");
+    expect(notice).toHaveTextContent("new-session-1");
+    expect(notice).toHaveTextContent("yalnızca gönderilen alanları kaydetti");
+    // Focus lands on the result, not on <body> or a stale control.
+    expect(notice).toHaveFocus();
+
+    // The form says the API stores the submission and picks no champion.
+    expect(screen.getByTestId("paper-start-form")).toHaveTextContent("şampiyon seçilmez");
+  });
+
+  it("blocks an invalid start locally, announces it and focuses the first invalid field", async () => {
+    routeSessions([]);
+
+    renderPage();
+    await flush();
+
+    fireEvent.change(screen.getByLabelText(/Sembol/), { target: { value: "../etc" } });
+    fireEvent.change(screen.getByLabelText(/Yapılandırma/), { target: { value: "{oops" } });
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Oturumu kaydet" }));
+    });
+    await flush();
+
+    expect(calls.some((call) => call.method === "POST")).toBe(false);
+    expect(screen.getByTestId("paper-start-errors")).toHaveTextContent("3 alan");
+    expect(document.getElementById("paper-start-symbol-error")).toHaveTextContent(
+      "Sembol harf veya rakamla başlamalı",
+    );
+    expect(document.getElementById("paper-start-strategy-error")).toHaveTextContent(
+      "Strateji gerekli",
+    );
+    expect(document.getElementById("paper-start-config-error")).toHaveTextContent(
+      "geçerli JSON değil",
+    );
+
+    const symbol = screen.getByLabelText(/Sembol/);
+    expect(symbol).toHaveAttribute("aria-invalid", "true");
+    expect(symbol).toHaveFocus();
+  });
+
+  it("surfaces a 409 from the start endpoint without pretending a session exists", async () => {
+    routeSessions([]);
+    routes["/api/paper/sessions"] = () =>
+      json({ detail: "duplicate paper session" }, 409);
+
+    renderPage();
+    await flush();
+
+    fireEvent.change(screen.getByLabelText(/Strateji/), { target: { value: "manual" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Oturumu kaydet" }));
+    });
+    await flush();
+
+    const conflict = screen.getByTestId("paper-start-conflict");
+    expect(conflict).toHaveTextContent("Çakışma (409)");
+    expect(conflict).toHaveTextContent("duplicate paper session");
+    expect(screen.queryByTestId("paper-start-notice")).toBeNull();
+    // Nothing was selected or refreshed as if the write had succeeded.
+    expect(screen.getByTestId("paper-sessions-empty")).toBeInTheDocument();
+    expect(
+      calls.filter((call) => call.method === "GET" && call.path === "/api/paper/sessions"),
+    ).toHaveLength(1);
+  });
+
+  it("surfaces the server's 422 message instead of a generic failure", async () => {
+    routeSessions([]);
+    routes["/api/paper/sessions"] = () =>
+      json(
+        {
+          detail: [
+            {
+              loc: ["body", "timeframe"],
+              msg: "Input should be 'M1', 'M5', 'M15', 'M30', 'H1', 'H4' or 'D1'",
+              type: "literal_error",
+            },
+          ],
+        },
+        422,
+      );
+
+    renderPage();
+    await flush();
+
+    fireEvent.change(screen.getByLabelText(/Strateji/), { target: { value: "manual" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Oturumu kaydet" }));
+    });
+    await flush();
+
+    const error = screen.getByTestId("paper-start-error");
+    expect(error).toHaveTextContent("422");
+    expect(error).toHaveTextContent("Input should be");
+    expect(screen.queryByTestId("paper-start-notice")).toBeNull();
   });
 });
 
