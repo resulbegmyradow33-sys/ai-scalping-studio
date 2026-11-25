@@ -121,6 +121,15 @@ class AccountState:
     consecutive_losses: int = 0
     paused_until: datetime | None = None
     spread_points: float | None = None
+    #: Slippage the next entry would pay, in contract points (``ATR *
+    #: slippage_atr_frac / point``). ``None`` means it could not be estimated,
+    #: which skips the cap instead of inventing a value.
+    slippage_points: float | None = None
+    #: ``False`` when the decision bar's own data is unusable (missing/NaN ATR
+    #: or spread, or a timestamp gap beyond the frame's cadence). The engine
+    #: reads it only under ``RiskConfig.data_quality_block``; the default
+    #: ``True`` keeps every pre-existing caller and snapshot unchanged.
+    data_quality_ok: bool = True
 
 
 # --- Static configuration dataclasses ---------------------------------------
@@ -158,6 +167,8 @@ class RiskConfig:
     max_spread_points: float = 0.0  # entry spread cap in contract points (0 = off)
     min_equity_frac: float = 0.0  # emergency stop below this fraction of initial (0 = off)
     pause_bars: int = 0  # bars a tripped switch stays latched (0 = condition only)
+    max_slippage_points: float = 0.0  # estimated entry slippage cap, contract points (0 = off)
+    data_quality_block: bool = False  # block entries on unusable bar data (default off)
 
 
 @dataclass(frozen=True, slots=True)
