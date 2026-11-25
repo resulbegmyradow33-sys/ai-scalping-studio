@@ -73,6 +73,7 @@ from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
 from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.anomaly import AnomalySpec, detect_anomalies
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
@@ -501,6 +502,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         seed=args.seed,
         evaluate_test=args.evaluate_test,
         include_flat=args.include_flat,
+        incremental_chunks=args.incremental_chunks,
     )
     result = train_classifier(
         features,
@@ -514,6 +516,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         {
             "model": args.model,
             "dataset_id": result.dataset_id,
+            "incremental_chunks": spec.incremental_chunks,
             "train": result.split_counts["train"],
             "validation": result.split_counts["validation"],
             "test": result.split_counts["test"],
@@ -563,6 +566,51 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
         config=config,
     )
     payload = result.to_dict()
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
+
+
+def _cmd_ml_anomaly(args: argparse.Namespace) -> None:
+    """Fit an isolation forest on train rows and score validation/test rows.
+
+    The output is a diagnostic: score distribution, training-quantile
+    threshold, anomaly rate and an optional AUC against a training-derived
+    "large move" label. Nothing here is a trading signal or a candidate.
+    """
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = _features_for(args, frame, args.symbol, args.timeframe)
+    groups = (
+        DEFAULT_GROUPS
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
+    )
+    splits = tuple(part.strip() for part in args.splits.split(",") if part.strip())
+    spec = AnomalySpec(
+        horizon=args.horizon,
+        groups=groups,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        seed=args.seed,
+        quantile=args.quantile,
+    )
+    report = detect_anomalies(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        spec=spec,
+        splits=splits,
+        magnitude_quantile=None if args.no_magnitude_labels else args.magnitude_quantile,
+    )
+    payload = report.to_dict()
     if args.out is not None:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1317,6 +1365,12 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep exact-zero returns as a third class (usually harmful)",
     )
+    ml_train.add_argument(
+        "--incremental-chunks",
+        type=int,
+        default=0,
+        help="0 = one batch fit; N > 1 = N ordered partial_fit chunks (sgd only)",
+    )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")
     ml_train.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
@@ -1351,6 +1405,45 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_cv.add_argument("--out", default=None, help="optional full report path")
     ml_cv.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_cv.set_defaults(handler=_cmd_ml_cv)
+
+    ml_anomaly = ml_commands.add_parser(
+        "anomaly", help="score feature rows with an isolation forest (not a classifier)"
+    )
+    ml_anomaly.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    ml_anomaly.add_argument("--timeframe", default="H1")
+    ml_anomaly.add_argument("--groups", default="all")
+    ml_anomaly.add_argument("--horizon", type=int, default=5)
+    ml_anomaly.add_argument("--train-fraction", type=float, default=0.70)
+    ml_anomaly.add_argument("--validation-fraction", type=float, default=0.15)
+    ml_anomaly.add_argument("--purge", type=int, default=5)
+    ml_anomaly.add_argument("--embargo", type=int, default=5)
+    ml_anomaly.add_argument("--seed", type=int, default=0)
+    ml_anomaly.add_argument(
+        "--quantile",
+        type=float,
+        default=0.99,
+        help="training-score quantile used as the anomaly threshold",
+    )
+    ml_anomaly.add_argument(
+        "--splits",
+        default="validation",
+        help="comma-separated splits to score; test is available but not read by default",
+    )
+    ml_anomaly.add_argument(
+        "--magnitude-quantile",
+        type=float,
+        default=0.9,
+        help="training |return| quantile for the optional large-move label",
+    )
+    ml_anomaly.add_argument(
+        "--no-magnitude-labels",
+        action="store_true",
+        help="report scores without an AUC separation number",
+    )
+    ml_anomaly.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_anomaly.add_argument("--out", default=None, help="optional full report path")
+    ml_anomaly.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    ml_anomaly.set_defaults(handler=_cmd_ml_anomaly)
 
     ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
     ml_evaluate.add_argument("--run", required=True, help="runs/ml/<run> directory")

@@ -22,6 +22,12 @@ project does not yet follow strict semantic versioning.
   contributor guide, team workflow, labels, milestones and GitHub setup script.
 - Local `pre-push` guard for the private GitHub Free plan, plus `make hooks`.
 - Calmer Dependabot policy: major versions ignored, minor/patch grouped.
+- Incremental SGD path (`ml train --incremental-chunks`, `partial_fit` helper)
+  with deterministic chunk order and a documented batch-fit difference.
+- Isolation-forest anomaly scoring (`ml anomaly`, `AnomalyReport`) with a
+  training-quantile threshold and no promotion path.
+- `feature_importances` accessor for tree/LightGBM/XGBoost models; `None` for
+  models without native importances.
 
 ## 2026-11-22
 
