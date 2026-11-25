@@ -249,6 +249,11 @@ def make_evidence(
         "aggregate": summary,
         "checksum": "",
         "created_at": "2026-11-24T00:00:00+00:00",
+        # A policy-arithmetic fixture: it claims a real dataset explicitly so
+        # the provenance gate is not what the assertion is about. A test that
+        # exercises that gate overrides these.
+        "source": "test:fixture",
+        "synthetic": False,
     }
     values.update(overrides)
     bundle = CandidateEvidence(**values)
@@ -360,6 +365,8 @@ def locked_section(evidence: CandidateEvidence, policy: Any) -> LockedOOSEvidenc
         dataset_checksum=evidence.dataset_checksum,
         symbol=evidence.symbol,
         timeframe=evidence.timeframe,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
         spec_hash=evidence.spec_hash,
         spec_version=evidence.spec_version,
         complexity=evidence.complexity,
@@ -466,9 +473,7 @@ def test_a_locked_section_for_another_bundle_is_rejected() -> None:
         ({"complexity": 999}, "max_complexity"),
     ],
 )
-def test_bad_locked_metrics_or_geometry_are_rejected(
-    changes: dict[str, Any], code: str
-) -> None:
+def test_bad_locked_metrics_or_geometry_are_rejected(changes: dict[str, Any], code: str) -> None:
     policy = replace(TEST_POLICY, policy_id="locked-test", require_locked_oos=True)
     base = make_evidence()
     section = reseal_locked(locked_section(base, policy), **changes)
@@ -498,9 +503,7 @@ def test_catastrophic_locked_stress_is_rejected() -> None:
     policy = replace(TEST_POLICY, policy_id="locked-test", require_locked_oos=True)
     base = make_evidence()
     section = locked_section(base, policy)
-    bad_stress = tuple(
-        replace(row, expectancy_r=-5.0, profit_factor=0.1) for row in section.stress
-    )
+    bad_stress = tuple(replace(row, expectancy_r=-5.0, profit_factor=0.1) for row in section.stress)
     section = reseal_locked(section, stress=bad_stress)
 
     decision = evaluate_promotion(locked_bundle(section), policy)

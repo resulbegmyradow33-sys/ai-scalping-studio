@@ -166,6 +166,12 @@ class PromotionPolicy:
     base expectancy a stressed rerun may lose: at ``2.0`` a stressed fold must
     keep at least half of the base expectancy, and every required stress must
     also stay profitable with a profit factor above 1.
+
+    ``allow_synthetic`` is ``False`` in every production policy. The default
+    gate refuses a bundle whose provenance is unknown and a bundle whose data is
+    synthetic; only an explicit ``synthetic is False`` passes. A non-production
+    demo policy may set it ``True`` to exercise the pipeline on a synthetic
+    tape, but a registered production policy can never do so.
     """
 
     policy_id: str
@@ -187,6 +193,7 @@ class PromotionPolicy:
     max_stress_degradation: float = 2.0
     require_locked_oos: bool = True
     max_selection_fold_share: float = 0.4
+    allow_synthetic: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.policy_id, str):
@@ -272,6 +279,8 @@ class PromotionPolicy:
 
         if not isinstance(self.require_locked_oos, bool):
             raise TypeError("require_locked_oos must be a bool")
+        if not isinstance(self.allow_synthetic, bool):
+            raise TypeError("allow_synthetic must be a bool")
 
         confidence = self.min_bootstrap_confidence
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
@@ -314,6 +323,8 @@ class PromotionPolicy:
                 raise ValueError("the production policy cannot disable require_locked_oos")
             if float(share) < 0.05:
                 raise ValueError("the production policy must keep max_selection_fold_share >= 0.05")
+            if self.allow_synthetic:
+                raise ValueError("the production policy cannot allow synthetic data")
 
     @property
     def digest(self) -> str:
@@ -347,7 +358,9 @@ class PromotionPolicy:
 #:   base expectancy;
 #: * a locked final OOS section — **nothing promotes until the holdout slice
 #:   attaches it**, by design;
-#: * +0.05R over the champion — a new champion must improve, not tie.
+#: * +0.05R over the champion — a new champion must improve, not tie;
+#: * explicit real-data provenance — an unknown or synthetic dataset is refused
+#:   with ``provenance_unknown`` or ``synthetic_data``.
 PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     policy_id="promotion-v1",
     version=1,
@@ -368,6 +381,7 @@ PROMOTION_V1: Final[PromotionPolicy] = PromotionPolicy(
     max_stress_degradation=2.0,
     require_locked_oos=True,
     max_selection_fold_share=0.4,
+    allow_synthetic=False,
 )
 
 _PRODUCTION_POLICY_REGISTRY: dict[str, PromotionPolicy] = {PROMOTION_V1.digest: PROMOTION_V1}
@@ -534,6 +548,8 @@ class PromotionDecision:
     dataset_checksum: str | None
     settings_digest: str | None
     code_version: str | None
+    source: str | None = None
+    synthetic: bool | None = None
     observed: Mapping[str, Any] = field(default_factory=dict, compare=False)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
     _seal: str = field(default="", repr=False, compare=False)
@@ -558,6 +574,12 @@ class PromotionDecision:
             )
         if self.policy_id == MANUAL_OVERRIDE_POLICY_ID:
             raise ValueError("a promotion decision cannot claim the manual-override policy")
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("source must be a non-empty str or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError("synthetic must be a bool or None")
 
     def _content(self) -> str:
         return canonical_json(self.to_dict())
@@ -593,6 +615,8 @@ class PromotionDecision:
             "dataset_checksum": self.dataset_checksum,
             "settings_digest": self.settings_digest,
             "code_version": self.code_version,
+            "source": self.source,
+            "synthetic": self.synthetic,
             "observed": dict(self.observed),
             "created_at": self.created_at,
         }
@@ -802,6 +826,8 @@ def _locked_oos(
         (section.dataset_checksum, evidence.dataset_checksum, "dataset_checksum"),
         (section.symbol, evidence.symbol, "symbol"),
         (section.timeframe, evidence.timeframe, "timeframe"),
+        (section.source, evidence.source, "source"),
+        (section.synthetic, evidence.synthetic, "synthetic"),
         (section.spec_hash, evidence.spec_hash, "spec_hash"),
         (section.spec_version, evidence.spec_version, "spec_version"),
         (section.code_version, evidence.code_version, "code_version"),
@@ -1157,6 +1183,40 @@ def _check_metric_thresholds(
         )
 
 
+def _check_provenance(
+    evidence: CandidateEvidence,
+    policy: PromotionPolicy,
+    rejections: list[PromotionRejection],
+    observed: dict[str, Any],
+) -> None:
+    """Fail closed on unknown or synthetic data before any metric is read.
+
+    The only value a production policy accepts is an explicit ``False``. Missing
+    provenance is ``provenance_unknown``, never treated as real. A policy with
+    ``allow_synthetic`` may accept ``True`` only when it is not a registered
+    production policy, so the demo path exists without weakening the real one.
+    """
+    observed["source"] = evidence.source
+    observed["synthetic"] = evidence.synthetic
+    if evidence.synthetic is None:
+        _reject(
+            rejections,
+            "provenance_unknown",
+            "the bundle does not record whether its dataset is synthetic",
+            observed="unknown",
+            required="synthetic is false (or an explicit demo policy)",
+        )
+        return
+    if evidence.synthetic and (not policy.allow_synthetic or is_production_policy(policy)):
+        _reject(
+            rejections,
+            "synthetic_data",
+            "the bundle was measured on synthetic data",
+            observed=True,
+            required="synthetic is false",
+        )
+
+
 def _check_bundle(
     evidence: CandidateEvidence,
     policy: PromotionPolicy,
@@ -1166,6 +1226,7 @@ def _check_bundle(
 ) -> None:
     """Identity, structure, sample and threshold checks on the candidate alone."""
     _verify(evidence, rejections, observed, expected_identity)
+    _check_provenance(evidence, policy, rejections, observed)
 
     if not isinstance(evidence.splits, SplitBoundaries):
         _reject(
@@ -1665,6 +1726,17 @@ def _check_champion(
             observed=evidence.dataset_checksum[:12],
             required=champion_evidence.dataset_checksum[:12],
         )
+    if (
+        champion_evidence.source != evidence.source
+        or champion_evidence.synthetic != evidence.synthetic
+    ):
+        _reject(
+            rejections,
+            "champion_provenance_mismatch",
+            "candidate and champion were measured on data with different provenance",
+            observed=f"{evidence.source}:{evidence.synthetic}",
+            required=f"{champion_evidence.source}:{champion_evidence.synthetic}",
+        )
     if champion_evidence.settings_digest != evidence.settings_digest:
         _reject(
             rejections,
@@ -1840,6 +1912,8 @@ def evaluate_promotion(
             dataset_checksum=None,
             settings_digest=None,
             code_version=None,
+            source=None,
+            synthetic=None,
             observed=observed,
         )
 
@@ -1868,6 +1942,8 @@ def evaluate_promotion(
         dataset_checksum=evidence.dataset_checksum or None,
         settings_digest=evidence.settings_digest or None,
         code_version=evidence.code_version or None,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
         observed=observed,
     )
 

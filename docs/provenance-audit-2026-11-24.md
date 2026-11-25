@@ -12,6 +12,34 @@ Method: read the producer and consumer of each hop, cite the exact lines, and
 distinguish "carried", "re-derived" and "absent". A field that is absent is
 reported as unknown, never as `False`.
 
+## 0. Status update — 2026-11-25 (`feat/prov2`)
+
+The largest gap, **synthetic or unknown data reaching promotion**, is closed on
+the dataset → evidence → holdout → promotion path:
+
+- `DatasetManifest` and `build_dataset` carry `source`/`synthetic`; a manifest
+  written before this change decodes them as `None` (unknown), never `False`.
+- `EvidenceConfig`, `CandidateEvidence` and `LockedOOSEvidence` carry both
+  fields, they are part of the bundle checksum, and the schema version is 4.
+- `PromotionPolicy.allow_synthetic` defaults to `False`. `PROMOTION_V1` refuses
+  `synthetic is None` with `provenance_unknown` and `synthetic is True` with
+  `synthetic_data`; only an explicit `False` passes. A **non-production** policy
+  may set `allow_synthetic=True`; the production policy cannot be constructed
+  with it, and a registered policy still refuses `True`.
+- The holdout ledger seals `source`/`synthetic` with the dataset identity, the
+  result repeats them, and attaching a result with different provenance fails
+  with `stale_synthetic`/`stale_source`.
+- `discovery reproduce` re-reads the manifest provenance, rebuilds the bundle
+  with it and refuses a contradiction with `provenance_mismatch`.
+- The acceptance harness now labels its synthetic dataset
+  (`source="acceptance:synthetic"`, `synthetic=True`) and uses an explicit
+  non-production demo policy; `PROMOTION_V1` still rejects the attached bundle.
+
+Still open from this audit: G3 (autonomous paper runner), G4–G13 and the ML/NN
+and orchestrator handlers. Those paths now fail closed at promotion because
+their bundles carry unknown provenance, but they still do not record the
+provenance they could know.
+
 ## 1. Verdict
 
 Provenance is solid inside two islands and broken between them.

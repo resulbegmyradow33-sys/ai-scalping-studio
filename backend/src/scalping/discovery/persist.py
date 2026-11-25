@@ -157,6 +157,8 @@ class PersistedRun:
             "spec": str(self.spec_path),
             "evidence_checksum": self.checksum,
             "schema_version": self.evidence.schema_version,
+            "source": self.evidence.source,
+            "synthetic": self.evidence.synthetic,
             "folds": len(self.evidence.folds),
             "validation_end_row": self.evidence.splits.validation_end_row,
             "test_start_row": self.evidence.splits.test_start_row,
@@ -592,6 +594,8 @@ def persist_evidence_run(
     dataset_embargo_bars: int = 0,
     use_cache: bool = True,
     created_at: datetime | None = None,
+    source: str | None = None,
+    synthetic: bool | None = None,
 ) -> PersistedRun:
     """Build one experiment from stored bars and persist the artifact and bundle.
 
@@ -602,6 +606,10 @@ def persist_evidence_run(
     :class:`~scalping.discovery.evidence.EvidenceConfig` naming the current code
     version and the spec's structural cost; a supplied config must agree on
     symbol and timeframe.
+
+    ``source``/``synthetic`` are the store provenance, usually read from the
+    sidecar by the caller. They are written into the dataset manifest and the
+    evidence identity; omitted values stay unknown instead of becoming real.
 
     The evidence stops at the dataset's validation end; the artifact keeps the
     test rows because the dataset checksum covers them, but no fold, metric or
@@ -646,6 +654,8 @@ def persist_evidence_run(
             validation_fraction=validation_fraction,
             purge_bars=dataset_purge_bars,
             embargo_bars=dataset_embargo_bars,
+            source=source,
+            synthetic=synthetic,
         )
     except ValueError as exc:
         raise PersistError(
@@ -659,6 +669,8 @@ def persist_evidence_run(
             symbol=symbol,
             timeframe=timeframe,
             complexity=complexity,
+            source=source,
+            synthetic=synthetic,
         )
 
     artifact_dir = save_dataset_artifact(store_root, bundle, features)

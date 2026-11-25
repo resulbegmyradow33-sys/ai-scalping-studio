@@ -55,7 +55,14 @@ class SplitRange:
 
 @dataclass(frozen=True, slots=True)
 class DatasetManifest:
-    """Everything needed to reproduce and compare a dataset build."""
+    """Everything needed to reproduce and compare a dataset build.
+
+    ``source`` and ``synthetic`` are the sidecar provenance of the bars the
+    dataset was cut from. They are defaults so an older manifest JSON without
+    them still decodes, but a missing field means **unknown** (``None``), never
+    an invented ``False``. A dataset built from an unlabelled store therefore
+    stays unprovenanced through every later hop.
+    """
 
     dataset_id: str
     symbol: str
@@ -72,6 +79,18 @@ class DatasetManifest:
     checksum: str
     created_at: str
     notes: str = ""
+    source: str | None = None
+    synthetic: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("source must be a non-empty str or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError(
+                f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +111,8 @@ class DatasetManifest:
             "checksum": self.checksum,
             "created_at": self.created_at,
             "notes": self.notes,
+            "source": self.source,
+            "synthetic": self.synthetic,
         }
 
 
@@ -137,6 +158,8 @@ def build_dataset(
     embargo_bars: int = 0,
     notes: str = "",
     capabilities: Capabilities | None = None,
+    source: str | None = None,
+    synthetic: bool | None = None,
 ) -> DatasetBundle:
     """Cut a causal feature frame into train/validation/test with purge/embargo.
 
@@ -146,6 +169,11 @@ def build_dataset(
     input the source cannot provide (for example signed flow without tick
     volumes). ``None`` keeps the historical behaviour for callers that only have
     the feature matrix.
+
+    ``source`` and ``synthetic`` come from the store sidecar that produced the
+    bars. They are recorded verbatim and are **not** inferred: a caller that
+    does not know the provenance leaves both ``None`` so the manifest says
+    unknown rather than real.
     """
     if horizon < 1:
         raise ValueError("horizon must be >= 1")
@@ -230,6 +258,8 @@ def build_dataset(
         checksum=digest,
         created_at=datetime.now(UTC).isoformat(timespec="seconds"),
         notes=notes,
+        source=source,
+        synthetic=synthetic,
     )
     return DatasetBundle(
         X=X,
