@@ -169,6 +169,41 @@ def test_runner_flag_off_fails_closed_without_a_card(tmp_path, seed_data) -> Non
     assert body["legacy_fallback"] is False
 
 
+def test_runner_flag_off_does_not_fall_back_from_an_unusable_card(
+    tmp_path, seed_data
+) -> None:
+    runs = tmp_path / "runs"
+    # The card asks for H1, but only the seeded M1 frame exists.
+    save_card(runs / "strategy_card.json", _card(timeframe="H1"))
+    app = create_app(
+        data_root=tmp_path,
+        runs_root=runs,
+        legacy_fallback=False,
+    )
+    with TestClient(app) as client, client.websocket_connect("/ws/sim") as ws:
+        assert ws.receive_json()["type"] == "status"
+        assert (
+            client.post("/api/sim/start", json={"speed": 0, "mode": "replay"}).status_code
+            == 200
+        )
+        decision = None
+        for _ in range(10):
+            message = ws.receive_json()
+            if message["type"] == "decision":
+                decision = message["payload"]
+                break
+        body = client.get("/api/strategy/card").json()
+
+    assert decision is not None
+    assert decision["strategy"] == "no_trade"
+    assert decision["action"] == 0
+    assert decision["no_trade"] is True
+    assert decision["reason"] == "legacy_fallback_disabled"
+    assert body["active"] is False
+    assert body["classification"] == "fallback"
+    assert body["legacy_fallback"] is False
+
+
 def test_runner_flag_on_keeps_the_legacy_replay(tmp_path, seed_data) -> None:
     app = create_app(data_root=tmp_path, runs_root=tmp_path / "runs")
     with TestClient(app) as client, client.websocket_connect("/ws/sim") as ws:
