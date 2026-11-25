@@ -2,8 +2,10 @@
 
 Phase 18 slice one. The queue and its audit log are real code with tests; the
 handlers that do the learning are injected by the caller, and the ML, DSL and
-paper-trading pipelines are wired in later slices once they merge. See
-``docs/orchestrator.md`` for the lifecycle, the controls and the honest limits.
+paper-trading pipelines are wired in later slices once they merge. The
+`orchestrator.daemon` module turns those pieces into one supervised process.
+See ``docs/orchestrator.md`` for the lifecycle, the controls and the honest
+limits.
 """
 
 from scalping.orchestrator.core import (
@@ -12,6 +14,7 @@ from scalping.orchestrator.core import (
     Handler,
     HandlerResult,
     JobContext,
+    JobStoreReader,
     Orchestrator,
     OrchestratorStatus,
     PermanentJobError,
@@ -19,8 +22,37 @@ from scalping.orchestrator.core import (
     RetryPolicy,
     RunOutcome,
 )
+from scalping.orchestrator.daemon import (
+    GUARD_PROFILES,
+    DaemonConfig,
+    DaemonStatus,
+    OrchestratorDaemon,
+    TickResult,
+)
+from scalping.orchestrator.data_triggers import (
+    EVENT_DEFERRED,
+    EVENT_REFUSED,
+    KIND_DATASET_BUILD,
+    MAX_EMITS,
+    MAX_EMITS_LIMIT,
+    DataFileTriggerSource,
+)
+from scalping.orchestrator.resources import (
+    EXPLORATORY_PROFILE,
+    M2_8GB_PROFILE,
+    MeasuredResourceGuard,
+    Measurement,
+    Probe,
+    ResourceLimits,
+    ResourceProbeError,
+    ResourceSample,
+    ResourceSnapshot,
+    SystemProbe,
+    rss_mb_from_ru_maxrss,
+)
 from scalping.orchestrator.store import (
     BLOCKED_DEPENDENCY_STATUSES,
+    DEFAULT_MAX_DEFERRALS,
     JOB_STATUSES,
     SCHEMA_VERSION,
     TERMINAL_STATUSES,
@@ -45,11 +77,23 @@ from scalping.orchestrator.triggers import (
 __all__ = [
     "BLOCKED_DEPENDENCY_STATUSES",
     "CONTROL_EVENTS",
+    "DEFAULT_MAX_DEFERRALS",
+    "EVENT_DEFERRED",
+    "EVENT_REFUSED",
+    "EXPLORATORY_PROFILE",
+    "GUARD_PROFILES",
     "JOB_STATUSES",
+    "KIND_DATASET_BUILD",
+    "M2_8GB_PROFILE",
+    "MAX_EMITS",
+    "MAX_EMITS_LIMIT",
     "SCHEMA_VERSION",
     "TERMINAL_STATUSES",
     "AllowAllGuard",
     "BlockedJob",
+    "DaemonConfig",
+    "DaemonStatus",
+    "DataFileTriggerSource",
     "Event",
     "FileTriggerSource",
     "Handler",
@@ -59,17 +103,29 @@ __all__ = [
     "JobStateError",
     "JobStats",
     "JobStore",
+    "JobStoreReader",
+    "MeasuredResourceGuard",
+    "Measurement",
     "Orchestrator",
+    "OrchestratorDaemon",
     "OrchestratorStatus",
     "PermanentJobError",
+    "Probe",
     "Recovery",
     "ResourceGuard",
+    "ResourceLimits",
+    "ResourceProbeError",
+    "ResourceSample",
+    "ResourceSnapshot",
     "RetryPolicy",
     "RunOutcome",
     "ScanOutcome",
     "StoreError",
+    "SystemProbe",
+    "TickResult",
     "Trigger",
     "TriggerSource",
     "UnknownJobError",
+    "rss_mb_from_ru_maxrss",
     "scan_once",
 ]

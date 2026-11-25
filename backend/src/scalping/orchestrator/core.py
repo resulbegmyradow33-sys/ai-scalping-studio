@@ -28,13 +28,15 @@ queue for a CLI or a test, so its behaviour is reproducible without sleeping.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from scalping.orchestrator.store import (
     BlockedJob,
+    Event,
     Job,
     JobStateError,
     JobStats,
@@ -47,6 +49,7 @@ __all__ = [
     "Handler",
     "HandlerResult",
     "JobContext",
+    "JobStoreReader",
     "Orchestrator",
     "OrchestratorStatus",
     "PermanentJobError",
@@ -204,19 +207,116 @@ HandlerReturn = HandlerResult | Mapping[str, Any] | None
 Handler = Callable[[Job, "JobContext"], HandlerReturn]
 
 
+class JobStoreReader:
+    """The read-only slice of :class:`JobStore` a handler is allowed to see.
+
+    The orchestrator owns the queue: a handler reports what it found and the
+    loop decides whether another job exists. Handing the raw store to a handler
+    contradicted that (``context.store.enqueue`` was reachable), so the context
+    carries this facade instead. Reads and audit lines pass through; enqueue,
+    claim, retry, defer, cancel and every state write are absent and raise
+    ``AttributeError`` if a handler tries them.
+
+    This is accidental-misuse protection, not a security boundary. Python cannot
+    hide the delegate completely: the store is held in a private slot and a
+    determined handler can still reach it through introspection. It stops normal
+    code from enqueuing or cancelling by mistake, which is what the context has
+    always promised; it is not a sandbox for hostile in-process code.
+
+    ``append_event`` is deliberately exposed: a handler must be able to explain
+    a decision in the audit log, and that write cannot create work.
+    """
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: JobStore) -> None:
+        if not isinstance(store, JobStore):
+            raise TypeError(f"store must be a JobStore, got {type(store).__name__}")
+        self._store = store
+
+    @property
+    def path(self) -> str | Path:
+        """The store's SQLite path, for an audit line that names its source."""
+        return self._store.path
+
+    def get(self, job_id: int) -> Job | None:
+        return self._store.get(job_id)
+
+    def list_jobs(
+        self,
+        *,
+        status: str | None = None,
+        kind: str | None = None,
+        limit: int | None = None,
+    ) -> list[Job]:
+        return self._store.list_jobs(status=status, kind=kind, limit=limit)
+
+    def due(
+        self,
+        *,
+        kinds: Sequence[str] = (),
+        now: str | datetime | None = None,
+    ) -> list[Job]:
+        return self._store.due(kinds=kinds, now=now)
+
+    def has_due(
+        self,
+        *,
+        kinds: Sequence[str] = (),
+        now: str | datetime | None = None,
+    ) -> bool:
+        return self._store.has_due(kinds=kinds, now=now)
+
+    def count_running(self, *, kinds: Sequence[str] = ()) -> int:
+        return self._store.count_running(kinds=kinds)
+
+    def blocked_jobs(self) -> list[BlockedJob]:
+        return self._store.blocked_jobs()
+
+    def events(
+        self,
+        job_id: int | None = None,
+        *,
+        since_id: int | None = None,
+        limit: int | None = None,
+    ) -> list[Event]:
+        return self._store.events(job_id, since_id=since_id, limit=limit)
+
+    def get_state(self, key: str) -> str | None:
+        return self._store.get_state(key)
+
+    def stats(self, *, now: str | datetime | None = None) -> JobStats:
+        return self._store.stats(now=now)
+
+    def append_event(
+        self,
+        event: str,
+        *,
+        job_id: int | None = None,
+        detail: str | None = None,
+        now: str | datetime | None = None,
+    ) -> Event:
+        return self._store.append_event(event, job_id=job_id, detail=detail, now=now)
+
+
 @dataclass(frozen=True, slots=True)
 class JobContext:
     """Everything a handler may look at, and the only side effects it needs.
 
-    The context cannot enqueue or claim jobs on its own: a handler reports, the
-    orchestrator records. ``cancel`` is cooperative — it flips the row, and the
-    orchestrator refuses to bank a result for a cancelled job.
+    ``store`` is a :class:`JobStoreReader`: a handler can inspect jobs, events
+    and state, and append an audit line, but it cannot enqueue, claim or cancel
+    another job. The orchestrator records the result. ``cancel`` is cooperative
+    and scoped to this job: it flips the row, and the orchestrator refuses to
+    bank a result for a cancelled job.
     """
 
-    store: JobStore
+    store: JobStoreReader
     job: Job
     safe_mode: bool
     research_enabled: bool
+    #: The orchestrator's own cancel hook, limited to this handler's job id.
+    #: Kept off the reader so a handler cannot cancel a different job.
+    _cancel_job: Callable[[int, str | None], Job] = field(repr=False, compare=False)
 
     def log(self, event: str, detail: str | None = None) -> None:
         """Append an audit line for this job; use it to explain a real decision."""
@@ -224,7 +324,7 @@ class JobContext:
 
     def cancel(self, reason: str | None = None) -> Job:
         """Cancel the current job from inside its handler."""
-        return self.store.cancel(self.job.id, reason)
+        return self._cancel_job(self.job.id, reason)
 
     def cancelled(self) -> bool:
         """True when the row was cancelled after the handler started."""
@@ -316,26 +416,35 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- controls
 
-    def pause(self, reason: str | None = None) -> None:
+    def pause(self, reason: str | None = None, *, actor: str | None = None) -> None:
         """Stop claiming work until :meth:`resume`; the queue keeps growing."""
-        self._set_flag(STATE_PAUSED, True, reason, "paused")
+        self._set_flag(STATE_PAUSED, True, reason, "paused", actor=actor)
 
-    def resume(self) -> None:
-        self._set_flag(STATE_PAUSED, False, None, "resumed")
+    def resume(self, *, actor: str | None = None) -> None:
+        self._set_flag(STATE_PAUSED, False, None, "resumed", actor=actor)
 
-    def safe_mode(self, enabled: bool, reason: str | None = None) -> None:
+    def safe_mode(
+        self, enabled: bool, reason: str | None = None, *, actor: str | None = None
+    ) -> None:
         """Safe mode claims nothing at all; it is the owner's hard stop."""
         self._set_flag(
-            STATE_SAFE_MODE, enabled, reason, "safe_mode_on" if enabled else "safe_mode_off"
+            STATE_SAFE_MODE,
+            enabled,
+            reason,
+            "safe_mode_on" if enabled else "safe_mode_off",
+            actor=actor,
         )
 
-    def disable_research(self, enabled: bool, reason: str | None = None) -> None:
+    def disable_research(
+        self, enabled: bool, reason: str | None = None, *, actor: str | None = None
+    ) -> None:
         """Block research kinds while still allowing ingestion-style jobs."""
         self._set_flag(
             STATE_RESEARCH_DISABLED,
             enabled,
             reason,
             "research_disabled" if enabled else "research_enabled",
+            actor=actor,
         )
 
     @property
@@ -381,13 +490,27 @@ class Orchestrator:
         reason = parsed.get("reason")
         return on, None if reason is None else str(reason)
 
-    def _set_flag(self, key: str, on: bool, reason: str | None, event: str) -> None:
+    def _set_flag(
+        self,
+        key: str,
+        on: bool,
+        reason: str | None,
+        event: str,
+        *,
+        actor: str | None = None,
+    ) -> None:
         stamp = _utc_now()
-        payload = {"on": on, "reason": reason, "at": stamp}
+        payload: dict[str, Any] = {"on": on, "reason": reason, "at": stamp}
+        detail: dict[str, Any] = {"on": on, "reason": reason}
+        if actor is not None:
+            # The audit line names who switched the control. CLI/daemon callers
+            # omit the actor and keep the historical event payload unchanged.
+            payload["actor"] = actor
+            detail["actor"] = actor
         self.store.set_state(key, _json(payload), now=stamp)
         self.store.append_event(
             event,
-            detail=_json({"on": on, "reason": reason}),
+            detail=_json(detail),
             now=stamp,
         )
 
@@ -453,19 +576,31 @@ class Orchestrator:
         return self._execute(job, research_disabled, now=now)
 
     def run_until_idle(
-        self, max_jobs: int = 100, *, now: str | datetime | None = None
+        self,
+        max_jobs: int = 100,
+        *,
+        now: str | datetime | None = None,
+        should_stop: Callable[[], bool] | None = None,
     ) -> list[RunOutcome]:
         """Drain due work, stopping at the first call that finds nothing to do.
 
         Only iterations that transitioned a job are returned, so the list is the
         batch's history rather than a log of every empty poll.
+
+        ``should_stop`` is checked before every iteration, including the first. A
+        daemon passes its shutdown flag here so a requested stop does not start
+        up to ``max_jobs`` further jobs.
         """
         if isinstance(max_jobs, bool) or not isinstance(max_jobs, int):
             raise TypeError("max_jobs must be an int")
         if max_jobs < 0:
             raise ValueError("max_jobs must be >= 0")
+        if should_stop is not None and not callable(should_stop):
+            raise TypeError("should_stop must be callable or None")
         outcomes: list[RunOutcome] = []
         while len(outcomes) < max_jobs:
+            if should_stop is not None and should_stop():
+                break
             outcome = self.run_once(now=now)
             if outcome.job is None:
                 break
@@ -555,6 +690,13 @@ class Orchestrator:
                         detail="cancelled before the guard could defer it",
                     )
                 raise
+            if job.status == "failed":
+                # The deferral cap turned a repeated refusal terminal.
+                return RunOutcome(
+                    status="failed",
+                    job=job,
+                    detail=job.error or reason,
+                )
             return RunOutcome(status="resource_refused", job=job, detail=reason)
 
         handler = self._handlers.get(job.kind)
@@ -569,10 +711,11 @@ class Orchestrator:
             return RunOutcome(status="no_handler", job=job, detail=error)
 
         context = JobContext(
-            store=self.store,
+            store=JobStoreReader(self.store),
             job=job,
             safe_mode=self.safe_mode_enabled,
             research_enabled=not research_disabled,
+            _cancel_job=self.store.cancel,
         )
         permanent = False
         try:

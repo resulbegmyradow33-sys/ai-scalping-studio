@@ -43,6 +43,7 @@ from typing import Any, Final
 import numpy as np
 import polars as pl
 
+from scalping.api.errors import public_error_text
 from scalping.api.schemas import is_ml_run_id
 from scalping.config import Settings
 from scalping.data.registry import TIMEFRAMES
@@ -331,7 +332,14 @@ class MLRunner:
         self._lock = threading.Lock()
         self._runs: dict[str, MLRunState] = {}
 
-    def _features(self, frame: pl.DataFrame, symbol: str, timeframe: str) -> FeatureFrame:
+    def _features(
+        self,
+        frame: pl.DataFrame,
+        symbol: str,
+        timeframe: str,
+        *,
+        groups: tuple[str, ...] | None = None,
+    ) -> FeatureFrame:
         """The shared feature-matrix path: cache hit, else build and store."""
         return cached_build_features(
             self.cache,
@@ -339,6 +347,7 @@ class MLRunner:
             timeframe=timeframe,
             frame=frame,
             settings=self.settings,
+            groups=groups,
         )
 
     # -- start -----------------------------------------------------------
@@ -368,7 +377,9 @@ class MLRunner:
                     f"refusing {frame.height} bars: the API limit is {MAX_BARS}; "
                     "narrow the stored history"
                 )
-            features = self._features(frame, request.symbol, request.timeframe)
+            features = self._features(
+                frame, request.symbol, request.timeframe, groups=request.spec.groups
+            )
             if features.X.shape[1] > MAX_FEATURES:  # pragma: no cover - registry guard
                 raise MLError(
                     f"{features.X.shape[1]} feature columns exceeds the limit of {MAX_FEATURES}"
@@ -810,7 +821,9 @@ class MLRunner:
         try:
             result = load_result(run_dir)
         except (OSError, ValueError, KeyError, TypeError) as exc:
-            raise MLError(f"run {run_id} cannot be loaded: {exc}") from exc
+            raise MLError(
+                f"run {run_id} cannot be loaded: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         frame = self.store.read(result.symbol, result.timeframe)
         if frame.is_empty():
@@ -854,7 +867,9 @@ class MLRunner:
                 compute_regime=regime,
             )
         except (TypeError, ValueError, RuntimeError) as exc:
-            raise MLError(f"run {run_id} cannot be evaluated: {exc}") from exc
+            raise MLError(
+                f"run {run_id} cannot be evaluated: {public_error_text(exc, root=self.runs_root)}"
+            ) from exc
 
         return {
             "run_id": run_id,

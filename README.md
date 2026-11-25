@@ -3,22 +3,38 @@
 [![CI](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml/badge.svg?branch=main)](https://github.com/resulbegmyradow33-sys/ai-scalping-studio/actions/workflows/codeql.yml)
 
-Local research and paper-trading studio for XAUUSD. Everything runs on one
-machine: no paid AI APIs, no cloud services, no real money.
+Local-first, zero-mandatory-cost XAUUSD research and paper-trading studio.
+Real-money execution is disabled.
 
-The project grew out of a simple question: can a reinforcement-learning agent
-learn a gold scalping edge from tick data? The honest answer so far is **no, but
-a small rule with signed order-flow does have a measured edge**. The live panel
-therefore replays that rule; PPO stays in the research lab.
+The target is a strategy-independent autonomous research learner: discover
+hypotheses from market data and source-linked research, generate candidate
+policies without owner-authored entry/exit rules, test them with realistic costs
+and independent validation, and paper-trade only a governed DSL champion.
+That complete closed loop is not yet finished; see the dated audit and task
+board before interpreting any module as autonomous.
+
+The existing flow_momentum card is a legacy incumbent with historical
+forward-test evidence. The current panel still contains that older runtime
+path; it is retained for compatibility and baseline comparison, not as the
+strategy-discovery engine. PPO/behaviour cloning and the fixed five-family
+LinUCB selector are research baselines, not the required autonomous learner.
 
 ## Project status
 
-- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing.
-- [`docs/architecture-audit.md`](docs/architecture-audit.md) — evidence-based audit.
+- [`docs/runbook.md`](docs/runbook.md) — operator runbook: install, daily flows,
+  orchestrator, audited local controls, legacy-fallback switch, troubleshooting
+  and safety rules.
+- [`STATUS.md`](STATUS.md) — one-page matrix: done / partial / missing, with
+  the exact commands that reproduce each claim.
+- [docs/current-state-addendum-2026-11-24.md](docs/current-state-addendum-2026-11-24.md) — current mainline facts and corrections.
+- [docs/autonomous-system-audit-2026-11-24.md](docs/autonomous-system-audit-2026-11-24.md) — historical autonomous-system audit and ordered gaps.
+- [AGENTS.md](AGENTS.md) — mandatory instructions for every human/AI contributor.
+- [docs/architecture-audit.md](docs/architecture-audit.md) — historical 2026-11-22 snapshot.
 - [`docs/implementation-roadmap.md`](docs/implementation-roadmap.md) — phased plan.
 - [`docs/task-board.md`](docs/task-board.md) — every task, checked or open.
 - [`docs/requirements/master-prompt.md`](docs/requirements/master-prompt.md) — target brief.
 - [`docs/language-decision.md`](docs/language-decision.md) — why Python/TypeScript stay; when Rust would be justified.
+- [`docs/api-contracts.md`](docs/api-contracts.md) — public API schema, drift guard and how to update the snapshot.
 
 ## Team
 
@@ -38,9 +54,9 @@ history, conversation resolution, no force push or deletion. CodeQL and secret
 scanning run on the public repository. `make hooks` adds a local pre-push guard
 on top of the server rules.
 
-## What is validated
+## Legacy incumbent evidence (not the autonomous learner)
 
-`flow_momentum`, H1, card `backend/config/strategy_card.json`:
+flow_momentum, H1, card backend/config/strategy_card.json:
 
 - momentum signal (EMA20 + 5-bar displacement + ATR expansion),
 - entry only when `|flow|` exceeds the causal trailing 15th-percentile threshold
@@ -53,8 +69,10 @@ on top of the server rules.
 | Forward, Jun–Nov 2026 (card unchanged) | 24 | +0.502 R | 2.15 | 2.4% |
 | Forward, momentum only (ablation) | 58 | −0.128 R | 0.79 | 6.5% |
 
-The forward sample is small (95% CI still includes zero). The ablation is the
-useful part: without the signed-flow gate the same momentum signal loses money.
+The forward sample is small (95% CI still includes zero); it is historical
+baseline evidence, not a guarantee and not evidence that the new DSL discovery
+system has found a profitable strategy. The ablation is useful evidence about
+this specific legacy rule only.
 
 RL result: imitation + PPO is stable but weaker than the rule (+0.012 R and
 +0.020 R on two splits). See `docs/rl-imitation.md`.
@@ -63,7 +81,7 @@ RL result: imitation + PPO is stable but weaker than the rule (+0.012 R and
 
 ```
 backend/   FastAPI, Parquet store, features, simulator, PPO, strategy card
-frontend/  Next.js 15 panel (simulator, training, performance, data)
+frontend/  Next.js 15 panel (simulator, training, performance, data, paper)
 docs/      design, live strategy, forward test, RL notes
 ```
 
@@ -74,7 +92,7 @@ The backend is Python 3.12 managed by `uv`; the frontend is Next.js + Tailwind.
 ```bash
 cd backend
 uv sync
-uv run pytest                       # ~500 tests
+uv run pytest                       # full backend suite
 
 uv run python -m scalping.cli data synth \
   --root ../demo-data --symbol XAUUSD --start 2024-10-01 --end 2024-10-10
@@ -90,7 +108,9 @@ npm run dev -- -p 3001
 ```
 
 Open `http://127.0.0.1:3001`. Without a strategy card the panel replays the
-legacy M1 momentum rule; the data screen can generate synthetic bars.
+legacy M1 momentum rule by default during migration. Open PR #177 adds
+`--no-legacy-fallback` for fail-closed UI testing; it does not change the
+autonomous paper path. See the runbook for details and merge status.
 
 To use the validated rule, copy the seed card and start with a flow store:
 
@@ -104,6 +124,22 @@ uv run python -m scalping.cli serve \
 
 `runs/strategy_card.json` is runtime state and is gitignored; the tracked seed
 lives in `backend/config/`.
+
+## Verify the current claims
+
+`STATUS.md` lists the pytest files and CLI invocations behind each status row.
+Two examples:
+
+```bash
+cd backend
+uv run pytest tests/test_promotion_policy.py tests/test_locked_holdout.py
+uv run python -m scalping.cli discovery run --root ../data-ticks5-store \
+  --symbol XAUUSD --timeframe M5 --max-trials 64 --seed 0
+```
+
+The latest verified `main` snapshot is `e17d820` (2026-11-25), with
+backend, frontend and both CodeQL language checks green. `STATUS.md` records
+the exact commit, merged changes, open PRs and remaining validation gaps.
 
 ## Data
 
@@ -125,9 +161,10 @@ make forward-test        # rerun the current forward store only
 
 See `docs/forward-test.md` for coverage, results and caveats.
 
-## The learning loop
+## Legacy experiment loops (not the autonomous orchestrator)
 
-Two background jobs keep the system honest:
+These older jobs remain for reproducibility and comparison; they are not yet
+wired into the new persistent orchestrator:
 
 - `scripts/nightly_calibrate.py` re-selects the rule's free parameters on the
   training slice, gates the winner on a holdout, and replaces the card only

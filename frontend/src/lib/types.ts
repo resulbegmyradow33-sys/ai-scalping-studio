@@ -29,6 +29,56 @@ export interface DataStatus {
   provenance?: Provenance | null;
 }
 
+/** Verdict of `GET /api/data/quality`; `status_rule` names the deciding check. */
+export type DataQualityStatus = "ok" | "warn" | "fail";
+
+/** One validator issue behind the quality counts. */
+export interface DataQualityIssue {
+  code: string;
+  severity: string;
+  count: number;
+  detail: string;
+  sample: string[];
+}
+
+/** The validator settings the reported run actually used. */
+export interface DataQualityThresholds {
+  gap_threshold_minutes: number;
+  outlier_return_z: number;
+  outlier_volume_z: number;
+  outlier_min_rows: number;
+}
+
+/**
+ * Read-only quality report for one stored slice.
+ *
+ * A count is `null` when the check did not run (unconfigured slice, or an
+ * outlier pass skipped below its row floor). Zero always means "checked and
+ * clean"; a component must never print a number for a null count.
+ */
+export interface DataQuality {
+  symbol: string;
+  timeframe: string;
+  configured: boolean;
+  status: DataQualityStatus;
+  status_rule: string;
+  status_detail: string;
+  rows: number;
+  first_ts: string | null;
+  last_ts: string | null;
+  duplicates: number | null;
+  gaps: number | null;
+  ohlc_violations: number | null;
+  crossed_quotes: number | null;
+  negative_spread: number | null;
+  negative_volume: number | null;
+  outliers: number | null;
+  outliers_checked: boolean;
+  provenance: Provenance | null;
+  thresholds: DataQualityThresholds;
+  issues: DataQualityIssue[];
+}
+
 /** Sidecar metadata written next to a store partition. */
 export interface Provenance {
   dataset_id: string;
@@ -240,6 +290,12 @@ export interface DecisionPayload {
   action: DecisionAction;
   strategy: string;
   blocked: string | null;
+  /** What produced the strategy label: legacy card, DSL champion or fallback. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** True when the runner refused to trade because the legacy fallback is off. */
+  no_trade?: boolean;
+  /** Safe reason code for a NO TRADE decision. */
+  reason?: string;
 }
 
 export interface EquityPayload {
@@ -276,7 +332,7 @@ export type SimMessageType = SimMessage["type"];
 
 // --- strategy card -----------------------------------------------------------
 
-/** Parameters the promoted flow-momentum rule replays. */
+/** Parameters the legacy flow-momentum rule replays. */
 export interface RuleParams {
   timeframe: string;
   flow_quantile: number;
@@ -312,6 +368,16 @@ export interface ForwardResult {
 export interface StrategyCard {
   active: boolean;
   strategy: string;
+  /** What actually ran: legacy card, a DSL champion, or the fallback path. */
+  classification?: "legacy" | "dsl" | "fallback";
+  /** Never a validation claim; the legacy path reports `legacy-heuristic`. */
+  validation?: string;
+  /** Safe reason code when `classification` is `fallback`. */
+  fallback_reason?: string;
+  /** Whether the M1 momentum fallback is enabled in this process. */
+  legacy_fallback?: boolean;
+  /** The rule that actually produced the stream, e.g. `flow_momentum`. */
+  active_rule?: string;
   timeframe?: string;
   symbol?: string;
   params?: RuleParams;
@@ -496,4 +562,223 @@ export interface CalibrateResponse {
   };
   incumbent: RuleMetrics | null;
   card: StrategyCard;
+}
+
+// --- paper ledger (`/api/paper`) ---------------------------------------------
+
+/** Bar sizes a paper session may be opened on (`PaperTimeframe` in the schema). */
+export type PaperTimeframe = "M1" | "M5" | "M15" | "M30" | "H1" | "H4" | "D1";
+
+/**
+ * One row of `GET /api/paper/sessions`. `model_version` carries the DSL spec
+ * hash when the autonomous runner opened the session; it is `null` otherwise.
+ */
+export interface PaperSessionItem {
+  session_id: string;
+  symbol: string;
+  timeframe: string;
+  strategy: string;
+  model_version: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+}
+
+/** A position lifecycle; `closed_ts` is set when a trade settles it. */
+export interface PaperPosition {
+  position_id: number;
+  side: string;
+  lot: number;
+  entry_ts: string;
+  entry_price: number;
+  sl: number;
+  tp: number;
+  status: string;
+  closed_ts: string | null;
+  closed_price: number | null;
+}
+
+/** One order attempt; a rejection always carries its reason. */
+export interface PaperOrder {
+  order_id: number;
+  signal_id: number | null;
+  ts: string;
+  side: string;
+  lot: number;
+  requested_price: number | null;
+  status: string;
+  rejection_reason: string | null;
+}
+
+/** One closed trade, exactly as the broker settled it. */
+export interface PaperTrade {
+  trade_id: number;
+  side: string;
+  entry_ts: string;
+  entry_price: number;
+  exit_ts: string;
+  exit_price: number;
+  lot: number;
+  pnl: number;
+  r_multiple: number;
+  exit_reason: string;
+}
+
+/** One account mark. */
+export interface PaperEquityPoint {
+  ts: string;
+  balance: number;
+  equity: number;
+}
+
+/**
+ * `GET /api/paper/sessions/{id}`. `balance`/`equity` stay `null` until the
+ * first equity mark; `trade_count` counts closed trades only.
+ */
+export interface PaperSessionSummary {
+  session_id: string;
+  symbol: string;
+  timeframe: string;
+  strategy: string;
+  model_version: string | null;
+  status: string;
+  started_at: string;
+  ended_at: string | null;
+  balance: number | null;
+  equity: number | null;
+  open_position: PaperPosition | null;
+  trade_count: number;
+  last_bar_ts: string | null;
+  config: Record<string, unknown>;
+}
+
+/** A bounded page: `limit` defaults to 100 server-side and is capped at 1000. */
+export interface PaperPage<T> {
+  items: T[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+// --- autonomy status (read-only) ---------------------------------------------
+//
+// Source: `backend/src/scalping/api/routes_autonomy.py`. Every section carries
+// `configured`/`readable`; a count is absent (not zero) unless it was read.
+
+/** Paper ledger counts; absent while unconfigured or unreadable. */
+export interface AutonomyPaperStatus {
+  configured: boolean;
+  readable: boolean;
+  sessions?: number | null;
+  open_positions?: number | null;
+  closed_trades?: number | null;
+}
+
+/** The newest audit line in the orchestrator database. */
+export interface AutonomyLastEvent {
+  id: number;
+  ts: string;
+  event: string;
+  job_id?: number | null;
+}
+
+/** Queue counts and persisted controls. */
+export interface AutonomyOrchestratorStatus {
+  configured: boolean;
+  readable: boolean;
+  queued?: number | null;
+  running?: number | null;
+  failed?: number | null;
+  /** `null`/absent when the `state` table is missing, not "off". */
+  paused?: boolean | null;
+  safe_mode?: boolean | null;
+  research_disabled?: boolean | null;
+  last_event?: AutonomyLastEvent | null;
+}
+
+/**
+ * One scope's champion. `mode` comes from the archived payload; the backend
+ * falls back to `dsl` when the payload names no mode, so a champion row here
+ * does not prove the payload declared it.
+ */
+export interface AutonomyChampion {
+  scope: string;
+  candidate_id: string;
+  mode?: string | null;
+  promoted_at?: string | null;
+  policy_id?: string | null;
+  policy_digest?: string | null;
+}
+
+/**
+ * `GET /api/autonomy/champions`; `items` is absent when the archive or its
+ * champion table is unreadable. `readable: false` is not "no champions".
+ */
+export interface AutonomyChampionList {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyChampion[] | null;
+}
+
+/** Archived trial/gate counts; absent tables leave the count missing. */
+export interface AutonomyDiscoveries {
+  configured: boolean;
+  readable: boolean;
+  runs?: number | null;
+  decisions?: number | null;
+}
+
+/** Data symbols with at least one month partition on disk. */
+export interface AutonomyDataStatus {
+  configured: boolean;
+  readable: boolean;
+  symbols?: string[] | null;
+}
+
+/** `GET /api/autonomy/status`; each section owns its own readable flag. */
+export interface AutonomyStatus {
+  paper: AutonomyPaperStatus;
+  orchestrator: AutonomyOrchestratorStatus;
+  champions: AutonomyChampion[];
+  champions_readable: boolean;
+  discoveries: AutonomyDiscoveries;
+  data: AutonomyDataStatus;
+}
+
+/** One recent job row, including the deferral counter that explains a stall. */
+export interface AutonomyJobItem {
+  id: number;
+  kind: string;
+  status: string;
+  attempts: number;
+  defer_count: number;
+  priority: number;
+  created_at: string;
+  scheduled_at: string;
+  started_at?: string | null;
+  finished_at?: string | null;
+}
+
+/** Newest jobs first, bounded by `limit`; `items` is absent when unreadable. */
+export interface AutonomyJobPage {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyJobItem[] | null;
+  limit: number;
+}
+
+/** One audit event; `detail` is deliberately not part of the wire contract. */
+export interface AutonomyEventItem {
+  id: number;
+  job_id?: number | null;
+  ts: string;
+  event: string;
+}
+
+/** Newest events first, bounded by `limit`; `items` is absent when unreadable. */
+export interface AutonomyEventPage {
+  configured: boolean;
+  readable: boolean;
+  items?: AutonomyEventItem[] | null;
+  limit: number;
 }

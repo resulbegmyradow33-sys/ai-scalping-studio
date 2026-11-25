@@ -1,16 +1,17 @@
 # Ensemble and decision engine
 
-Phase 9, slice 1. The goal is to combine models **only where out-of-sample
-evidence supports it**, and to make the resulting decision explainable. This
-slice builds the combination rules, the out-of-fold plumbing and the decision
-engine. It does not select members by regime yet, and it does not train on the
-real store.
+Phase 9. The goal is to combine models **only where out-of-sample evidence
+supports it**, and to make the resulting decision explainable. Slice 1 builds the
+combination rules, the out-of-fold plumbing and the decision engine. Slice 2 adds
+regime-dependent weights, also from out-of-fold rows only. Neither slice trains on
+the real store.
 
 The roadmap file names are `ensemble/stacking.py`, `confidence/calibration.py`
-and `decision/engine.py`. This slice keeps the core in
-`scalping.ensemble.core` and the decision rules in `scalping.ensemble.decision`;
-the `confidence/` package (temperature scaling, drift) is a later slice. The
-public names match the roadmap's intent.
+and `decision/engine.py`. The code keeps the combination rules in
+`scalping.ensemble.core`, regime selection in `scalping.ensemble.regime` and the
+decision rules in `scalping.ensemble.decision`; the `confidence/` package
+(temperature scaling, drift) is a later slice. The public names match the
+roadmap's intent.
 
 ## Out-of-fold predictions
 
@@ -95,6 +96,75 @@ rewards a larger class set and ignores the size of the losing coalitions. TV
 also does not care which class happens to be the argmax, so a confident
 minority cannot hide behind a quiet majority.
 
+## Regime-dependent selection
+
+Slice 2 lives in `scalping.ensemble.regime`. It keeps the evidence base of slice
+1: every weight is derived from an `OOFResult`, so the rows that chose the
+weights were scored by fits that never saw them. Validation and test rows are
+never read.
+
+### Labels at decision time
+
+`align_regime_labels(bundle, classify(bars))` joins `ts` + `regime` onto the
+bundle rows with a **backward as-of** rule: a row takes the newest label whose
+timestamp is at or before it. A label that starts after the row can never be
+attached, so the join itself adds no future information. The rule engine is
+causal per row (every window runs backwards from the row), so computing labels
+on the full frame and reading only the rows that reach the ensemble is safe. A
+row before the first label becomes `unknown`.
+
+### Weights
+
+For a regime bucket with at least `min_rows_per_regime` OOF rows (default 30):
+
+```
+L_m = mean OOF log loss of member m on the bucket's rows
+w_m = (1 / L_m) / sum_j (1 / L_j)
+```
+
+Inverse loss is a deterministic heuristic, not a fitted optimiser: there is no
+hyperparameter search, row order does not matter, and every weight stays
+positive, so a regime changes how much each member counts but never drops one.
+The global weights use every OOF row and are the fallback for:
+
+- a bucket with fewer than `min_rows_per_regime` rows (`source="global"` in the
+  table and the report);
+- a regime label at decision time that never appeared in the OOF rows
+  (`rows=0`, global weights). Refusing to combine on an unseen label would turn
+  a coverage gap into a silent NO TRADE.
+
+`RegimeWeightedEnsemble.predict_proba(probabilities, regimes)` averages each row
+with its own regime's weights. The member set is fixed, so selection is a
+weighting rule, not a different model per regime.
+
+### Report
+
+`regime_selection_report(oof, regimes, table)` returns:
+
+- per-regime rows: bucket size, share of OOF rows, weight source, the weights and
+  the losses they came from, each member's metrics on the bucket, the
+  regime-weighted ensemble and the global-weight ensemble on the same bucket;
+- coverage and fallback usage in rows and shares;
+- an overall comparison of the regime ensemble, the global ensemble and the best
+  single member on the same OOF rows, sorted by accuracy then name.
+
+The payload always carries `descriptive_only: True` and no promotion flag.
+
+### Limits
+
+- Regime labels are heuristic descriptions of the past. Different thresholds move
+  rows between buckets, and a bucket is not a forecast.
+- Buckets are small. The `min_rows_per_regime` guard avoids fitting weights on a
+  handful of rows, but it also means coverage is partial; the report counts the
+  fallback instead of hiding it.
+- The weights and the scores come from the **same** OOF rows. The comparison is
+  in-sample for the weights and therefore optimistic; it is not an independent
+  validation and cannot be read as one.
+- Inverse loss is not optimal. It is explainable, deterministic and cheap, which
+  is why it is used before any tuned meta-model is considered.
+- No profitability claim. A better prediction row still has to pass the
+  simulator, the cost stress and a regime-coverage gate.
+
 ## Decision rules
 
 `DecisionEngine.decide()` returns a `Decision` with `action`, `probabilities`,
@@ -143,9 +213,11 @@ win, the simpler member stays; that is the Phase 9 exit criterion.
 
 ## What is not built
 
-- **Regime-dependent selection.** Regime tables exist in
-  `scalping.regime.strategy`, but members are not chosen or weighted by regime
-  yet. A regime-conditional ensemble needs its own leakage-safe OOF split.
+- **Regime-conditional promotion.** Regime weights are computed and reported, but
+  no gate promotes them. The report is descriptive and shares rows with the
+  weights; an independent evaluation is a later step.
+- **Regime switching between member sets.** The member set is fixed for every
+  regime. Only the weights change.
 - **Temperature scaling.** No post-hoc calibration of member or ensemble
   probabilities. ECE/MCE are reported, not optimised.
 - **Drift and OOD scoring.** No feature/prediction drift monitor, no
@@ -161,6 +233,8 @@ win, the simpler member stays; that is the Phase 9 exit criterion.
 
 An ensemble is not a trading edge. It can be better calibrated, less noisy or
 better than its best member on prediction metrics, and still lose money after
-spread, slippage and the cost stress. The only claim this slice supports is a
-prediction comparison on fixed rows. Promotion requires the simulator, a cost
-stress and regime coverage; until those pass, the simpler model stays.
+spread, slippage and the cost stress. The only claim these slices support is a
+prediction comparison on fixed rows. Regime weights add a second descriptive
+comparison on the same rows, not an independent one. Promotion requires the
+simulator, a cost stress and regime coverage; until those pass, the simpler model
+stays.

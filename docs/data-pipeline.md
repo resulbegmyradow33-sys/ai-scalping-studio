@@ -42,8 +42,8 @@ the historical behaviour is unchanged.
 | `m1_source` | true | an M1 frame the higher timeframes are derived from |
 
 Rules: `volume_*` needs `bar_volume`; `spread_*` needs `spread`
-(`real_quotes` **or** `modeled_spread`); `m5_*`/`m15_*`/`htf_*` need an M1
-source; any `flow_*` column is reserved for the tick layer and needs
+(`real_quotes` **or** `modeled_spread`); `m5_*`/`m15_*`/`m30_*`/`h4_*`/`htf_*`
+need an M1 source; any `flow_*` column is reserved for the tick layer and needs
 `tick_flow`. An unavailable selection raises `FeatureUnavailableError` and
 names every missing input, so a manifest cannot quietly describe unsupported
 features.
@@ -162,6 +162,121 @@ last-quote aggregation, and that a derived M30 store matches `resample`. Tick
 data is aggregated to M1 by the tick scripts; it is not stored as a tick table
 in the main store.
 
+### Alignment semantics
+
+Buckets are **left-closed and left-labelled**: the bar stamped `10:00` holds
+`[10:00, 10:30)` for M30 and `[08:00, 12:00)` for H4. Labels come from the UTC
+epoch grid, not from the first source bar, so M30 starts at `:00`/`:30` and H4
+at `00/04/08/12/16/20` even when a frame begins at `10:07`.
+
+Within a bucket, `open`/`bid_close`/`ask_close` and `provider` are taken from
+the first/last source bar (`bid_close` and `ask_close` from the last bar so the
+quote matches `close`), `high`/`low` are the extrema, `volume` is the sum and
+`spread_mean` is the bucket mean. Aggregation never reaches outside its window,
+so truncating the source only changes a bucket that is still forming.
+
+Chained derivation (`M1 → M30 → H4`) is associative for OHLC and volume. The
+intermediate frame names the mean spread `spread_mean`; `data derive` renames it
+back to `spread` before the next aggregation, which is what makes the second
+`resample` call valid. A mean of means equals the overall mean only when every
+sub-bucket is complete, so compare `spread_mean` across derive paths on complete
+buckets only.
+
+Higher-timeframe features (`features/context.py::htf_context`) join a bucket
+only after it closes: the bucket timestamp is shifted forward by one bucket
+width and applied with `join_asof(backward)`. A row at `t` therefore sees the
+last bucket with `start + width <= t`; the bucket containing `t` is never used.
+The rule is timeframe-agnostic (`_bucket_width` reads the frame's spacing). The
+default matrix consumes M5 and M15. M30/H4 context is an **opt-in** group
+(`htf`, below), not part of the 59 default columns.
+
+Weekends are gaps, not buckets. `resample` emits no empty bucket and never
+carries a Friday close into Sunday. Under the XAUUSD window
+(`sun22:00-fri21:00 UTC`) the Sunday 22:00 bars fall into the H4 bucket labelled
+`20:00`, because that grid window contains them.
+
+Missing and duplicate source rows are not repaired or shifted. Duplicates are
+aggregated into their bucket (volume summed) and reported by `validate_bars` as
+`duplicate_timestamps`; the store also dedupes on write, so `data derive`
+cannot consume them. A missing minute shortens its bucket and is reported as a
+`time_gaps` warning above the threshold; labels stay on the grid.
+
+### Optional M30/H4 feature group (`htf`)
+
+The 59-column matrix and its order are frozen for compatibility. Higher-timeframe
+context beyond M5/M15 is available as a documented optional group, appended
+after column 58 only when requested:
+
+| Column | Timeframe | Meaning |
+|---|---|---|
+| `m30_trend` | M30 | `market_structure` trend state, `-1/0/1`, at the last closed M30 bucket |
+| `m30_ret` | M30 | close-to-close simple return of the last closed M30 bucket |
+| `h4_trend` | H4 | `market_structure` trend state, `-1/0/1`, at the last closed H4 bucket |
+| `h4_ret` | H4 | close-to-close simple return of the last closed H4 bucket |
+| `h4_atr_frac` | H4 | ATR(14) of the last closed H4 bucket divided by its close |
+
+Causal rule: a bucket stamped `s` becomes visible at `s + width` and not one
+millisecond earlier, where `width` is the frame's own spacing (30m or 4h). The
+join is `join_asof(backward)`, so a decision bar exactly at `s + width` sees the
+bucket. A truncated source cannot change a value already joined; a bucket that
+is still forming is never read, even if the decision bar sits inside it. Rows
+before the first closed bucket are forward filled with the first available value
+and then `0.0`, like the M5/M15 columns; the warm-up head keeps that behaviour.
+
+Enable it by asking for the group wherever a feature frame is built:
+
+```python
+from scalping.features.build import build_features
+
+features = build_features(m1_bars, groups=("htf",))  # 64 columns
+```
+
+```bash
+uv run python -m scalping.cli dataset build \
+  --symbol XAUUSD --timeframe M1 --root ../data-real-store \
+  --groups price,momentum,multi_timeframe,htf --out ../runs/dataset.json
+```
+
+`TrainSpec.groups`, the ML API request's `spec.groups`, the CLI `--groups`
+flag and `build_dataset(..., groups=...)` accept `htf`. `columns_for(("htf",))`
+returns the five names; `FEATURE_COLUMNS` and `columns_for(None)` stay at 59.
+The dataset manifest records `groups` and the exact `columns`, so a rebuild
+selects the same optional columns. `build_dataset` refuses an `htf` selection
+when the supplied `FeatureFrame` was built without it.
+
+Limitations:
+
+- The group needs an M1 source and enough history: `h4_atr_frac` is only warm
+  after 14 closed H4 buckets, and earlier rows are forward filled rather than
+  dropped (`valid_from` remains the 60-bar M1 warm-up).
+- Availability is grid-based, not session-complete: a shortened Friday H4
+  bucket still becomes visible only at its grid end (`start + 4h`), which is
+  conservative but delays the last partial bucket.
+- The five columns are registered for *selection*, not for knowledge-routed
+  proposals: `PROPOSAL_GROUPS` still lists the seven default groups, so an
+  ingested hypothesis cannot require `htf` until that schema is extended.
+- The feature cache keys the effective optional groups (`CACHE_VERSION` 2), so
+  a 59-column entry is never served for a 64-column request.
+- These columns have no validated predictive evidence yet; they are inputs for a
+  falsifiable experiment, not a trading claim.
+
+### Feature naming and aliases
+
+Column names are part of the cached registry version and of dataset checksums,
+so a clearer name is added as a read-only alias instead of renaming a column.
+`FEATURE_ALIASES` in `features/registry.py` maps aliases to canonical columns
+and `canonical_name()` resolves them; `FEATURE_COLUMNS` keeps its exact order.
+
+| Alias | Canonical | Reason |
+|---|---|---|
+| `log_ret_3` | `ret_3` | `ret_3` is a log return; `ret_1/5/15/60` are simple returns |
+
+Consecutive-candle features (up/down streaks, consecutive closes above a level)
+are **not implemented**. The matrix has candle anatomy (`body_atr`,
+`upper_wick_atr`, `lower_wick_atr`, `range_atr`) and the BOS-derived `trend`
+state; neither counts consecutive candles. Adding such a column needs a stated,
+falsifiable research question rather than a rename.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.
@@ -215,6 +330,81 @@ API:
 ```bash
 curl 'http://127.0.0.1:8000/api/data/validate?symbol=XAUUSD&timeframe=H1'
 ```
+
+### Quality report API
+
+`GET /api/data/quality?symbol=&timeframe=` is a read-only view over the same
+validator. It adds no checks; it maps validator issue codes onto one stable
+report for a dashboard or a data gate.
+
+`GET /api/data/quality?symbol=XAUUSD&timeframe=M1&include_outliers=true`
+
+| Field | Source |
+|---|---|
+| `rows`, `first_ts`, `last_ts` | the validated frame |
+| `duplicates` | `duplicate_timestamps` issue count |
+| `gaps` | `time_gaps` issue count |
+| `ohlc_violations` | `ohlc_inconsistent` issue count |
+| `crossed_quotes` | `crossed_quotes` issue count |
+| `negative_spread` | `negative_spread` issue count |
+| `negative_volume` | `negative_volume` issue count |
+| `outliers` | `price_outliers` + `volume_outliers` counts |
+| `provenance` | the `_meta/<symbol>/<timeframe>.json` sidecar, verbatim |
+| `issues` | every validator issue (code, severity, count, detail, ts sample) |
+| `thresholds` | gap and robust-z settings the run actually used |
+
+Status thresholds:
+
+| Status | Rule |
+|---|---|
+| `ok` | no error or warning issue, and a provenance sidecar exists |
+| `warn` | no error, but a warning issue (`time_gaps`, `price_outliers`, `volume_outliers`) or no sidecar (`provenance_missing`) |
+| `fail` | any error-severity issue; `status_rule` names the first one |
+
+`status_rule` is the issue code that decided the status and `status_detail` is
+its validator detail. The thresholds are deliberately the validator's:
+
+- a gap is an adjacent diff wider than `max(10 min, one bar)`, so an H1 slice is
+  not reported as gap-ridden for its normal 60-minute spacing; weekend and
+  holiday closures still count as gaps. `/api/data/validate` keeps the
+  validator's 10-minute default, so the two endpoints can report different gap
+  counts on a higher timeframe; `thresholds` states what this report used;
+- outliers are log-return / `log1p(volume)` values beyond `8` robust sigma
+  (`1.4826 * MAD`, std fallback), computed only when the slice has at least
+  `30` rows.
+
+The report never invents a zero. An unconfigured slice returns `200` with
+`configured: false`, `rows: 0`, null counts, `status: "fail"` and
+`status_rule: "store_empty"`. On a configured slice, `outliers` is null (not
+zero) when the slice is shorter than the robust-z floor or when
+`include_outliers=false` skipped the pass; `outliers_checked` says which.
+Likewise, a registered symbol with no bars is not a 422: only an unregistered
+symbol or timeframe is, because the request itself is then invalid.
+
+The endpoint reads the whole stored slice, like `/api/data/validate`, and never
+writes, repairs or backfills. `include_outliers=false` is the escape hatch for
+a large store; it skips only the O(n) robust-z pass.
+
+### Data page quality panel
+
+The Data page (`frontend/src/components/data-quality-panel.tsx`) renders this
+endpoint under "Veri kalitesi". It reuses the page's symbol field and adds a
+timeframe select populated from `GET /api/timeframes`; the report is refetched
+when either changes and does not poll (the backend validates the whole slice).
+
+- The badge shows `ok|warn|fail` plus `status_rule` and the server's verbatim
+  `status_detail`. When the slice is unconfigured, the badge says
+  "Yapılandırılmadı" instead of a fail verdict, because nothing was checked.
+- The counters table (with caption and scoped headers) prints the validator's
+  counts. A `—` cell is a null count: unconfigured slice, or an outlier pass
+  skipped below `outlier_min_rows`. A note under the table states which, and
+  `0` always means "checked and clean".
+- First/last bar, provenance kind (`Sentetik`/`Gerçek`) and source come from the
+  report's `provenance`; a null sidecar prints "Köken kaydı yok".
+- The threshold line shows the effective `thresholds`, so a gap count can be
+  read against the rule that produced it.
+- An unregistered symbol (422) shows the server's `detail` verbatim; the panel
+  never substitutes a local guess for a failed request.
 
 ## Provenance
 
@@ -340,6 +530,7 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 | `GET /api/timeframes` | supported bar sizes and their resample rules |
 | `GET /api/data/status?symbol&timeframe` | rows, span, providers, provenance |
 | `GET /api/data/validate?symbol&timeframe` | structural report |
+| `GET /api/data/quality?symbol&timeframe&include_outliers` | read-only quality report with status and provenance |
 | `POST /api/data/download` | synthetic/CSV/Dukascopy import; CSV names a file in `<data_root>/imports` |
 
 ## Current limits
@@ -347,7 +538,19 @@ uv run python -m scripts.ingest_2026_ticks --dir ../data-2026-ticks \
 - Real providers exist only for XAUUSD/XAGUSD (Dukascopy) and local CSV/JSON.
 - Tick data is aggregated, not queried tick-by-tick from the store.
 - No Level-2 order-book data, so DeepLOB/order-book models remain unavailable.
-- Validation is structural; statistical outliers and cross-source reconciliation
-  are not implemented yet.
+- The quality report is a view over the existing validator: structural checks
+  plus robust-z outliers on log returns and `log1p(volume)`. There is no
+  statistical anomaly model beyond that, no regime-conditioned baseline, and no
+  cross-source reconciliation in the endpoint (the function exists in code but
+  needs a second frame to compare).
+- Quality checks read and sort the whole slice in memory, like
+  `/api/data/validate`. A long M1 history can skip the outlier pass with
+  `include_outliers=false`, but the frame is still loaded; streaming validation
+  is not implemented.
+- Gap detection is session-unaware: a weekend or holiday closure counts as a
+  gap, so a multi-day slice normally reports `warn` even when every bar is well
+  formed.
+- Provenance is a JSON sidecar with a content checksum, not a signature: it
+  detects a changed frame, not who produced it.
 - Dataset versioning/checksums are recorded per dataset, but the Phase 3
   train/validation/test manifests are not built.

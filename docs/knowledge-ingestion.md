@@ -1,27 +1,33 @@
 # Knowledge ingestion and hypothesis research
 
-Phase 17, slice 1. This slice adds local, offline ingestion of research
-documents with provenance, deterministic text extraction, a searchable SQLite
-index and structured hypothesis records. It does not add a language model, a
-cloud service, OCR, claim classification or a document-to-order path.
+Phase 17, slice 1 added local, offline ingestion of research documents with
+provenance, deterministic text extraction, a searchable SQLite index and
+structured hypothesis records. Slice 2 adds structural table preservation for
+DOCX, HTML and Markdown (schema version 2) without OCR, a model or a new
+dependency.
 
 The code lives in `backend/src/scalping/knowledge/`:
 
 | Module | Responsibility |
 |---|---|
-| `ingest.py` | copy the original, checksum, detect format, extract sections |
-| `index.py` | SQLite documents/sections/chunks, FTS5 search, hypothesis tables |
+| `ingest.py` | copy the original, checksum, detect format, extract sections and tables |
+| `tables.py` | structural DOCX/HTML/Markdown table extraction |
+| `index.py` | SQLite documents/sections/chunks/tables, FTS5 search, hypothesis tables |
 | `hypothesis.py` | hypothesis record, source citations, status, experiment links |
+| `routing.py` | experiment-proposal records, approval gate, candidate conversion |
 
 ## Supported formats
 
 | Extension | Recorded format | Parser | Version | Notes |
 |---|---|---|---|---|
-| `.txt` | `text` | `stdlib-text` | `1` | UTF-8 (BOM tolerated); form feeds split pages |
-| `.md`, `.markdown` | `markdown` | `stdlib-markdown` | `1` | ATX headings define sections; fenced code is not scanned |
-| `.html`, `.htm` | `html` | `html.parser` | `1` | scripts, styles, templates and titles are dropped; `h1`–`h6` define sections |
-| `.docx` | `docx` | `zipfile+ElementTree` | `1` | paragraph text from `word/document.xml`; heading styles define sections |
+| `.txt` | `text` | `stdlib-text` | `2` | UTF-8 (BOM tolerated); form feeds split pages; no tables |
+| `.md`, `.markdown` | `markdown` | `stdlib-markdown` | `2` | ATX headings define sections; fenced code is not scanned; pipe tables are extracted |
+| `.html`, `.htm` | `html` | `html.parser` | `2` | scripts, styles, templates and titles are dropped; `h1`–`h6` define sections; `<table>` is extracted |
+| `.docx` | `docx` | `zipfile+ElementTree` | `2` | paragraph text and `w:tbl` tables from `word/document.xml`; heading styles define sections |
 | `.pdf` | `pdf` | none | n/a | `status="unsupported"`: an optional parser must be installed explicitly |
+
+Version 2 adds table records; the paragraph text produced by every parser is
+unchanged from version 1.
 
 No dependency was added. PDF text extraction needs an optional parser and an
 implementation of the `TextExtractor` protocol; until then the ingestor returns
@@ -87,11 +93,29 @@ layout. Opening is idempotent.
 | `documents` | `doc_id` PK, unique `checksum`, filename, source/stored path, size, mtime, format, parser, parser version, imported_at, duplicate, status, error |
 | `sections` | id, `doc_id` FK, ordinal, heading path, label, text, `char_start`, `char_end`; unique `(doc_id, ordinal)` |
 | `chunks` | id, `section_id` FK, ordinal, text, token count, offsets; unique `(section_id, ordinal)` |
+| `tables` | id, `doc_id` FK, ordinal, section ordinal, kind, caption, heading, `header_json`, `rows_json`, search text, row/col counts, `char_start`, `char_end`; unique `(doc_id, ordinal)` |
 | `hypotheses` | id, statement, observed, proposed condition, expected effect, market/timeframe scope, assumptions JSON, falsification test, status, timestamps |
 | `hypothesis_sources` | hypothesis FK, position, document FK, section ordinal, quote |
 | `hypothesis_experiments` | hypothesis FK, experiment reference, position, linked_at |
 
-Sections and chunks are also deleted with their document (`ON DELETE CASCADE`).
+Sections, chunks and tables are deleted with their document (`ON DELETE
+CASCADE`).
+
+### Schema history
+
+| Version | Change |
+|---|---|
+| 1 | documents, sections, chunks, hypotheses, hypothesis sources/experiments |
+| 2 | `tables` (document tables with caption, header/rows JSON, counts, offsets) |
+
+Opening a version-1 database applies migration 2 in place; existing documents,
+sections, chunks and hypotheses are untouched and `tables(doc_id)` returns an
+empty list for them. Re-ingesting the same bytes (a duplicate record) inserts
+the missing tables, and the `knowledge.ingest` handler calls
+`KnowledgeIndex.backfill_tables(record)` on its duplicate branch, so the
+production path backfills too. A partially populated document is completed per
+ordinal; stored tables are never deleted or rewritten. A database with a newer
+version is still refused.
 
 ### Offsets
 
@@ -106,6 +130,87 @@ Chunk offsets are relative to their section, and `split_chunks` returns exact
 slices of at most 800 characters broken between words. A single word longer
 than the limit stays whole rather than producing a fake offset. The invariant
 lets a citation be sliced back out without guessing.
+
+### Tables
+
+`scalping.knowledge.tables.extract_tables(path, sections=None)` returns a
+`TableExtraction` with two parts:
+
+- `tables`: `TableRecord` values in document order (deterministic, never
+  reordered by size or score).
+- `problems`: one `TableProblem(kind, reason, char_start)` per malformed table.
+  Extraction reports and continues; it never raises for malformed content.
+
+A `TableRecord` carries:
+
+| Field | Meaning |
+|---|---|
+| `kind` | `docx`, `html` or `markdown` |
+| `caption` | best effort; `""` when the format has none |
+| `heading` | heading path at the table, same `" > "` convention as sections |
+| `header` | header row, or `None` |
+| `rows` | body rows only; a tuple of tuples of cell strings |
+| `section_ordinal` | section the table belongs to, best effort; `-1` when unknown |
+| `row_count` | header (when present) plus body rows |
+| `col_count` | widest row after merged-cell expansion |
+| `char_start`, `char_end` | citation span, see below |
+
+Format rules:
+
+- **DOCX** — `w:tbl`/`w:tr`/`w:tc`. The first row is the header only when it
+  carries `w:tblHeader`; no style inspection guesses a header. A cell with
+  `w:gridSpan` keeps its text in the first slot; the extra slots are
+  placeholders. A `w:vMerge` continuation cell becomes one placeholder,
+  whatever its (normally empty) text. Rows shorter than the widest row are
+  padded with empty strings. Nested tables are not descended into. A table
+  whose `<w:tbl>` span cannot be located in the payload is reported, not stored
+  with an empty range.
+- **HTML** — `html.parser` with `<table>`, `<caption>`, `<thead>`, `<tbody>`,
+  `<tr>`, `<th>`, `<td>`. All rows are expanded in one grid pass, then the
+  `<thead>` rows are separated by index. The first `<thead>` row, or the first
+  body row when every cell is `<th>`, is the header; a multi-row `<thead>`
+  keeps its first row as the header and reports the extra header rows (they are
+  not stored in `rows`). `colspan` expands to placeholders; `rowspan` reserves
+  covered slots in later rows, including rows after a `<thead>`, and is clipped
+  to the real table height so no phantom rows appear. `script`, `style`,
+  `noscript` and `template` content is ignored.
+- **Markdown** — a header line with `|` followed by an alignment delimiter row
+  (`---`, `:--`, `--:`, `:-:`); alignment is validated but not stored. Fenced
+  code blocks are skipped entirely. Cells are trimmed and `\|` escapes a pipe.
+  Ragged body rows are truncated to the header width and reported; every row is
+  padded to the table width in one place. Inline code spans containing `|` are
+  not protected; a pipe inside backticks still splits the cell.
+
+Merged-cell placeholder policy: the covering cell keeps the text and every
+covered slot holds the literal `[[merged]]` (`MERGED_CELL`). The extractor
+never copies a value into slots it did not occupy, so "merged" is
+distinguishable from "repeated".
+
+Limits, enforced per table and reported as a `TableProblem`:
+
+- more than `MAX_TABLE_COLUMNS` (512) columns after expansion;
+- more than `MAX_TABLE_ROWS` (10,000) rows including the header;
+- a DOCX payload larger than `MAX_DOCX_XML_BYTES` (32 MiB) or one containing a
+  DTD/entity declaration is refused before `ElementTree` sees it.
+
+Character offsets slice the raw text the extractor read:
+
+- Markdown and HTML: the decoded file text with any UTF-8 BOM removed
+  (`utf-8-sig`), starting at the header line or `<table>`.
+- DOCX: the decoded `word/document.xml` payload inside the preserved archive,
+  starting at `<w:tbl>`. The ingestor reads that payload once and passes it to
+  table extraction (`read_docx_payload`), so a DOCX import opens the archive a
+  single time.
+
+The DOCX body has no stable plain-text rendering, so pointing at the payload is
+the honest option. The invariant is `0 <= char_start < char_end`: a table with
+no locatable span becomes a problem instead of an empty range. Offsets are
+citations, not a promise that re-parsing the slice alone reproduces the record.
+
+Table text is not added to section text by this module. The existing paragraph
+extractors already include cell text (DOCX cell paragraphs, HTML visible text,
+Markdown source lines), so a value appears in a section exactly once and the
+table record is the structured view of the same source.
 
 ### Search
 
@@ -123,7 +228,17 @@ lets a citation be sliced back out without guessing.
   `MATCH` operators. The LIKE fallback escapes `%`, `_` and the escape
   character.
 
-The FTS object is created outside the versioned migrations: a Python build
+`index.search_tables(query, limit=10)` is a separate path over table text: the
+flattened rows (`flatten_table`, tabs between cells, newlines between rows),
+captions and heading paths. It returns `TableHit` values (`doc_id`, filename,
+`table_ordinal`, `section_ordinal`, kind, caption, heading, text, score) and
+uses `tables_fts` with the same `bm25`/`LIKE` policy, reported by
+`tables_search_backend`. Tables are not appended to `chunks`: a chunk belongs
+to a section and keeps exact section offsets, which a table chunk would break.
+A cell value is therefore searchable through `search_tables`, and often through
+`search` too because the source paragraphs/lines remain in section text.
+
+Both FTS objects are created outside the versioned migrations: a Python build
 without FTS5 must still open the same database, and the index never claims FTS5
 unless the virtual table was actually created.
 
@@ -183,12 +298,281 @@ A source reference must point at a section of a document whose status is
 `indexed`. A citation to a failed or unsupported document, an unknown document
 or a missing section is rejected before the transaction.
 
+## Sentence classification
+
+`classify_sentence(text)` labels a research sentence with one of five kinds
+using deterministic patterns — no LLM, no network:
+
+| Kind | Marker | Example |
+|---|---|---|
+| `example` | "for example", "e.g.", "such as" | "For example, gold gaps at the London open." |
+| `opinion` | first person or hedge | "I think momentum is probably dead." |
+| `observation` | measurement/backtest terms or a number with a unit | "A backtest of 215 trades produced +0.159R." |
+| `concept` | definition ("refers to", "is a", "means") | "Liquidity refers to resting orders." |
+| `claim` | conditional/causal pattern or market statement with a modal | "When volatility expands, momentum signals weaken." |
+
+Precedence is example → opinion → observation → concept → claim. A sentence
+without a market term returns `None`, so generic prose is not forced into a
+bucket. `classify_document(index, doc_id)` returns `ClassifiedSentence` rows in
+section/sentence order.
+
+The hypothesis extractor uses this filter: only `claim` and `observation`
+sentences can become drafts; an opinion, definition or example never does. The
+classifier is triage, not truth — an `observation` is still prose until a
+quantitative experiment reproduces it.
+
+## Hypothesis drafts from prose
+
+`scalping.knowledge.extract_hypotheses(index, doc_id)` proposes hypotheses from
+one indexed document with deterministic sentence patterns — no LLM, no network,
+no `eval`/`exec`:
+
+| Pattern | Example |
+|---|---|
+| conditional | `When volatility expands, momentum signals become less reliable.` |
+| causal | `A signed order-flow imbalance predicts short-term continuation.` |
+| graded | `The more the spread widens, the lower the edge.` |
+
+Every draft:
+
+- starts in `proposed`; the extractor has no way to move it to `testing`;
+- stores the exact sentence as the `quote` of a `SourceRef` (document + section
+  ordinal), so the citation resolves against the index;
+- keeps the condition and expected effect separate, plus a fixed falsification
+  template;
+- uses `market_scope`/`timeframe_scope` `unspecified` unless the caller says
+  otherwise — the extractor does not infer them.
+
+Sentences without a market term are ignored, so generic prose ("If you are new,
+read the manual") does not become research. Re-running the extractor skips
+`(statement, section)` pairs already stored; it never duplicates the queue.
+
+Boundary: a draft is prose, not evidence. It cannot trade, cannot enter the DSL
+compiler, and cannot become `testing` without a human. Only a quantitative
+experiment can support or reject it.
+
+```python
+from scalping.knowledge import KnowledgeIndex, extract_hypotheses
+
+with KnowledgeIndex("runs/knowledge.sqlite3") as index:
+    result = extract_hypotheses(index, doc_id, max_hypotheses=20)
+    result.created   # Hypothesis records, status="proposed"
+    result.skipped   # duplicates already stored
+```
+
+## Experiment proposals and the approval gate
+
+P4 slice 3. `scalping.knowledge.routing` turns one testable hypothesis into an
+`ExperimentProposal`, but the proposal is still a record. It contains the
+hypothesis id, the original citations, the symbol/timeframe scope, the
+hypothesis kind (`claim` or `observation`), the required raw bar columns and
+feature groups, a suggested strategy skeleton **as three text fields**
+(observation, condition, expected effect), the falsification test and its
+governance state.
+
+The proposal id is a lowercase sha256 over the immutable payload (hypothesis,
+citations, scope, kind, data requirement, skeleton text), using the
+`scalping.knowledge.experiment_proposal.v2` payload schema. Source citations are
+sorted before hashing, so the same citations in a different order produce the
+same id; the record still shows them in the order the hypothesis supplied.
+Status, approval and conversion are excluded, so the same scope always has one
+id while governance changes stay auditable. Re-creating the same record returns
+the stored row. A rejected id is terminal: creating it again raises
+`already_rejected`, so a re-test needs a new hypothesis.
+
+`kind_source` (`classified`, `supplied` or `legacy`) is part of the payload and
+the stored row. It says whether `hypothesis_kind` came from the deterministic
+sentence classifier, was passed in explicitly for an imported record, or was
+migrated from schema v1, which had no such field. It is hashed for new records,
+so classified and supplied provenances cannot share an id. `legacy` exists only
+on migrated rows and `create()` refuses it.
+
+### Routing rules
+
+`propose_from_hypothesis(hypothesis, *, symbol, timeframe, index)` is the only
+constructor:
+
+| Condition | Result |
+|---|---|
+| status `proposed` or `testing` | accepted |
+| status `supported` or `rejected` | `bad_status`; a re-test is a new hypothesis |
+| no source refs, or a citation that does not resolve to an `indexed` section | `missing_source` |
+| a quote that is not a normalised substring of the cited section text | `unverified_quote` |
+| symbol/timeframe outside the project registry | `unknown_scope` |
+| statement not classifiable as `claim`/`observation` | `unsupported_kind` |
+| a valid scope | `ExperimentProposal(status="proposed")` |
+
+The caller supplies the symbol and timeframe because extracted hypotheses use
+`unspecified` scope. Routing does not infer a market from prose and does not
+compare the chosen scope with `market_scope`/`timeframe_scope`; that mismatch
+remains visible in the two records.
+
+`RoutingError.code` is one of: `missing_source`, `bad_status`, `unknown_scope`,
+`already_converted`, `already_rejected`, `not_approved`, `unknown_proposal`,
+`unknown_hypothesis`, `unsupported_kind`, `unverified_quote`,
+`invalid_proposal`. Payload/provenance codes are `missing_source`,
+`unverified_quote`, `unknown_hypothesis`, `unsupported_kind` and
+`invalid_proposal`; `unknown_scope` covers registry scope; the rest are
+lifecycle and governance refusals.
+
+Required data is recorded rather than fetched. `required_columns` is the bar
+schema an experiment needs (OHLC, spread for costs, volume); `required_groups`
+starts as `price` + `volatility` and adds groups whose keywords appear as whole
+words in the statement. Matching is anchored on word boundaries (with an
+optional plural), so `ny` matches `NY` but not `any`, and `sweep` still matches
+`sweeps`. This is a planning hint, not a dataset request and not a feature
+computation.
+
+### Store and approval
+
+`ProposalStore(path)` follows the same SQLite conventions as the knowledge
+index: WAL, `busy_timeout`, foreign keys, `synchronous = NORMAL`,
+`BEGIN IMMEDIATE` writes and a versioned `schema_version` table. Schema version
+2 adds `kind_source` and the decision log by additive migration. The store keeps
+proposals, their source refs and the append-only decision log.
+
+Schema 2 does **not** rewrite schema-v1 primary keys. v1 hashed proposals
+without `kind_source` and without sorting citations, so a rehash would change
+every id; instead migration keeps the old id, sets `kind_source='legacy'` and
+backfills `proposal_decisions` from the `approval_*` columns (an approved or
+rejected row gets one row, a converted row gets approved then converted). An
+approve-then-reject sequence from v1 cannot be reconstructed because v1
+overwrote the approval; migration records the surviving decision only.
+`create()` looks up both the schema-v2 id and the computed v1 id for the same
+payload, so the post-migration row is found, a rejected idea stays rejected and
+the same scope cannot be stored twice. Because a migrated row keeps its v1 id,
+use the record returned by `create()` for later governance calls rather than the
+id of the draft you passed in.
+
+`create(proposal, *, index)` is the persistence boundary. It re-checks
+provenance against the knowledge index even when the record came from
+`propose_from_hypothesis`: the hypothesis must be `proposed` or `testing`, its
+citation multiset must equal the proposal's citations, every cited document must be
+`indexed`, every section must exist, and every quote must be a normalised
+(case-folded, whitespace-collapsed) substring of that section's text. Comparing
+citation multisets is structural; the module does not prove that the free-text DSL
+skeleton paraphrases the hypothesis. `required_columns` and `required_groups`
+must be non-empty, duplicate-free tuples from the documented vocabularies, and
+the row is read back inside the insert transaction so a malformed payload rolls
+back instead of leaving a corrupt row. It accepts only `status="proposed"`
+records with no approval and no conversion. Approval is a separate, audited
+call; a hand-built approved record cannot bypass the gate. A rejected proposal
+id stays rejected: re-creating it raises `already_rejected`.
+
+`proposal_decisions(proposal_id, from_status, to_status, actor, reason, at)` is
+append-only and is written in the same `BEGIN IMMEDIATE` transaction as the
+status update. Rejecting an approved proposal adds a second row
+(`approved -> rejected`) instead of erasing the approval. `decisions(proposal_id)`
+returns the log oldest first, and the current `status` always equals the last
+row's `to_status`.
+
+The append-only guarantee is an **API-level boundary**, not a database-enforced
+one. `ProposalStore.connection` exposes the raw SQLite handle and
+`proposal_decisions` cascades from `proposals`, so direct SQL can edit or delete
+history. Governance goes through the methods; raw SQL is for read-only
+diagnostics.
+
+| Status | Entered by | Approval fields | In queue |
+|---|---|---|---|
+| `proposed` | `create(proposal, index=...)` | empty | no |
+| `approved` | `approve(reason, actor)` | actor, reason, timestamp | yes |
+| `rejected` | `reject(reason, actor)` | actor, reason, timestamp | no |
+| `converted` | `link_candidate(hash, dataset_id, actor=...)` | preserved from approval | no |
+
+- `approve` and `reject` require a non-empty reason and actor; the latest
+  decision is mirrored into `approval` and appended to `proposal_decisions`.
+  Re-approving an approved proposal is an idempotent no-op (after argument
+  validation). An approved but not-yet-converted proposal may still be
+  rejected, and both decisions remain in the log. Rejected and converted
+  proposals cannot be approved, because that would rewrite history.
+- `link_candidate(hash, dataset_id, *, actor)` is allowed once, only from
+  `approved`. It requires a sha256 hex candidate hash and a non-empty actor, and
+  appends `approved -> converted` with the hash, dataset id and actor. A bad
+  hash is `invalid_proposal`; a second call is `already_converted`; a call
+  before approval is `not_approved`.
+- Nothing auto-approves. `proposals_for_queue(store, limit)` returns approved
+  proposals oldest first and never changes a status.
+
+"Converted" means one discovery candidate hash was linked to one dataset id
+for this proposal. It is identity, not evidence: conversion does not mean the
+candidate was validated, promoted, paper-traded or profitable.
+
+```python
+from scalping.knowledge import (
+    KnowledgeIndex,
+    ProposalStore,
+    propose_from_hypothesis,
+    proposals_for_queue,
+)
+
+with KnowledgeIndex("runs/knowledge.sqlite3") as index, ProposalStore(
+    "runs/proposals.sqlite3"
+) as proposals:
+    draft = propose_from_hypothesis(
+        hypothesis, symbol="XAUUSD", timeframe="M15", index=index
+    )
+    proposals.create(draft, index=index)          # status="proposed"
+    proposals.approve(draft.proposal_id, "scope and data are clear", "owner")
+    ready = proposals_for_queue(proposals, 10)    # approved only
+```
+
+### No prose-to-order path
+
+The routing module never compiles or executes the skeleton, never builds DSL
+nodes, never reads market data and never imports the strategy, discovery, API,
+paper-trading, backtest or orchestrator packages. It also has no network
+import. A proposal carries no direction, size, stop, target or order type, so
+there is nothing to execute.
+
+Approval authorizes a quantitative experiment, not a trade. The Strategy
+Discovery Engine still owns DSL/AST validation, the evidence gate owns
+promotion, and the paper runner is the only execution target. A supported
+hypothesis does not become a champion; a converted proposal does not become an
+order.
+
+## Orchestrator bridge (approved proposals only)
+
+The queue bridge lives outside this package, in
+`backend/src/scalping/orchestrator/proposal_handlers.py`. It is the only path
+from an approved proposal to a `discovery.run` job:
+
+- `ProposalQueueTriggerSource` calls `proposals_for_queue(store, limit)` and
+  reads **approved** records only. Proposed, rejected and converted records are
+  never bridged, and the source never calls `approve`, `reject` or
+  `link_candidate`.
+- A record is eligible when its symbol/timeframe is in the project registry, its
+  required bar columns and feature groups are non-empty, and an optional
+  `dataset_id` hint does not name a locked test/holdout split. A missing or
+  unknown scope, a missing data requirement and a holdout-looking hint each
+  produce one `proposal.not_queued` audit event instead of a job.
+- The emitted payload is the same explicit `DiscoveryRequest` the production
+  handler validates (`symbol`, `timeframe`, `max_trials`, `seed`, `stress`,
+  `gate`, `population`, `generations`, `patience`, `horizon`). The search policy
+  comes from a caller-supplied `DiscoveryTemplate`; nothing is inherited.
+- Dedupe is `discovery.run:proposal:<proposal id>:<payload sha256>`, backed by a
+  cursor in the job store. A repeat scan or a process restart does not create a
+  second job, and changing the template is a new experiment rather than a
+  deduplicated old one.
+- The optional `knowledge.proposals` handler records a proposal snapshot and
+  returns `queue_discovery` with `queued: false` / `executed: false`. It does not
+  read the proposal store, run discovery or enqueue work.
+
+The bridge does not change this package's status rules. `approved` still enters
+the queue, `rejected` never does, and `link_candidate` remains the only way to
+reach `converted`. A proposal converted after its job was queued does not retract
+the job; the owner still controls that queue decision. The full trigger contract,
+refusal vocabulary and honest limits are in
+[`docs/orchestrator.md`](orchestrator.md#approved-proposals-as-discovery-triggers-knowledge-bridge).
+
 ## Boundaries
 
 - **Document text is never a trusted strategy or an order.** Nothing in this
   package imports the strategy, backtest, paper-trading or API modules. A
   hypothesis can only be tested by a separate quantitative experiment; its
   prose is never executed.
+- **Tables are structure, not interpretation.** A table record reproduces
+  cells and their positions; it does not classify, score or trust them, and a
+  merged-cell placeholder is metadata rather than data.
 - **No LLM.** Parsing is deterministic stdlib code. The system does not claim to
   understand a book like a human, to have trained on a PDF, or to have language
   model embeddings. Ingestion is not training.
@@ -196,9 +580,9 @@ or a missing section is rejected before the transaction.
   package. The index is a local file.
 - **No invented content.** If extraction fails, the record says so. Scanned
   PDF/OCR and unsupported formats are reported, not filled in.
-- **Claims are not facts.** This slice stores text and hypotheses but does not
-  yet classify claims, definitions, examples or opinions. That classification
-  and the route into the Strategy Discovery Engine are later slices.
+- **Claims are not facts.** Classification and hypothesis extraction are
+  heuristic triage. A routed proposal names an experiment; it does not prove
+  the claim or promote anything.
 
 ## Tests
 
@@ -212,11 +596,46 @@ section/chunk offsets, FTS5 and LIKE search with limits, duplicate documents,
 failure records, hypothesis round trips with citations, status transitions and
 experiment links.
 
+`backend/tests/test_knowledge_tables.py` covers DOCX header/`w:tblHeader` and
+merged cells, HTML caption/`thead`/`colspan`/`rowspan`, Markdown alignment and
+fenced-code exclusion, odd line separators (`\f`, `\v`, `\u2028`, lone `\r`) and
+BOM offsets, malformed-table reporting, DOCX empty-table span alignment,
+broken zip/DTD rejection, deterministic order, index round trips, table search
+(FTS5 and a forced LIKE fallback), row limits, FTS trigger synchronisation,
+partial backfill, v1→v2 migration with existing sections/chunks, cascade
+deletion, and the absence of network/`eval`/trading imports.
+
+`backend/tests/test_orchestrator_handlers.py` covers the production duplicate
+path: a version-1 index plus the same file ingested through the handler
+backfills the table rows.
+
+`backend/tests/test_hypothesis_routing.py` covers proposal creation from an
+extracted hypothesis, missing/unresolvable sources, persistence-boundary
+provenance checks (unknown hypothesis, terminal hypothesis status, missing
+section, citation ownership, fabricated quote, normalised quote match), refusal
+of supported and rejected hypotheses, unknown symbol/timeframe/kind,
+approve/reject audit including approve→reject history, one-time candidate
+linking with a required hash and actor, queue filtering, deterministic
+order-independent ids, `kind_source` recording, required-data validation,
+read-back rollback, schema-v1→v2 migration with backfilled decisions,
+concurrent rejected inserts, reopen persistence and the absence of
+strategy/order/network imports.
+
+The bridge is covered separately in
+`backend/tests/test_proposal_bridge.py`: approved-only emission, payload
+validation against the real discovery handler, crash/restart dedupe, refusal
+reasons, holdout-hint refusal, provenance in the audit log and the
+proposal-only `knowledge.proposals` handler.
+
 Run:
 
 ```sh
 cd backend
-uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py -q
+uv run pytest tests/test_knowledge_ingest.py tests/test_knowledge_index.py \
+  tests/test_knowledge_tables.py -q
+
+  tests/test_knowledge_extract.py tests/test_hypothesis_routing.py \
+  tests/test_proposal_bridge.py -q
 uv run ruff check src tests scripts
 uv run mypy src
 ```
@@ -224,13 +643,59 @@ uv run mypy src
 ## Limitations
 
 - PDF is unsupported until an optional parser is explicitly installed and
-  registered. Scanned documents need OCR, which is absent.
-- DOCX extraction reads paragraph text; tables become paragraph text but lose
-  their cell structure, and images are ignored.
+  registered. Scanned documents need OCR, which is absent. There is no OCR for
+  table images in any format.
+- Table extraction is structural, not semantic: complex layouts (nested DOCX
+  tables, floating/positioned tables, multi-page tables, vertical merges that
+  also carry content) may flatten or lose a cell. DOCX nested tables are not
+  descended into.
+- A multi-row HTML `<thead>` stores only its first row as `header`; the extra
+  header rows are reported and are not part of `rows`. A `rowspan` past the last
+  row is clipped rather than materialised as a phantom row.
+- Tables above `MAX_TABLE_ROWS` (10,000 rows) or `MAX_TABLE_COLUMNS` (512
+  columns after expansion) are reported instead of stored; a DOCX payload with
+  a DTD/entity declaration is refused unparsed.
+- DOCX tables are detected by `w:tbl`/`w:tr`/`w:tc` only. Rows wrapped in
+  content controls (`w:sdt`) can be missed; column widths and cell borders are
+  not stored.
+- The DOCX offset points into `word/document.xml`, not at a rendered page.
+- Markdown pipe tables are recognised by the delimiter row; Setext headings,
+  tables inside block quotes and pipes inside inline code are not handled
+  specially.
 - Markdown relies on ATX headings; Setext headings are treated as body text.
 - HTML text is normalised (horizontal whitespace collapsed, blank lines
-  dropped); exact layout is not preserved.
-- The index stores the extracted text, not the source bytes; the preserved
-  original remains the authority.
-- No claim classification, no automatic hypothesis generation, no strategy
-  routing and no feedback ingestion of backtest/paper logs in this slice.
+  dropped); exact layout is not preserved. A table without a closing
+  `</table>` is extracted up to its last parsed row and reported.
+- The index stores the extracted text and table records, not the source bytes;
+  the preserved original remains the authority.
+- Classification and extraction are pattern-based, not semantic; there is no
+  LLM, no strategy routing and no feedback ingestion of backtest/paper logs in
+  this slice.
+- Proposal scope is caller-supplied and is not reconciled with the hypothesis'
+  `market_scope`/`timeframe_scope`. Dataset availability is not checked at
+  routing time; a proposal can name a valid registry scope for which no bars
+  are stored yet.
+- The queue function only reads approved rows. Wiring it into the orchestrator,
+  building a dataset or compiling a DSL candidate from the skeleton is outside
+  this slice.
+- Proposal ids are deterministic, so a rejected payload cannot be re-proposed
+  under the same hypothesis and scope: `create()` raises `already_rejected`. A
+  re-test requires a new hypothesis and therefore a new id.
+- Migrated v1 rows keep their v1 ids. The dual lookup matches a new proposal to
+  a v1 row only when the rest of the payload is identical; a v1 row created
+  with a caller-supplied kind that the classifier now derives differently is a
+  different payload and will not match.
+- The v1 decision backfill cannot invent history. A row that was approved and
+  then rejected before schema 2 shows only the surviving rejection; converted
+  rows show the reconstructed approval and conversion.
+- The append-only decision log is an API-level boundary. `connection` exposes
+  raw SQL and the table cascades from `proposals`, so direct SQL can edit or
+  delete it.
+- The decision log is append-only and unbounded; there is no pruning or
+  archival policy yet. It records governance moves, not experiment evidence.
+- Quote verification is a normalised substring test. It catches fabricated or
+  paraphrased citations but cannot detect a real quote used out of context.
+- Citation-ownership checking compares multisets; it does not prove that the DSL
+  skeleton text paraphrases the hypothesis.
+- Keyword-based `required_groups` is a planning hint and can over- or
+  under-select feature groups. It never changes an experiment's actual data.

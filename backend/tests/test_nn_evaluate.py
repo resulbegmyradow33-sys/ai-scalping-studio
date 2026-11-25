@@ -155,3 +155,27 @@ def test_rule_labels_align_with_window_timestamps() -> None:
     assert labels.shape == data.ts_test.shape
     assert set(np.unique(labels).tolist()).issubset({-1, 0, 1})
     assert labels.dtype == np.int64
+
+
+def test_transformer_checkpoint_uses_the_shared_evaluator(tmp_path) -> None:
+    data = toy_dataset()
+    checkpoint = tmp_path / "transformer.pt"
+    train_classifier(
+        data,
+        TrainConfig(
+            model="transformer",
+            epochs=1,
+            batch_size=32,
+            hidden=8,
+            dropout=0.0,
+            device="cpu",
+            seed=1,
+        ),
+        checkpoint=checkpoint,
+    )
+
+    report = evaluate_checkpoint(checkpoint, data, split="test", device="cpu")
+
+    assert report["model"] == "transformer"
+    assert report["metrics"]["rows"] == data.X_test.shape[0]
+    assert report["trading_claim"] is False

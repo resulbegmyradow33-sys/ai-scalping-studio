@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { BarPayload, EquityPayload, SimState } from "@/lib/types";
@@ -119,6 +119,33 @@ describe("SimulatorPage", () => {
 
     expect(screen.getByTestId("bar-count")).toHaveTextContent("2");
     expect(screen.getByTestId("last-price")).toHaveTextContent("2.341,20");
+  });
+
+  it("marks a legacy strategy decision with a visible hint", () => {
+    state.simulation = simulation({
+      lastDecision: { action: 1, strategy: "flow_momentum", blocked: null },
+    });
+
+    render(<SimulatorPage />);
+
+    const value = screen.getByTestId("strategy-value");
+    expect(value).toHaveTextContent("flow_momentum");
+    const stat = value.closest("div");
+    expect(stat).not.toBeNull();
+    expect(within(stat as HTMLElement).getByText("legacy baseline")).toBeInTheDocument();
+  });
+
+  it("does not mark a NO TRADE decision as legacy", () => {
+    state.simulation = simulation({
+      lastDecision: { action: 0, strategy: "no_trade", blocked: "legacy_fallback_disabled" },
+    });
+
+    render(<SimulatorPage />);
+
+    const value = screen.getByTestId("strategy-value");
+    const stat = value.closest("div");
+    expect(stat).not.toBeNull();
+    expect(within(stat as HTMLElement).queryByText("legacy baseline")).not.toBeInTheDocument();
   });
 
   it("renders an empty board without data and without crashing", () => {

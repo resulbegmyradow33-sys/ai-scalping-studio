@@ -11,8 +11,10 @@ from scalping.data.provenance import (
     build_provenance,
     checksum,
     load_provenance,
+    provenance_path,
     save_provenance,
 )
+from scalping.data.store import ParquetStore
 
 
 def _frame() -> pl.DataFrame:
@@ -62,3 +64,30 @@ def test_provenance_path_refuses_to_leave_the_root(tmp_path) -> None:
         load_provenance(tmp_path, "XAUUSD", "../../outside")
     with pytest.raises(ValueError, match="single path segment"):
         load_provenance(tmp_path, "/etc/passwd", "M1")
+
+
+def test_store_write_does_not_replace_the_sidecar(tmp_path) -> None:
+    """The sidecar changes only on an explicit save, never on a store write.
+
+    ``docs/data-pipeline.md`` promises that a changed frame gets a new checksum
+    when provenance is written, and that ``ParquetStore.write`` does not touch
+    the existing record. Pinning the second half keeps a store append from
+    silently rewriting the source/synthetic claim.
+    """
+    frame = _frame().with_columns(
+        pl.col("close").alias("bid_close"),
+        (pl.col("close") + pl.col("spread")).alias("ask_close"),
+    )
+    store = ParquetStore(tmp_path)
+    store.write("XAUUSD", "M1", frame)
+    provenance = build_provenance(frame, symbol="XAUUSD", timeframe="M1", source="unit-test")
+    save_provenance(tmp_path, provenance)
+    sidecar = provenance_path(tmp_path, "XAUUSD", "M1")
+    before = sidecar.read_text(encoding="utf-8")
+
+    later = frame.with_columns((pl.col("ts") + timedelta(minutes=10)).alias("ts"))
+    store.write("XAUUSD", "M1", later)
+
+    assert sidecar.read_text(encoding="utf-8") == before
+    assert load_provenance(tmp_path, "XAUUSD", "M1") == provenance
+    assert store.coverage("XAUUSD", "M1").rows == 6

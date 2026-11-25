@@ -17,11 +17,22 @@ scope.
 from __future__ import annotations
 
 from scalping.paper.autonomous import AutonomousPaperRunner, AutonomousSummary
+from scalping.paper.continuous import (
+    AdvanceSummary,
+    ContinuousPaperRunner,
+    GapPolicy,
+    OutcomeBatch,
+    OutcomeRow,
+    matured_outcomes,
+    outcome_fingerprint,
+)
 from scalping.paper.ledger import (
+    GAP_POLICIES,
     SCHEMA_VERSION,
     DuplicateError,
     EquityPoint,
     FillRecord,
+    GapRecord,
     LedgerError,
     OrderRecord,
     PaperLedger,
@@ -30,6 +41,8 @@ from scalping.paper.ledger import (
     SessionRecord,
     SignalRecord,
     TradeRecord,
+    provenance_config,
+    session_provenance,
 )
 from scalping.paper.mt5 import AdapterDisabled, Mt5DemoAdapter
 from scalping.paper.runner import (
@@ -43,16 +56,23 @@ from scalping.paper.runner import (
 __all__ = [
     "ACTION_CODES",
     "ACTION_NAMES",
+    "GAP_POLICIES",
     "SCHEMA_VERSION",
     "AdapterDisabled",
+    "AdvanceSummary",
     "AutonomousPaperRunner",
     "AutonomousSummary",
+    "ContinuousPaperRunner",
     "DuplicateError",
     "EquityPoint",
     "FillRecord",
+    "GapPolicy",
+    "GapRecord",
     "LedgerError",
     "Mt5DemoAdapter",
     "OrderRecord",
+    "OutcomeBatch",
+    "OutcomeRow",
     "PaperLedger",
     "PaperRunResult",
     "PaperSession",
@@ -62,4 +82,8 @@ __all__ = [
     "SessionRecord",
     "SignalRecord",
     "TradeRecord",
+    "matured_outcomes",
+    "outcome_fingerprint",
+    "provenance_config",
+    "session_provenance",
 ]

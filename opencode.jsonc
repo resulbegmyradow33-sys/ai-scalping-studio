@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "autonomy-lead",
+  "worktree": {
+    "directory": "../ai-scalping-studio-worktrees"
+  },
+  "experimental": {
+    "todo": true
+  }
+}

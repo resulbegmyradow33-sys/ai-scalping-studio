@@ -128,22 +128,24 @@ Existing patterns to reuse:
 - scalers/normalisers are fitted on train only;
 - stacking uses out-of-fold predictions.
 
-## 10. Current state
+## 10. Current implementation status
 
-Implemented:
+This methodology remains normative, but the old implementation checklist that
+previously followed this heading is superseded. It described a pre-autonomy
+repository snapshot and is no longer an accurate inventory.
 
-- causal features (59 columns), feature groups, chronological dataset builder
-  with purge/embargo and manifest checksums;
-- walk-forward evaluation, cost stress, forward test on unseen 2026 data;
-- rule card promotion gate with a holdout.
+Use these dated sources for implementation state:
 
-Not implemented yet:
+- STATUS.md — current summary.
+- docs/autonomous-system-audit-2026-11-24.md — code-level evidence and gaps.
+- docs/task-board.md — task-by-task completion state.
+- docs/requirements/master-prompt.md — required end state.
 
-- classical ML cross-validation and calibration;
-- neural-network training/evaluation;
-- ensemble stacking;
-- SQLite experiment registry and rollback;
-- Monte Carlo and parameter-sensitivity reports.
+Important current distinction: the DSL discovery evaluator runs candidates on a
+validation slice with simulator costs. It does not by itself implement
+walk-forward/OOS promotion evidence. The final test set must remain inaccessible
+to search. A default-empty gate is exploratory search mode, never a valid
+production promotion policy.
 
 ## 11. Commands
 

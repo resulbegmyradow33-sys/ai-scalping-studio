@@ -23,7 +23,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from scalping import __version__
 from scalping.api.ml_runner import MLRunner
 from scalping.api.routes import router
+from scalping.api.routes_autonomy import router as autonomy_router
 from scalping.api.routes_ml import router as ml_router
+from scalping.api.routes_orchestrator import router as orchestrator_router
 from scalping.api.routes_paper import router as paper_router
 from scalping.api.runner import SimulationRunner
 from scalping.api.train_runner import TrainRunner
@@ -33,6 +35,8 @@ from scalping.data.store import ParquetStore
 __all__ = [
     "ALLOWED_ORIGINS",
     "DEFAULT_DATA_ROOT",
+    "DEFAULT_DISCOVERY_ARCHIVE_PATH",
+    "DEFAULT_ORCHESTRATOR_DB_NAME",
     "DEFAULT_RUNS_ROOT",
     "app",
     "create_app",
@@ -45,6 +49,12 @@ DEFAULT_RUNS_ROOT = Path("runs")
 #: The paper ledger sits directly under the data root unless the factory is
 #: given an explicit path. It is configuration, never a request field.
 DEFAULT_PAPER_LEDGER_NAME = "paper.sqlite"
+
+#: The orchestrator queue and the discovery archive live under ``runs_root``,
+#: matching the CLI defaults. The read-only status API only ever opens them;
+#: it never creates either file.
+DEFAULT_ORCHESTRATOR_DB_NAME = "orchestrator.sqlite3"
+DEFAULT_DISCOVERY_ARCHIVE_PATH = Path("discovery") / "discovery.sqlite"
 
 #: Local panel origins. Never ``*``: ``/api/data/download`` reads a path from
 #: the request body, so a wildcard would let any page ask this process to read a
@@ -72,13 +82,23 @@ def create_app(
     runs_root: Path | None = None,
     flow_root: Path | None = None,
     paper_ledger: Path | None = None,
+    orchestrator_db: Path | None = None,
+    discovery_archive: Path | None = None,
+    *,
+    legacy_fallback: bool = True,
 ) -> FastAPI:
     """Build an app whose store, settings and runner belong to this call only.
 
-    ``paper_ledger`` is the only way to move the paper database; leaving it out
-    puts it at ``<data_root>/paper.sqlite``. Neither path is created here: the
-    paper router opens the ledger on the first write, so importing this module
-    has no filesystem side effect.
+    ``paper_ledger``, ``orchestrator_db`` and ``discovery_archive`` are the only
+    ways to move the state databases. Leaving them out puts the paper ledger at
+    ``<data_root>/paper.sqlite`` and the queue/archive under ``<runs_root>``.
+    None of the three is created here: the paper router opens the ledger on the
+    first write and the autonomy router opens every store read-only, so importing
+    this module has no filesystem side effect.
+
+    ``legacy_fallback`` keeps the historical M1 momentum replay when no strategy
+    card applies (default during migration). Set it false to make that path
+    NO TRADE with a reason instead.
     """
     root = Path(data_root) if data_root is not None else DEFAULT_DATA_ROOT
     runs = Path(runs_root) if runs_root is not None else DEFAULT_RUNS_ROOT
@@ -98,11 +118,22 @@ def create_app(
     app.state.paper_ledger_path = (
         Path(paper_ledger) if paper_ledger is not None else root / DEFAULT_PAPER_LEDGER_NAME
     )
+    app.state.orchestrator_db_path = (
+        Path(orchestrator_db)
+        if orchestrator_db is not None
+        else runs / DEFAULT_ORCHESTRATOR_DB_NAME
+    )
+    app.state.discovery_archive_path = (
+        Path(discovery_archive)
+        if discovery_archive is not None
+        else runs / DEFAULT_DISCOVERY_ARCHIVE_PATH
+    )
     app.state.sim = SimulationRunner(
         app.state.store,
         settings,
         flow_root=flow_root,
         card_path=runs / "strategy_card.json",
+        allow_legacy_fallback=legacy_fallback,
     )
     # Training threads belong to this app: the runner map is per factory call
     # and the lifespan stops and joins them before the process exits.
@@ -112,6 +143,8 @@ def create_app(
     app.include_router(router)
     app.include_router(ml_router)
     app.include_router(paper_router)
+    app.include_router(autonomy_router)
+    app.include_router(orchestrator_router)
     return app
 
 

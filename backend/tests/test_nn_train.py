@@ -166,3 +166,64 @@ def test_bad_config_is_rejected() -> None:
         config(max_minutes=0.0)
     with pytest.raises(ValueError, match="window"):
         WindowConfig(window=0)
+
+
+def test_gradient_clipping_is_applied_every_batch(tmp_path, monkeypatch) -> None:
+    import torch
+
+    calls: list[float] = []
+    original = torch.nn.utils.clip_grad_norm_
+
+    def recorder(parameters, max_norm, *args, **kwargs):
+        calls.append(float(max_norm))
+        return original(parameters, max_norm, *args, **kwargs)
+
+    monkeypatch.setattr(torch.nn.utils, "clip_grad_norm_", recorder)
+    config = TrainConfig(
+        model="mlp",
+        epochs=1,
+        batch_size=32,
+        learning_rate=5e-3,
+        hidden=16,
+        dropout=0.0,
+        device="cpu",
+        seed=1,
+        grad_clip=0.7,
+    )
+
+    train_classifier(dataset(), config, checkpoint=tmp_path / "clip.pt")
+
+    assert calls
+    assert set(calls) == {0.7}
+
+
+def test_early_stopping_stops_when_validation_stalls(tmp_path, monkeypatch) -> None:
+    import scalping.nn.train as trainer
+
+    monkeypatch.setattr(trainer, "_evaluate", lambda *args, **kwargs: (1.0, 0.5))
+    config = TrainConfig(
+        model="mlp",
+        epochs=10,
+        batch_size=32,
+        learning_rate=5e-3,
+        hidden=16,
+        dropout=0.0,
+        device="cpu",
+        seed=1,
+        patience=2,
+        min_delta=1e-4,
+    )
+
+    result = train_classifier(dataset(), config, checkpoint=tmp_path / "early.pt")
+
+    assert result.stopped == "early_stop"
+    assert result.epochs_run == 3
+    assert len(result.history) == 3
+    assert result.best_epoch == 1
+
+
+@pytest.mark.skipif(
+    not torch.backends.mps.is_available(), reason="MPS is not available on this machine"
+)
+def test_explicit_mps_is_selected_when_available() -> None:
+    assert select_device("mps").type == "mps"

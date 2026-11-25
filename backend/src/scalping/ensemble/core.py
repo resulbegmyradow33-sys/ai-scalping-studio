@@ -1,8 +1,9 @@
 """Combine member models into one probability distribution.
 
 This is Phase 9 slice 1: soft voting, weighted averaging, hard voting and a
-stacked meta-learner, plus the out-of-fold (OOF) plumbing they need. It does
-**not** pick members by regime yet and it does not train on the real store.
+stacked meta-learner, plus the out-of-fold (OOF) plumbing they need. Regime-
+dependent weights live in :mod:`scalping.ensemble.regime` and reuse the same
+:class:`OOFResult`; nothing here trains on the real store.
 
 Leakage discipline is inherited, not re-implemented: :func:`fit_oof` asks
 :func:`scalping.ml.cv.fold_geometry` for the purged expanding-window boundaries,

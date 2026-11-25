@@ -9,6 +9,8 @@ afterEach(cleanup);
 
 const card: StrategyCard = {
   active: true,
+  classification: "legacy",
+  validation: "legacy-heuristic",
   strategy: "flow_momentum",
   timeframe: "H1",
   params: {
@@ -51,19 +53,36 @@ const card: StrategyCard = {
 };
 
 describe("StrategyCardPanel", () => {
-  it("shows the inactive fallback without a card", () => {
+  it("shows the inactive fallback and its legacy label", () => {
     render(<StrategyCardPanel card={{ active: false, strategy: "momentum" }} />);
 
     expect(screen.getByTestId("strategy-card-state")).toHaveTextContent(
-      "kart yok · M1 momentum",
+      "kart yok · legacy fallback · M1 momentum",
     );
-    expect(screen.getByText(/Henüz terfi etmiş bir kural kartı yok/)).toBeInTheDocument();
+    expect(screen.getByTestId("strategy-card-legacy")).toHaveTextContent("legacy baseline");
+    expect(screen.getByTestId("strategy-card-hint")).toHaveTextContent(
+      /Henüz terfi etmiş bir kural kartı yok/,
+    );
+  });
+
+  it("says NO TRADE when the legacy fallback is disabled", () => {
+    render(
+      <StrategyCardPanel
+        card={{ active: false, strategy: "no_trade", legacy_fallback: false }}
+      />,
+    );
+
+    expect(screen.getByTestId("strategy-card-state")).toHaveTextContent(
+      "NO TRADE · legacy fallback kapalı",
+    );
+    expect(screen.getByTestId("strategy-card-hint")).toHaveTextContent(/NO TRADE üretir/);
   });
 
   it("renders the promoted rule and its holdout evidence", () => {
     render(<StrategyCardPanel card={card} />);
 
     expect(screen.getByTestId("strategy-card-state")).toHaveTextContent("flow + momentum");
+    expect(screen.getByTestId("strategy-card-legacy")).toHaveTextContent("legacy baseline");
     expect(screen.getByText("üst %15 · 480 bar")).toBeInTheDocument();
     expect(screen.getByText("3 / 6 ATR · 48 bar")).toBeInTheDocument();
     expect(screen.getByTestId("strategy-card-holdout")).toHaveTextContent(
