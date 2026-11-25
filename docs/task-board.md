@@ -329,12 +329,12 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation
 
-- [ ] PARTIAL: dosya tetikleyicisi (size+mtime+sha256, kalıcı cursor) ve matured
-      paper-outcome trigger'ı (#122, yalnızca proposal üretir) var; veri ve
-      doküman yönlendirmesi yok.
-- [ ] PARTIAL: ingestion/index pipeline'ları hazır ve dosya tetikleyicisi
-      `knowledge.ingest` işini kuyruğa alabiliyor; dataset build ve discovery
-      otomatik tetiklenmiyor.
+- [ ] PARTIAL: file triggers (#158) and matured paper-outcome proposals
+      (#122) exist. #153 adds an approved-proposal → `discovery.run` bridge;
+      this does not approve hypotheses or promote candidates automatically.
+- [ ] PARTIAL: data-file triggers can enqueue dataset builds (#158); the
+      audited proposal bridge can enqueue discovery (#153). Automatic data
+      quality approval and an unattended research-to-paper cycle remain open.
 - [x] Production handlers registered: knowledge ingest, dataset build,
       discovery, paper advance and matured-outcome analysis (#115).
 - [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
@@ -342,11 +342,15 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       daemon (#118) defaults to the `m2_8gb` profile, but the plain `Orchestrator`
       still defaults to `AllowAllGuard`, so callers can bypass measurement.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] PARTIAL: discovery, evidence bundle (#114), fail-closed promotion policy
-      (#117), one-shot holdout (#121), champion governance, paper runner and
-      matured outcomes exist as separate pieces; one auditable lifecycle and
-      evidence-only champion enforcement are still missing. Nothing persists a
-      bundle from a run yet (#136).
+- [ ] PARTIAL: discovery evidence persistence (#159), fail-closed promotion
+      policy (#117), one-shot holdout (#121), champion governance and continuous
+      paper runner (#156) are wired as separate pieces. Synthetic acceptance
+      (#151) proves wiring only; real-market OOS → reviewed promotion → sustained
+      paper → matured-feedback cycle remains unproven.
+- [x] Paper gap handling: runner supports `strict`, `session_aware` and
+      `skip_with_report` with append-only audit (#164). Open PR
+      `fix/paper-advance-gap-policy` wires explicit `gap_policy` selection
+      into `paper.advance`; omitted payload keeps the safe `strict` default.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
 - [ ] PARTIAL: pause/safe mode/disable research var; champion rollback discovery
