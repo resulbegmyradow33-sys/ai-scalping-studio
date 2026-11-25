@@ -108,9 +108,9 @@ npm run dev -- -p 3001
 ```
 
 Open `http://127.0.0.1:3001`. Without a strategy card the panel replays the
-legacy M1 momentum rule by default during migration. To make the interactive
-replay fail closed instead, start the API with `--no-legacy-fallback`; this
-switch does not change the autonomous paper path. See the runbook for details.
+legacy M1 momentum rule by default during migration. Open PR #177 adds
+`--no-legacy-fallback` for fail-closed UI testing; it does not change the
+autonomous paper path. See the runbook for details and merge status.
 
 To use the validated rule, copy the seed card and start with a flow store:
 
