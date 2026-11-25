@@ -21,6 +21,7 @@ from scalping.discovery.archive import (
     DiscoveryArchive,
     EvidenceRecord,
     TrialRecord,
+    TrialStats,
     UnknownCandidateError,
 )
 from scalping.discovery.evidence import (
@@ -41,6 +42,12 @@ from scalping.discovery.evidence import (
     locked_oos_checksum,
     settings_digest,
     verify_evidence,
+)
+from scalping.discovery.exposure import (
+    ExposureError,
+    SearchExposure,
+    apply_to_evidence,
+    exposure_for,
 )
 from scalping.discovery.holdout import (
     HOLDOUT_SCHEMA_VERSION,
@@ -127,6 +134,7 @@ __all__ = [
     "EvidencePolicy",
     "EvidenceRecord",
     "ExpectedIdentity",
+    "ExposureError",
     "Factory",
     "FoldEvidence",
     "HoldoutConfig",
@@ -145,12 +153,15 @@ __all__ = [
     "PromotionRejection",
     "RegimeEvidence",
     "SearchConfig",
+    "SearchExposure",
     "SearchResult",
     "SplitBoundaries",
     "StressEvidence",
     "TrialRecord",
     "TrialResult",
+    "TrialStats",
     "UnknownCandidateError",
+    "apply_to_evidence",
     "attach_holdout",
     "bootstrap_ci",
     "build_evidence",
@@ -162,6 +173,7 @@ __all__ = [
     "evidence_checksum",
     "evidence_from_dict",
     "evolve",
+    "exposure_for",
     "is_production_policy",
     "is_production_policy_digest",
     "is_sealed_decision",
