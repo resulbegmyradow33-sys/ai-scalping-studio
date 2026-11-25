@@ -416,26 +416,35 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- controls
 
-    def pause(self, reason: str | None = None) -> None:
+    def pause(self, reason: str | None = None, *, actor: str | None = None) -> None:
         """Stop claiming work until :meth:`resume`; the queue keeps growing."""
-        self._set_flag(STATE_PAUSED, True, reason, "paused")
+        self._set_flag(STATE_PAUSED, True, reason, "paused", actor=actor)
 
-    def resume(self) -> None:
-        self._set_flag(STATE_PAUSED, False, None, "resumed")
+    def resume(self, *, actor: str | None = None) -> None:
+        self._set_flag(STATE_PAUSED, False, None, "resumed", actor=actor)
 
-    def safe_mode(self, enabled: bool, reason: str | None = None) -> None:
+    def safe_mode(
+        self, enabled: bool, reason: str | None = None, *, actor: str | None = None
+    ) -> None:
         """Safe mode claims nothing at all; it is the owner's hard stop."""
         self._set_flag(
-            STATE_SAFE_MODE, enabled, reason, "safe_mode_on" if enabled else "safe_mode_off"
+            STATE_SAFE_MODE,
+            enabled,
+            reason,
+            "safe_mode_on" if enabled else "safe_mode_off",
+            actor=actor,
         )
 
-    def disable_research(self, enabled: bool, reason: str | None = None) -> None:
+    def disable_research(
+        self, enabled: bool, reason: str | None = None, *, actor: str | None = None
+    ) -> None:
         """Block research kinds while still allowing ingestion-style jobs."""
         self._set_flag(
             STATE_RESEARCH_DISABLED,
             enabled,
             reason,
             "research_disabled" if enabled else "research_enabled",
+            actor=actor,
         )
 
     @property
@@ -481,13 +490,27 @@ class Orchestrator:
         reason = parsed.get("reason")
         return on, None if reason is None else str(reason)
 
-    def _set_flag(self, key: str, on: bool, reason: str | None, event: str) -> None:
+    def _set_flag(
+        self,
+        key: str,
+        on: bool,
+        reason: str | None,
+        event: str,
+        *,
+        actor: str | None = None,
+    ) -> None:
         stamp = _utc_now()
-        payload = {"on": on, "reason": reason, "at": stamp}
+        payload: dict[str, Any] = {"on": on, "reason": reason, "at": stamp}
+        detail: dict[str, Any] = {"on": on, "reason": reason}
+        if actor is not None:
+            # The audit line names who switched the control. CLI/daemon callers
+            # omit the actor and keep the historical event payload unchanged.
+            payload["actor"] = actor
+            detail["actor"] = actor
         self.store.set_state(key, _json(payload), now=stamp)
         self.store.append_event(
             event,
-            detail=_json({"on": on, "reason": reason}),
+            detail=_json(detail),
             now=stamp,
         )
 

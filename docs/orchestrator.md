@@ -54,10 +54,11 @@ process, not an operating-system service.
   slice, and no handler here fits a model.
 - **No retention policy.** Jobs and events are never deleted, which is correct
   for an experiment history and will eventually need an archive step.
-- **No write API/UI.** The only HTTP surface is the read-only autonomy viewer
-  described below; there is no endpoint to enqueue, cancel, pause, promote or
-  start a daemon. State is queryable in-process through `JobStore`,
-  `Orchestrator.status()` and `OrchestratorDaemon.status()`.
+- **One HTTP write path, for owner controls only.** The read-only autonomy
+  viewer is described below; `POST /api/orchestrator/control` can pause, resume,
+  switch safe mode or toggle research. There is still no endpoint to enqueue,
+  cancel, promote or start/stop a daemon. State is queryable in-process through
+  `JobStore`, `Orchestrator.status()` and `OrchestratorDaemon.status()`.
 - **One daemon per database.** SQLite `BEGIN IMMEDIATE` makes claims unique, but
   it does not provide ownership: a second daemon's `start()` recovery sees the
   first daemon's `running` rows as interrupted, requeues them and runs them
@@ -243,6 +244,37 @@ without `champions` returns an empty list instead of migrating. `runs` in
 count. `/status` opens the archive once and derives both sections from that
 snapshot. `events.detail` is deliberately withheld: it can contain local paths
 or handler errors that are outside the status contract.
+
+### Owner control API
+
+`scalping.api.routes_orchestrator` mounts the only write route in this surface:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/orchestrator/control` | Current persisted controls plus the newest control transition |
+| `POST` | `/api/orchestrator/control` | Apply one owner control change |
+
+The body is exactly `{"action": "...", "reason": "..."}`. `action` is one of
+`pause`, `resume`, `safe_mode_on`, `safe_mode_off`, `disable_research` or
+`enable_research`; an unknown value, an unknown field or a missing/blank reason
+for `pause`, `safe_mode_on` or `safe_mode_off` is a `422`. `reason` is optional
+for the three reversing actions. A missing orchestrator database is a `409` and
+is not created by the request.
+
+The write goes through `Orchestrator.pause/resume/safe_mode/disable_research`,
+so it updates the same `state` keys and appends the same control event as the
+CLI. The event's `detail` carries `actor: "local-owner"` (the API has no
+identity layer) and the reason. The route touches only `state` and `events`: it
+never enqueues, claims, cancels, promotes, runs a job or starts/stops a daemon.
+`GET` opens the file read-only, reports `configured: false` when it is absent and
+never creates or migrates it.
+
+**Local-only assumption.** The API is served on loopback and has no
+authentication layer, matching the rest of the panel. Anything that can reach
+the port can switch these controls; binding the app to a public interface
+requires an authentication/authorization layer first. The database path is app
+configuration (`create_app(orchestrator_db=...)`), never a request field, and
+error bodies do not echo it.
 
 ### Autonomy page (`/autonomy`)
 
@@ -519,6 +551,11 @@ Controls are written to the `state` table with their reason, and read on every
 iteration, so they survive a restart and two orchestrators over one database
 agree. A refused claim writes a `claim_refused` event naming the control and its
 reason — the answer to "why did nothing run?".
+
+The three persisted flags can be switched from the CLI and from
+`POST /api/orchestrator/control` (see the owner control API above). The HTTP
+route uses the same methods and records `actor: "local-owner"` in the event
+detail; `cancel` remains in-process only.
 
 `safe_mode` is checked before `pause`; both before any claim. A running handler
 is not interrupted by a control switch: the orchestrator compares the row after

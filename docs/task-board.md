@@ -285,12 +285,14 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Add candidate mutation, crossover, deduplication, complexity limits,
       reproducible seeds, experiment budgets and cancellation.
 - [ ] PARTIAL: simulator fills/costs and risk controls are connected through
-      DslEvaluator (#102/#104). A chronological fold evidence bundle (#114), a
-      one-shot locked holdout (#121) and a bundle reproducer (#130) exist, but
-      `discovery run` neither builds an evidence bundle nor spends a holdout;
-      the producer is issue #136.
-- [ ] PARTIAL: trial counts and caps are recorded per search; a data-snooping
-      correction/penalty policy is still missing (only attempt caps apply).
+      DslEvaluator (#102/#104). #159 closes #136: discovery can now persist an
+      atomic dataset artifact, evidence bundle and spec sidecar, verify them by
+      read-back and reproduce the checksum. The CLI producer exists, but
+      discovery does not automatically spend the locked holdout or promote.
+- [x] Add multiple-testing selection controls (#149): adjusted screening,
+      deflated effect floor with trial/complexity penalty and seeded bootstrap
+      CI. The advice is an additional screen, not a promotion decision; IID
+      assumptions and limitations remain documented.
 - [ ] Evaluate stability across symbols, timeframes, regimes and cost stress.
 - [x] Store full candidate lineage, dataset/code/config hashes and rejection
       reasons in the registry.
@@ -299,10 +301,13 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Replay a stored evidence bundle from its identity and refuse settings,
       code-version, dataset or spec drift (#130).
 - [ ] PARTIAL: a fail-closed `PROMOTION_V1` policy compares candidate and
-      incumbent on identical evidence (#117), but no runtime path calls it and
-      no command writes the bundle it reads (#136).
-- [ ] PARTIAL: no-look-ahead, determinizm, lineage ve DSL safety testleri var;
-      overfit reddi, no-trade seçimi ve cost sensitivity evaluator diliminde.
+      incumbent on identical evidence (#117); #159 now supplies its evidence
+      bundle input. Automatic production promotion remains intentionally
+      unconnected pending explicit policy review and acceptance.
+- [ ] PARTIAL: no-look-ahead, determinism, lineage and DSL safety tests exist;
+      #169 makes evidence checksums thread-independent. The real XAUUSD H1
+      smoke (#143) correctly chose NO TRADE; it did not validate a strategy.
+      #174 is an open PR adding stricter tradable-best selection.
 
 ## Phase 17 — Knowledge ingestion and hypothesis research
 
@@ -319,8 +324,10 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 - [x] Link each hypothesis to source passages and experiment outcomes.
 - [x] Route source-linked hypotheses to audited experiment proposals (#123,
       provenance hardened in #132). Prose cannot create a strategy or an order.
-- [ ] PARTIAL: proposals are stored with an approval/audit trail; nothing
-      converts an approved proposal into a discovery run automatically.
+- [ ] PARTIAL: #153 adds an audited bridge: only approved, scope-checked,
+      holdout-safe and deduplicated proposals may enqueue `discovery.run`.
+      It does not approve proposals, create strategies from prose or place
+      orders. Completed backtests/paper logs are not yet a full feedback corpus.
 - [ ] Ingest completed backtests, paper logs and broker exports as feedback.
 - [x] Tests: parser errors, provenance, source traceability, duplicate imports,
       hypothesis schema and no direct document-to-order path.
@@ -329,12 +336,14 @@ met end to end · `BLOCKED` missing data/dependency/decision.
 
 ## Phase 18 — Autonomous Learning Orchestrator and closed-loop operation
 
-- [ ] PARTIAL: dosya tetikleyicisi (size+mtime+sha256, kalıcı cursor) ve matured
-      paper-outcome trigger'ı (#122, yalnızca proposal üretir) var; veri ve
-      doküman yönlendirmesi yok.
-- [ ] PARTIAL: ingestion/index pipeline'ları hazır ve dosya tetikleyicisi
-      `knowledge.ingest` işini kuyruğa alabiliyor; dataset build ve discovery
-      otomatik tetiklenmiyor.
+- [ ] PARTIAL: file triggers (size+mtime+sha256, durable cursor) and the
+      matured paper-outcome trigger (#122, proposal only) exist. #153 adds the
+      approved-proposal → `discovery.run` queue bridge; this is not automatic
+      hypothesis approval or promotion.
+- [ ] PARTIAL: ingestion/index and dataset/discovery handlers are registered
+      (#115); data triggers can enqueue dataset builds, and approved proposals
+      can enqueue discovery. Automatic data-quality approval and a full
+      unattended research lifecycle remain open.
 - [x] Production handlers registered: knowledge ingest, dataset build,
       discovery, paper advance and matured-outcome analysis (#115).
 - [x] Persist jobs; support pause/resume/cancel/retry/crash recovery.
@@ -342,15 +351,17 @@ met end to end · `BLOCKED` missing data/dependency/decision.
       daemon (#118) defaults to the `m2_8gb` profile, but the plain `Orchestrator`
       still defaults to `AllowAllGuard`, so callers can bypass measurement.
 - [ ] Keep paper execution isolated from training failures.
-- [ ] PARTIAL: discovery, evidence bundle (#114), fail-closed promotion policy
-      (#117), one-shot holdout (#121), champion governance, paper runner and
-      matured outcomes exist as separate pieces; one auditable lifecycle and
-      evidence-only champion enforcement are still missing. Nothing persists a
-      bundle from a run yet (#136).
+- [ ] PARTIAL: #159 now persists evidence bundles and dataset artifacts;
+      #117 supplies the fail-closed promotion policy; #121 protects one-shot
+      holdout; #156 routes `paper.advance` through the continuous runner and
+      evidence-governed champion. #151 proves only synthetic wiring. A complete
+      real-market OOS → reviewed promotion → sustained paper → matured-feedback
+      cycle is still unproven.
 - [x] Log why every automated job was started, skipped, promoted or rejected
       (append-only event tablosu).
-- [ ] PARTIAL: pause/safe mode/disable research var; champion rollback discovery
-      arşivinde var (#109), orchestrator seviyesinde rollback kontrolü yok.
+- [ ] PARTIAL: persisted pause/safe-mode/disable-research controls exist in
+      the orchestrator core. Open PR #175 adds an audited local HTTP control
+      surface; open PR #177 adds a fail-closed legacy UI fallback switch.
 - [ ] PARTIAL: trigger, recovery, resource refusal ve kontrol testleri var;
       paper isolation ve uçtan uca döngü yok.
 

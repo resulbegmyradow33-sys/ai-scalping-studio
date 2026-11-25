@@ -1,8 +1,8 @@
 # API contract tests
 
 `backend/tests/test_api_contracts.py` pins the **wire shape** of the merged HTTP
-surface: `/api/paper`, `/api/ml`, `/api/autonomy`, `/api/data/status`,
-`/api/regime` and `/api/strategy/card`.
+surface: `/api/paper`, `/api/ml`, `/api/autonomy`, `/api/orchestrator`,
+`/api/data/status`, `/api/regime` and `/api/strategy/card`.
 
 These tests are shape guards, not behaviour proofs. A green run means "the
 response envelope did not drift"; it says nothing about whether a strategy,
@@ -14,6 +14,7 @@ security are covered by the per-route suites:
 | Paper ledger reads and writes | `test_api_paper.py` |
 | ML run lifecycle and evaluation | `test_api_ml.py` |
 | Autonomy stores and read-only GETs | `test_api_autonomy.py` |
+| Orchestrator owner controls | `test_api_orchestrator_control.py` |
 | Data download, provenance, ids | `test_api_data.py`, `test_api_security.py` |
 | Regime labels | `test_api_regime.py` |
 | Strategy card | `test_api_strategy.py` |

@@ -31,7 +31,12 @@ from pathlib import Path
 
 from scalping.config import Settings
 from scalping.data.store import ParquetStore
-from scalping.strategy.calibrate import calibrate, card_from_report
+from scalping.strategy.calibrate import (
+    AUDIT_FILENAME,
+    calibrate,
+    card_from_report,
+    record_calibration,
+)
 from scalping.strategy.card import load_card, save_card
 from scalping.strategy.flow import flow_series
 
@@ -62,6 +67,17 @@ def _cycle(args: argparse.Namespace) -> dict[str, object]:
             card_path,
             card_from_report(report, symbol=args.symbol, note=_NOTE),
         )
+    audit_path = Path(args.audit) if args.audit else card_path.parent / AUDIT_FILENAME
+    record_calibration(
+        audit_path,
+        actor="nightly_calibrate",
+        dry_run=False,
+        report=report,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        card_written=report.promoted,
+        card_path=card_path,
+    )
     result = {
         "event": "calibrated",
         "at": datetime.now(UTC).isoformat(timespec="seconds"),
@@ -86,6 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeframe", default="H1", choices=("M5", "M15", "M30", "H1", "H4", "D1"))
     parser.add_argument("--card", default="runs/strategy_card.json")
     parser.add_argument("--history", default="runs/strategy_history.jsonl")
+    parser.add_argument(
+        "--audit",
+        default=None,
+        help=f"calibration audit log (default: next to the card, {AUDIT_FILENAME})",
+    )
     parser.add_argument("--settings", default=None)
     parser.add_argument("--holdout-fraction", type=float, default=0.2)
     parser.add_argument("--min-train-trades", type=int, default=100)
