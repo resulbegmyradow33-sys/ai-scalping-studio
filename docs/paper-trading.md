@@ -5,7 +5,9 @@ deterministic session runner, a read/write HTTP API over the ledger, and a
 disabled MT5 demo adapter skeleton. Phase 19 slice A adds an autonomous runner
 that paper-trades a validated DSL strategy spec. Slice B adds incremental
 operation on appended bars and matured-outcome analysis. There is still no
-scheduler; a session row is a record, not a running process. Phase 13 adds the
+session runner process; a session row is a record, not a running process. The
+orchestrator's `paper.advance` scheduler now *enqueues* advances when a new
+stored bar is decidable, but it owns no feed and no clock. Phase 13 adds the
 read-only Paper Trading page at `/paper`, where closing a session is the only
 write.
 
@@ -305,6 +307,15 @@ session id in the job result. The payload's `bars` is validated and recorded,
 but the continuous contract advances every newly closed stored bar, so it is a
 budget label, not a per-call cap.
 
+The job no longer needs an operator to enqueue it by hand:
+`PaperAdvanceScheduler` in `scalping.orchestrator.paper_scheduler` reads the
+evidence champions, the stored bars and the ledger cursor and emits one
+`paper.advance` per scope when a new decidable bar exists. It is bound by
+`orchestrator run --schedule-paper`. It still owns no feed and no clock: it can
+only see a bar that is already stored, and the provisional newest bar never
+counts as a decision. The contract, dedupe key, refusal reasons and bounds are
+in [`orchestrator.md`](orchestrator.md#evidence-champions-paper-advance-scheduler).
+
 ### Idempotency rule
 
 The ledger is the cursor. The last processed timestamp is the newest signal in
@@ -464,8 +475,10 @@ the default, because synthetic data must not become real market evidence.
 
 ### Honest limits
 
-- **Single process, no scheduler.** `advance()` is a synchronous call; nothing
-  polls the store, sleeps or retries. A scheduler/daemon is the next slice.
+- **Single process, no runner loop.** `advance()` is a synchronous call; nothing
+  inside this package polls the store, sleeps or retries. The orchestrator's
+  `--schedule-paper` source is the enqueueing scheduler, and its daemon drains the
+  job; neither one watches a feed or starts a trading loop.
 - **Outcomes only after close.** A trade enters the batch when `trades` has a
   row. Until then its P&L is unrealized and excluded.
 - **Session-level data id.** The `signals` table has no data column, so the
@@ -614,14 +627,19 @@ integration:
 ## Not built yet
 
 - A demo or live MT5 integration. `Mt5DemoAdapter` refuses every call.
-- Session scheduler and a long-running process separate from training; the API
-  records a session but nothing steps it.
+- A session runner process separate from training; the API records a session but
+  nothing steps it. The orchestrator daemon enqueues and runs a `paper.advance`
+  job when `--schedule-paper` is bound, but the runner itself is still a
+  synchronous call, not a service.
+- A market-data feed and a bar clock. The scheduler infers "new" from stored
+  bars; nothing ingests, closes or paces bars, and a bar that has not arrived
+  cannot be advanced.
 - A direct HTTP/CLI entry point that constructs a runner. The orchestrator's
   `paper.advance` job reaches `ContinuousPaperRunner` with champion gating; there
   is no endpoint or command that selects a spec and runs a session in-process.
-- A scheduler or daemon for continuous operation. `advance()` is caller-driven;
-  nothing polls the store, sleeps or retries on new bars, and no endpoint starts
-  a loop.
+- A scheduler or daemon that steps the runner on its own. The orchestrator's
+  `--schedule-paper` source enqueues a job and the daemon drains it, but no
+  endpoint starts a loop and nothing polls the store from inside this package.
 - Limit orders and partial fills. `orders.status` already has `pending`, and
   `resume` reports pending rows, but the runner only sends market orders.
 - Exit fills in `fills`. The broker settles exits as `trades`; the exit price

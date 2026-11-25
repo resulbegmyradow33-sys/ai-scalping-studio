@@ -1236,6 +1236,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         HandlerContext,
         register_default_handlers,
     )
+    from scalping.orchestrator.paper_scheduler import PaperAdvanceScheduler
     from scalping.orchestrator.paper_triggers import (
         KIND_PAPER_OUTCOMES,
         PaperOutcomeTriggerSource,
@@ -1244,7 +1245,9 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     from scalping.orchestrator.store import JobStore
 
     paper_ledgers = tuple(args.watch_paper_ledger or ())
-    if args.no_scan and (args.watch_dir or args.watch_data_dir or paper_ledgers):
+    if args.no_scan and (
+        args.watch_dir or args.watch_data_dir or paper_ledgers or args.schedule_paper
+    ):
         raise CliError("--no-scan cannot be combined with a watch source")
     if args.watch_dir and args.watch_data_dir:
         raise CliError("--watch-dir and --watch-data-dir cannot be combined")
@@ -1294,6 +1297,23 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
             sources.append(data_source)
+        context = HandlerContext(
+            data_root=Path(args.root),
+            runs_root=Path(args.runs_root),
+            archive_root=Path(args.archive_root),
+        )
+        if args.schedule_paper:
+            # The scheduler reads the same three paths the handlers do: the
+            # stored bars a job would read, the archive that holds the champion
+            # and the ledger whose cursor decides whether a bar is new.
+            sources.append(
+                PaperAdvanceScheduler(
+                    store=store,
+                    data_root=context.data_root,
+                    archive_path=context.discovery_archive_path,
+                    ledger_path=context.paper_ledger_path,
+                )
+            )
         # One source per explicit ledger path, in the order given. There is no
         # implicit default: <archive-root>/paper.sqlite is never bound unless
         # the operator passes it, and the read-only HTTP API cannot bind one.
@@ -1307,14 +1327,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         )
         triggers = tuple(sources)
         registry = Orchestrator(store)
-        register_default_handlers(
-            registry,
-            HandlerContext(
-                data_root=Path(args.root),
-                runs_root=Path(args.runs_root),
-                archive_root=Path(args.archive_root),
-            ),
-        )
+        register_default_handlers(registry, context)
         if paper_ledgers:
             # Proposal-only: it records the outcome and recommends the next
             # research cycle; it never enqueues discovery or runs a search.
@@ -1944,6 +1957,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "watch a market-data root for new Parquet/CSV and enqueue one"
             " dataset.build per <symbol>/<timeframe>; incompatible with --watch-dir"
+        ),
+    )
+    run.add_argument(
+        "--schedule-paper",
+        action="store_true",
+        help=(
+            "scan the discovery archive for evidence champions and enqueue one"
+            " paper.advance per scope when a new decision bar exists; the"
+            " scheduler reads stored bars and never fetches a feed"
         ),
     )
     run.add_argument(
