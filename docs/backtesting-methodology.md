@@ -191,12 +191,12 @@ correctly, never that the candidate has an edge.
 
 | Section | Fields |
 |---|---|
-| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget` |
+| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget`, `source`, `synthetic` |
 | policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
 | aggregate | total trades, pooled expectancy and total R, pooled profit factor, worst fold drawdown, positive-fold fraction, 95% bootstrap intervals, pooled per-regime counts and regime coverage |
-| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
+| locked OOS | optional `LockedOOSEvidence` (`checksum`, `evidence_checksum`, identity, `source`/`synthetic`, policy id/version, test rows/timestamps, metrics, intervals, regimes, stress); it is part of the bundle checksum. `checksum` is canonical JSON sha256 without `checksum`/`created_at`; `evidence_checksum` is the pre-attach bundle checksum |
 | stamps | `checksum` (sha256 of canonical JSON without `checksum`/`created_at`) and `created_at` |
 
 Every number is finite or the build fails. A profit factor of `inf` (wins with
@@ -206,6 +206,30 @@ code version or execution-settings digest is detectable before a policy reads a
 metric. `settings_digest` hashes the contract, risk and cost blocks, because
 settings are not in the dataset manifest and two bundles priced differently must
 not share identity.
+
+`source` and `synthetic` are the dataset sidecar provenance and belong to the
+identity and the checksum: the same numbers on a synthetic tape are a different
+experiment from the same numbers on real bars. `EvidenceConfig` accepts both,
+`build_evidence` propagates them from the manifest, and a config value that
+contradicts the manifest fails with `provenance_mismatch`. A missing manifest
+field stays `None` (unknown) and is never defaulted to `False`; see
+[`provenance-audit-2026-11-24.md`](provenance-audit-2026-11-24.md).
+
+### Provenance gate
+
+Promotion is fail-closed on provenance, not merely informative about it:
+
+| Bundle provenance | `PROMOTION_V1` | non-production policy with `allow_synthetic=True` |
+|---|---|---|
+| `synthetic is False` | accepted (other gates still apply) | accepted |
+| `synthetic is None` | rejected, `provenance_unknown` | rejected, `provenance_unknown` |
+| `synthetic is True` | rejected, `synthetic_data` | accepted only while the policy is not registered as production |
+
+The production policy cannot be constructed with `allow_synthetic=True`. The
+champion comparison also requires candidate and champion provenance to match,
+and an attached locked-OOS section must repeat the bundle's provenance. The
+holdout ledger seals `source`/`synthetic` with the dataset identity, so the
+spend cannot silently switch tapes.
 
 The schema version is stored and must equal the module's current version.
 

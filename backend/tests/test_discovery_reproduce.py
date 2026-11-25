@@ -23,7 +23,7 @@ import pytest
 
 from scalping.config import Settings
 from scalping.data.store import ParquetStore
-from scalping.datasets.artifact import save_dataset_arrays
+from scalping.datasets.artifact import ARTIFACT_FILE, save_dataset_arrays
 from scalping.datasets.builder import DatasetBundle, build_dataset
 from scalping.discovery import reproduce as reproduce_module
 from scalping.discovery.evidence import (
@@ -120,6 +120,8 @@ def stored_bundle(
     *,
     bars: pl.DataFrame | None = None,
     settings: Settings | None = None,
+    source: str | None = None,
+    synthetic: bool | None = None,
 ) -> SimpleNamespace:
     """Write one complete, reproducible experiment under ``tmp_path``."""
     store_root = tmp_path / "data"
@@ -136,12 +138,14 @@ def stored_bundle(
         validation_fraction=0.2,
         purge_bars=3,
         embargo_bars=2,
+        source=source,
+        synthetic=synthetic,
     )
     save_dataset_arrays(dataset_artifact_dir(store_root, bundle.manifest.checksum), bundle)
     evidence = build_evidence(
         bundle,
         long_spec(),
-        config(),
+        config(source=source, synthetic=synthetic),
         features=features,
         settings=settings,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -193,6 +197,42 @@ def test_sidecar_spec_is_used_when_none_is_passed(tmp_path: Path) -> None:
     assert result.checksum == stored.evidence.checksum
 
 
+def test_provenance_round_trips_through_reproduction(tmp_path: Path) -> None:
+    stored = stored_bundle(tmp_path, source="test:real", synthetic=False)
+
+    assert (stored.evidence.source, stored.evidence.synthetic) == ("test:real", False)
+    result = reproduce(stored, spec=long_spec())
+
+    assert isinstance(result, CandidateEvidence)
+    assert (result.source, result.synthetic) == ("test:real", False)
+    assert result.checksum == stored.evidence.checksum
+
+
+def test_unknown_provenance_round_trips_as_unknown(tmp_path: Path) -> None:
+    stored = stored_bundle(tmp_path)
+
+    result = reproduce(stored, spec=long_spec())
+
+    assert isinstance(result, CandidateEvidence)
+    assert (result.source, result.synthetic) == (None, None)
+
+
+def test_a_manifest_whose_provenance_contradicts_the_bundle_is_refused(
+    tmp_path: Path,
+) -> None:
+    stored = stored_bundle(tmp_path, source="test:real", synthetic=False)
+    artifact = dataset_artifact_dir(stored.store_root, stored.bundle.manifest.checksum)
+    payload = json.loads((artifact / ARTIFACT_FILE).read_text(encoding="utf-8"))
+    payload["manifest"]["synthetic"] = True
+    (artifact / ARTIFACT_FILE).write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ReproduceError) as exc:
+        reproduce(stored, spec=long_spec())
+
+    assert exc.value.code == "provenance_mismatch"
+    assert exc.value.invalid is False
+
+
 def test_inline_json_spec_is_accepted(tmp_path: Path) -> None:
     stored = stored_bundle(tmp_path)
 
@@ -225,6 +265,8 @@ def _locked_section(evidence: CandidateEvidence) -> LockedOOSEvidence:
         dataset_checksum=evidence.dataset_checksum,
         symbol=evidence.symbol,
         timeframe=evidence.timeframe,
+        source=evidence.source,
+        synthetic=evidence.synthetic,
         spec_hash=evidence.spec_hash,
         spec_version=evidence.spec_version,
         complexity=evidence.complexity,

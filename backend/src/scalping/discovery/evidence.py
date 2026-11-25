@@ -116,7 +116,9 @@ __all__ = [
 ]
 
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
-EVIDENCE_SCHEMA_VERSION: Final[int] = 3
+#: Version 4 adds the ``source``/``synthetic`` provenance identity, so a bundle
+#: that cannot say whether its data is real is no longer schema-compatible.
+EVIDENCE_SCHEMA_VERSION: Final[int] = 4
 
 #: A promotion policy needs at least three folds to say anything about stability.
 MIN_EVIDENCE_FOLDS: Final[int] = 3
@@ -159,6 +161,12 @@ class EvidenceConfig:
     carries the evidence code ``insufficient_folds`` instead of a bare
     ``ValueError``. ``regime_coverage_min`` defaults to 1.0: every trade must be
     attributed to a regime unless a caller explicitly accepts less.
+
+    ``source`` and ``synthetic`` are the dataset's sidecar provenance. They are
+    propagated into the bundle identity and checksum; when omitted the manifest
+    value is used, and a value that contradicts the manifest fails with
+    ``provenance_mismatch``. Omitting them never turns an unknown dataset into a
+    real one.
     """
 
     code_version: str
@@ -177,12 +185,22 @@ class EvidenceConfig:
     trial_count: int = 1
     complexity: int | None = None
     window: int = 60
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("code_version", "symbol", "timeframe"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{name} must be a non-empty str")
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("source must be a non-empty str or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError(
+                f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
+            )
         for name, minimum in (
             ("folds", 1),
             ("min_trades_per_fold", 1),
@@ -411,6 +429,8 @@ class LockedOOSEvidence:
     stress: tuple[StressEvidence, ...] = ()
     created_at: str = ""
     schema_version: int = 1
+    source: str | None = None
+    synthetic: bool | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -456,6 +476,14 @@ class LockedOOSEvidence:
             raise ValueError("a locked holdout must report at least one trade")
         if self.policy_version < 1 or self.schema_version < 1:
             raise ValueError("policy_version and schema_version must be >= 1")
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("source must be a non-empty str or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError(
+                f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
+            )
         if self.test_end_row <= self.test_start_row:
             raise ValueError("locked holdout test range must be non-empty")
         for name in (
@@ -495,6 +523,11 @@ class CandidateEvidence:
     a different dataset, dataset checksum, spec, code version or execution
     settings must be rejected by :func:`verify_evidence` before any policy reads
     the numbers.
+
+    ``source`` and ``synthetic`` are the dataset provenance carried from the
+    manifest. They are part of the identity and the checksum because "same
+    numbers on a synthetic tape" is not the same experiment as "same numbers on
+    real bars". ``None`` means unknown and is never rewritten to ``False``.
     """
 
     spec_hash: str
@@ -517,6 +550,18 @@ class CandidateEvidence:
     created_at: str
     schema_version: int = EVIDENCE_SCHEMA_VERSION
     locked_oos: LockedOOSEvidence | None = None
+    source: str | None = None
+    synthetic: bool | None = None
+
+    def __post_init__(self) -> None:
+        if self.source is not None and (
+            not isinstance(self.source, str) or not self.source.strip()
+        ):
+            raise ValueError("source must be a non-empty str or None")
+        if self.synthetic is not None and not isinstance(self.synthetic, bool):
+            raise TypeError(
+                f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         """JSON-safe nested payload; the checksum is computed over this minus stamps."""
@@ -1019,9 +1064,7 @@ def locked_oos_checksum(section: LockedOOSEvidence) -> str:
     including the metrics, intervals, regimes, stress and identity, is covered.
     """
     if type(section) is not LockedOOSEvidence:
-        raise TypeError(
-            f"section must be a LockedOOSEvidence, got {type(section).__name__}"
-        )
+        raise TypeError(f"section must be a LockedOOSEvidence, got {type(section).__name__}")
     payload = asdict(section)
     payload.pop("checksum", None)
     payload.pop("created_at", None)
@@ -1032,6 +1075,26 @@ def _nested(mapping: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     value = mapping.get(key)
     if not isinstance(value, Mapping):
         raise EvidenceError("missing_section", f"{key} must be a JSON object")
+    return value
+
+
+def _optional_text(payload: Mapping[str, Any], key: str) -> str | None:
+    """A missing or null provenance string is unknown, not an empty claim."""
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise EvidenceError("missing_section", f"{key} must be a non-empty string or null")
+    return value
+
+
+def _optional_flag(payload: Mapping[str, Any], key: str) -> bool | None:
+    """A missing or null provenance flag is unknown; ``0``/``"false"`` are refused."""
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise EvidenceError("missing_section", f"{key} must be true, false or null")
     return value
 
 
@@ -1195,6 +1258,8 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
                 ),
                 created_at=str(locked_raw.get("created_at", "")),
                 schema_version=int(locked_raw.get("schema_version", 1)),
+                source=_optional_text(locked_raw, "source"),
+                synthetic=_optional_flag(locked_raw, "synthetic"),
             )
         return CandidateEvidence(
             spec_hash=str(payload["spec_hash"]),
@@ -1217,6 +1282,8 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
             created_at=str(payload["created_at"]),
             schema_version=int(payload.get("schema_version", EVIDENCE_SCHEMA_VERSION)),
             locked_oos=locked,
+            source=_optional_text(payload, "source"),
+            synthetic=_optional_flag(payload, "synthetic"),
         )
     except EvidenceError:
         raise
@@ -1301,6 +1368,28 @@ def verify_evidence(
 
 
 # --- build --------------------------------------------------------------------
+
+
+def _resolve_provenance(config_value: Any, manifest_value: Any, name: str) -> Any:
+    """Agree with the manifest or inherit it; never label an unknown dataset.
+
+    A config value the manifest does not carry would be a claim the data cannot
+    support, so it is refused instead of written. An omitted config value simply
+    propagates whatever the manifest recorded, including unknown.
+    """
+    if config_value is None:
+        return manifest_value
+    if manifest_value is None:
+        raise EvidenceError(
+            "provenance_mismatch",
+            f"evidence config asserts {name}={config_value!r} but the dataset manifest does not record it",
+        )
+    if config_value != manifest_value:
+        raise EvidenceError(
+            "provenance_mismatch",
+            f"evidence config {name}={config_value!r} contradicts the dataset manifest {manifest_value!r}",
+        )
+    return config_value
 
 
 def build_evidence(
@@ -1514,6 +1603,8 @@ def build_evidence(
         bootstrap_confidence=float(config.bootstrap_confidence),
         window=config.window,
     )
+    provenance_source = _resolve_provenance(config.source, manifest.source, "source")
+    provenance_synthetic = _resolve_provenance(config.synthetic, manifest.synthetic, "synthetic")
     stamp = (datetime.now(UTC) if created_at is None else created_at).isoformat(timespec="seconds")
     bundle_evidence = CandidateEvidence(
         spec_hash=spec_hash,
@@ -1534,6 +1625,8 @@ def build_evidence(
         aggregate=aggregate,
         checksum="",
         created_at=stamp,
+        source=provenance_source,
+        synthetic=provenance_synthetic,
     )
     bundle_evidence = replace(
         bundle_evidence, checksum=_checksum_payload(bundle_evidence.to_dict())
