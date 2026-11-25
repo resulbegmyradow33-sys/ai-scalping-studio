@@ -221,6 +221,17 @@ describe("PaperTradingPage", () => {
     expect(document.body.textContent).not.toContain("$");
   });
 
+  it("marks legacy flow_momentum paper sessions", async () => {
+    routeSessions([sessionItem({ strategy: "flow_momentum" })]);
+    routeDetail(RUNNING, { summaryOverrides: { strategy: "flow_momentum" } });
+
+    renderPage();
+    await flush();
+
+    expect(screen.getByTestId("paper-row-legacy")).toHaveTextContent("legacy baseline");
+    expect(screen.getByTestId("paper-detail-legacy")).toHaveTextContent("legacy baseline");
+  });
+
   it("renders the loaded session from the API: balance, equity, counts and attribution", async () => {
     routeSessions([sessionItem()]);
     routeDetail(RUNNING, {

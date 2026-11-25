@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Final, Literal, Self
 
-from pydantic import BaseModel, Field, StringConstraints, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from scalping.serialize import metrics_payload
 
@@ -58,6 +58,10 @@ __all__ = [
     "MLTrainRequest",
     "MLTrainResponse",
     "OkResponse",
+    "OrchestratorControlAction",
+    "OrchestratorControlChange",
+    "OrchestratorControlRequest",
+    "OrchestratorControlState",
     "PaperEquityPage",
     "PaperEquityPoint",
     "PaperOrder",
@@ -902,3 +906,70 @@ class AutonomyEventPage(BaseModel):
     readable: bool
     items: list[AutonomyEventItem] | None = None
     limit: int
+
+
+# --------------------------------------------------------- orchestrator controls
+
+#: The owner controls the HTTP boundary may switch. Each value maps to one
+#: persisted flag transition; no value starts, stops or enqueues anything.
+OrchestratorControlAction = Literal[
+    "pause",
+    "resume",
+    "safe_mode_on",
+    "safe_mode_off",
+    "disable_research",
+    "enable_research",
+]
+
+#: Actions that record a decision rather than undo one, so the reason is
+#: required. Resume/enable are unambiguous reversals and may omit it.
+_REASON_REQUIRED_ACTIONS: Final[frozenset[str]] = frozenset(
+    {"pause", "safe_mode_on", "safe_mode_off"}
+)
+
+
+class OrchestratorControlRequest(BaseModel):
+    """One owner control change.
+
+    ``extra="forbid"`` is deliberate: an unknown field must not be silently
+    dropped, because a caller that thinks it set a different control would get a
+    success answer for a change it never made. There is no path, id or selector
+    in this body; the database path comes from app configuration only.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: OrchestratorControlAction
+    reason: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def _reason_is_present(self) -> Self:
+        if self.action in _REASON_REQUIRED_ACTIONS and not (self.reason or "").strip():
+            raise ValueError(f"reason is required for action {self.action!r}")
+        return self
+
+
+class OrchestratorControlChange(BaseModel):
+    """The newest persisted control transition, from the append-only audit log."""
+
+    action: OrchestratorControlAction
+    actor: str
+    reason: str | None = None
+    at: str
+
+
+class OrchestratorControlState(BaseModel):
+    """Current persisted controls plus the last change that produced them.
+
+    ``configured=False`` means the orchestrator database is absent. A file that
+    exists but has no readable state/event schema is ``configured=True,
+    readable=False``; both omit the flags rather than answer as if every control
+    were off.
+    """
+
+    configured: bool
+    readable: bool
+    paused: bool | None = None
+    safe_mode: bool | None = None
+    research_disabled: bool | None = None
+    last_change: OrchestratorControlChange | None = None
