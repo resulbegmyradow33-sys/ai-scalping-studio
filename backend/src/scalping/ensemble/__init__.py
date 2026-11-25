@@ -41,6 +41,7 @@ from scalping.ensemble.core import (
     fit_oof,
 )
 from scalping.ensemble.decision import Action, Decision, DecisionEngine, Position
+from scalping.ensemble.log import DecisionLog, DecisionLogError
 from scalping.ensemble.regime import (
     RegimeSelectionConfig,
     RegimeWeightedEnsemble,
@@ -56,6 +57,8 @@ __all__ = [
     "Action",
     "Decision",
     "DecisionEngine",
+    "DecisionLog",
+    "DecisionLogError",
     "Ensemble",
     "EnsembleConfig",
     "HardVotingEnsemble",

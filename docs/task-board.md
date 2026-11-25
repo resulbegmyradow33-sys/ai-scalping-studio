@@ -214,7 +214,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Ensemble disagreement score (mean pairwise total variation).
 - [ ] Out-of-distribution/unknown regime detection.
 - [x] Decision engine: BUY/SELL/HOLD/NO TRADE (ordered gates, reason required).
-- [ ] PARTIAL: `Decision` kaydı model/probability/disagreement/regime/reason taşıyor; kalıcı log yok.
+- [x] `Decision` kaydı + kalıcı append-only JSONL log (`DecisionLog`, schema_version, hata satırı).
 - [ ] PARTIAL: karşılaştırma var; 'daha basit olanı tut' otomatik değil.
 - [x] `docs/ensemble-decision.md`.
 

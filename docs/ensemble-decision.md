@@ -211,6 +211,27 @@ scores each member and the combined row on the same rows with
 named `ensemble`, and a member cannot reuse that name. If the ensemble does not
 win, the simpler member stays; that is the Phase 9 exit criterion.
 
+## Decision log
+
+`scalping.ensemble.DecisionLog` writes decisions as append-only JSONL:
+
+```python
+from scalping.ensemble import DecisionLog
+
+log = DecisionLog("runs/decisions/xauusd.jsonl")
+log.append(decision)
+rows = log.read(limit=100)
+```
+
+- Every line carries `schema_version` plus the full `Decision.to_dict()` body:
+  action, classes, class-keyed probabilities, disagreement, regime, reason,
+  model version and timestamp.
+- One append write + `fsync`; a truncated or foreign row raises
+  `DecisionLogError` with the line number instead of being skipped silently.
+- `read(limit=...)` returns the oldest rows; a missing file is an empty list.
+- The log is local research state, gitignored, and never read by the trading
+  path. SQLite indexing and an API view belong to Phase 10.
+
 ## What is not built
 
 - **Regime-conditional promotion.** Regime weights are computed and reported, but
@@ -222,8 +243,8 @@ win, the simpler member stays; that is the Phase 9 exit criterion.
   probabilities. ECE/MCE are reported, not optimised.
 - **Drift and OOD scoring.** No feature/prediction drift monitor, no
   out-of-distribution score, no confidence bands beyond disagreement.
-- **Persistence and API.** Decisions are not written to a store and not served.
-  The decision log schema exists as `Decision.to_dict()`; storage is Phase 10.
+- **Decision API.** The JSONL decision log exists; a SQLite index and an API
+  view are Phase 10 work.
 - **Cost-aware veto inside the engine.** Costs and the simulator gate live
   outside this module.
 - **Member inference fits.** `fit_oof` produces OOF evidence; fitting members on
