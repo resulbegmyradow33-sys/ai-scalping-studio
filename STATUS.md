@@ -2,9 +2,10 @@
 
 ## Current refresh — 2026-11-25 (supersedes older snapshot notes below)
 
-Verified `main`: `e17d820054f31777098bb4d87cc1c676d6f9390d`.
+Verified `main`: `50fbca6856f7b6df13fe2a6cea223bf06d93c2f7`.
 The four required CI checks on this exact commit (backend, frontend, Python
-CodeQL analysis and JavaScript/TypeScript CodeQL analysis) are **green**.
+CodeQL analysis and JavaScript/TypeScript CodeQL analysis) are **green**
+(workflows `45550807353` and `45550807354`; backend `2320 passed, 3 skipped`).
 The older "Known red on main" paragraph below describes a previous commit and
 must not be read as the current status.
 
@@ -46,7 +47,7 @@ must not be read as the current status.
 - Target-M2 acceptance with the user's local data and long-running resource
   measurements still needs to be executed on that machine.
 
-### Current open work (not merged)
+### Previously open work — now merged
 
 - #174: reject missing, malformed, fractional or insufficient trade-count
   evidence when selecting a tradable best candidate.
@@ -57,9 +58,8 @@ must not be read as the current status.
 - #171: feature-cache real-store measurements. The published figures are
   bounded slices and are not a full-store acceptance test.
 
-These PRs remain separate review branches. A green check on a PR or synthetic
-acceptance does not establish a trading edge. Do not merge them without the
-required review and branch-protection checks.
+These merged before `50fbca6`. A green check or synthetic acceptance on them
+does not establish a trading edge.
 
 ---
 
@@ -224,9 +224,7 @@ measured experiment demonstrates that expansion is necessary.
 - **Paper-traded:** exact version ran in paper mode with immutable attribution.
 - **Profitable:** cautious claim supported by adequate forward evidence; never guaranteed.
 
-A green CI run proves neither a trading edge nor profitability. This refresh ran
-documentation checks plus the targeted pytest files listed above on 2026-11-25:
-`test_promotion_policy.py`, `test_locked_holdout.py`, `test_discovery_reproduce.py`,
-`test_risk_acceptance.py` and `test_mtf_alignment.py` passed; `test_api_autonomy.py`
-failed as described. It did not run the full suite, use market data, spend a real
-holdout, or benchmark the M2.
+A green CI run proves neither a trading edge nor profitability. On `50fbca6`
+the full suite is green (CI run `45550807353`: `2320 passed, 3 skipped`), so
+`test_api_autonomy.py` now passes. The refresh did not use market data, spend a
+real holdout, or benchmark the M2.
