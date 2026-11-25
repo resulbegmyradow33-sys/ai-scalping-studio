@@ -18,7 +18,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError, fields, is_dataclass
+from dataclasses import FrozenInstanceError, fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -396,6 +396,22 @@ def _spread() -> Simulator:
     return _sim(Settings(risk=RiskConfig(max_spread_points=100.0)))
 
 
+def _slippage() -> Simulator:
+    # drop_frame's ATR 5.0 at the default 0.05 fraction is 0.25 price, which the
+    # default point (0.001) reports as 250 points.
+    return _sim(Settings(risk=RiskConfig(max_slippage_points=100.0)))
+
+
+def _data_quality() -> Simulator:
+    frame = drop_frame()
+    spread = frame.spread.copy()
+    spread[WINDOW - 1] = np.nan  # the first decision bar
+    return _sim(
+        Settings(risk=RiskConfig(data_quality_block=True)),
+        features=replace(frame, spread=spread),
+    )
+
+
 def _paused() -> Simulator:
     sim = _sim(Settings(risk=RiskConfig(pause_bars=3)))
     sim.paused_until = START + timedelta(hours=1)
@@ -442,6 +458,8 @@ GATES: list[tuple[str, Callable[[], Simulator], str]] = [
     ("emergency_stop", _emergency, "emergency_stop"),
     ("consecutive_losses", _consecutive, "consecutive_loss_pause"),
     ("max_spread", _spread, "max_spread"),
+    ("slippage_cap", _slippage, "slippage_limit"),
+    ("data_quality", _data_quality, "data_quality_block"),
     ("kill_switch_pause", _paused, "kill_switch_pause"),
     ("position_open", _position_open, "max_positions"),
     ("no_atr", _no_atr, "no_atr"),
@@ -517,6 +535,8 @@ def test_action_masks_agree_with_the_gate_across_a_synthetic_sequence() -> None:
             min_equity_frac=0.9,
             pause_bars=1,
             max_notional_x=10.0,
+            max_slippage_points=500.0,
+            data_quality_block=True,
         )
     )
     sim = Simulator(features, settings, session=SESSION)

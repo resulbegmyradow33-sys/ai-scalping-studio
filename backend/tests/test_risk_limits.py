@@ -9,6 +9,7 @@ losses, the timed pause latch and spread points.
 from __future__ import annotations
 
 import inspect
+from dataclasses import fields, replace
 from datetime import UTC, date, datetime, timedelta
 
 import numpy as np
@@ -37,6 +38,8 @@ def st(
     losses: int = 0,
     paused: datetime | None = None,
     spread: float | None = None,
+    slippage: float | None = None,
+    quality: bool = True,
     position: Position | None = None,
 ) -> AccountState:
     """A snapshot with the daily gate inert unless the test sets a base."""
@@ -54,6 +57,8 @@ def st(
         consecutive_losses=losses,
         paused_until=paused,
         spread_points=spread,
+        slippage_points=slippage,
+        data_quality_ok=quality,
     )
 
 
@@ -113,7 +118,10 @@ def test_default_limits_are_off():
         losses=99,
         paused=TS + timedelta(days=1),
         spread=10_000.0,
+        slippage=10_000.0,
+        quality=False,
     )
+
     assert e.allow_new(account, TS) == (True, None)
     assert e.kill_switch_reason(account) is None
 
@@ -142,6 +150,7 @@ def test_default_decisions_match_the_pre_phase_11_engine():
         (st(equity=100.0, day_start=-1.0), TS),
         (st(position=long_position()), TS),
         (st(equity=9_500.0, week_start=20_000.0, peak=20_000.0, losses=9, spread=9_999.0), TS),
+        (st(equity=9_500.0, slippage=9_999.0, quality=False), TS),
         (st(equity=9_500.0), TS.replace(day=6)),
     ]
     for account, ts in sequence:
@@ -164,6 +173,8 @@ def test_zeroed_new_fields_reproduce_the_default_run():
                 max_spread_points=0.0,
                 min_equity_frac=0.0,
                 pause_bars=0,
+                max_slippage_points=0.0,
+                data_quality_block=False,
             )
         ),
     )
@@ -252,6 +263,48 @@ def test_spread_limit_trips_only_above_the_cap():
     assert e.allow_new(st(spread=None), TS) == (True, None)
 
 
+# --- slippage --------------------------------------------------------------
+
+
+def test_slippage_limit_trips_only_above_the_cap():
+    e = engine(max_slippage_points=25.0)
+    assert e.allow_new(st(slippage=25.0), TS) == (True, None)
+    assert e.allow_new(st(slippage=25.01), TS) == (False, "slippage_limit")
+    assert e.allow_new(st(slippage=0.0), TS) == (True, None)
+
+
+def test_slippage_limit_without_an_estimate_is_inert():
+    e = engine(max_slippage_points=1.0)
+    assert e.allow_new(st(slippage=None), TS) == (True, None)
+
+
+def test_slippage_limit_is_off_at_zero():
+    e = engine()
+    assert e.allow_new(st(slippage=1_000_000.0), TS) == (True, None)
+
+
+# --- data quality ----------------------------------------------------------
+
+
+def test_data_quality_block_only_when_enabled():
+    enabled = engine(data_quality_block=True)
+    assert enabled.allow_new(st(quality=True), TS) == (True, None)
+    assert enabled.allow_new(st(quality=False), TS) == (False, "data_quality_block")
+
+    disabled = engine()
+    assert disabled.allow_new(st(quality=False), TS) == (True, None)
+
+
+def test_data_quality_block_never_touches_the_equity_kill_switches():
+    e = engine(data_quality_block=True)
+    assert e.kill_switch_reason(st(quality=False)) is None
+    equity = engine(data_quality_block=True, max_drawdown_pct=0.10)
+    assert equity.allow_new(st(equity=8_000.0, peak=10_000.0, quality=False), TS) == (
+        False,
+        "max_drawdown",
+    )
+
+
 # --- pause latch -----------------------------------------------------------
 
 
@@ -282,6 +335,8 @@ def test_pause_latch_is_inert_without_pause_bars():
         {"min_equity_frac": 1.01},
         {"max_spread_points": -1.0},
         {"max_spread_points": float("inf")},
+        {"max_slippage_points": -0.5},
+        {"max_slippage_points": float("nan")},
         {"consecutive_loss_pause": -1},
         {"pause_bars": -1},
     ],
@@ -289,6 +344,11 @@ def test_pause_latch_is_inert_without_pause_bars():
 def test_invalid_switch_config_is_rejected(kw):
     with pytest.raises(ValueError):
         engine(**kw)
+
+
+def test_non_bool_data_quality_flag_is_rejected():
+    with pytest.raises(TypeError):
+        engine(data_quality_block=1)  # type: ignore[arg-type]
 
 
 def test_entry_gate_has_no_override_parameter():
@@ -437,3 +497,192 @@ def test_spread_limit_blocks_entries_but_allows_hold_and_close():
     assert closed.info["blocked"] is None
     assert closed.info["position"] is None
     assert closed.info["trade"] is not None
+
+
+# --- slippage cap and data-quality block (Phase 11 remaining items) --------
+
+
+def test_slippage_cap_allows_the_boundary_and_blocks_one_step_over():
+    # flat_frame: ATR 0.5 price at slippage_atr_frac 0.05 is 0.025 price, and
+    # the default point of 0.001 turns that into exactly 25 contract points.
+    at_cap = Simulator(flat_frame(), Settings(risk=RiskConfig(max_slippage_points=25.0)))
+    at_cap.reset(seed=1)
+    assert at_cap.slippage_points == pytest.approx(25.0)
+    assert at_cap.action_masks().tolist() == [True, True, True, False]
+    assert at_cap.step(1).info["opened"] is not None
+
+    over = Simulator(flat_frame(), Settings(risk=RiskConfig(max_slippage_points=24.99)))
+    over.reset(seed=1)
+    assert over.slippage_points == pytest.approx(25.0)
+    assert over.action_masks().tolist() == [True, False, False, False]
+    result = over.step(1)
+    assert result.info["blocked"] == "slippage_limit"
+    assert result.info["opened"] is None
+
+
+def test_missing_atr_blocks_with_no_atr_by_default_and_the_quality_reason_when_on():
+    frame = flat_frame()
+    atr = frame.atr.copy()
+    atr[119] = np.nan  # the first decision bar
+    unusable = replace(frame, atr=atr)
+
+    off = Simulator(unusable, Settings())
+    off.reset(seed=1)
+    assert off.data_quality_ok is False, "quality is reported even while the gate is off"
+    assert off.action_masks().tolist() == [True, False, False, False]
+    assert off.step(1).info["blocked"] == "no_atr"
+
+    on = Simulator(unusable, Settings(risk=RiskConfig(data_quality_block=True)))
+    on.reset(seed=1)
+    assert on.action_masks().tolist() == [True, False, False, False]
+    result = on.step(1)
+    assert result.info["blocked"] == "data_quality_block"
+    assert result.info["opened"] is None
+
+
+def test_missing_spread_is_sanitised_by_default_and_blocked_when_the_flag_is_on():
+    frame = flat_frame()
+    spread = frame.spread.copy()
+    spread[119] = np.nan
+    unusable = replace(frame, spread=spread)
+
+    off = Simulator(unusable, Settings())
+    off.reset(seed=1)
+    assert off.spread_points is None, "no usable spread to express in points"
+    assert off.data_quality_ok is False
+    assert off.step(1).info["opened"] is not None, "the legacy bar read spread 0"
+
+    on = Simulator(unusable, Settings(risk=RiskConfig(data_quality_block=True)))
+    on.reset(seed=1)
+    assert on.action_masks().tolist() == [True, False, False, False]
+    assert on.step(1).info["blocked"] == "data_quality_block"
+
+
+def test_stale_bar_gap_blocks_the_entry_only_when_the_flag_is_on():
+    frame = flat_frame()
+    ts = frame.ts.copy()
+    ts[119:] += np.timedelta64(15, "m")  # 16-minute gap before the decision bar
+    stale = replace(frame, ts=ts)
+
+    off = Simulator(stale, Settings())
+    off.reset(seed=1)
+    assert off.data_quality_ok is False
+    assert off.step(1).info["opened"] is not None
+
+    on = Simulator(stale, Settings(risk=RiskConfig(data_quality_block=True)))
+    on.reset(seed=1)
+    assert on.action_masks().tolist() == [True, False, False, False]
+    result = on.step(1)
+    assert result.info["blocked"] == "data_quality_block"
+    assert result.info["opened"] is None
+
+
+def test_stale_gap_threshold_follows_the_frame_cadence():
+    frame = flat_frame(n=300)
+    hourly_ts = np.datetime64("2026-01-05T00:00", "us") + np.arange(300).astype("timedelta64[h]")
+    hourly = replace(frame, ts=hourly_ts)
+
+    normal = Simulator(hourly, Settings(risk=RiskConfig(data_quality_block=True)))
+    normal.reset(seed=1)
+    assert normal.data_quality_ok is True, "a 60-minute cadence is not a stale bar"
+    assert normal.step(1).info["opened"] is not None
+
+    ts = hourly.ts.copy()
+    ts[150:] += np.timedelta64(1, "h")  # one whole H1 bar missing
+    missing = replace(hourly, ts=ts)
+    sim = Simulator(missing, Settings(risk=RiskConfig(data_quality_block=True)))
+    sim.reset(seed=1)
+    while sim.bar_index < 150:
+        assert sim.step(0).info["blocked"] is None
+    assert sim.data_quality_ok is False
+    assert sim.step(1).info["blocked"] == "data_quality_block"
+
+
+def test_new_gates_do_not_block_hold_or_close():
+    frame = flat_frame()
+    ts = frame.ts.copy()
+    ts[120:] += np.timedelta64(15, "m")
+    atr = frame.atr.copy()
+    atr[120:] = 5.0  # 250 points of slippage, far over the 25-point cap
+    degraded = replace(frame, ts=ts, atr=atr)
+
+    sim = Simulator(
+        degraded,
+        Settings(risk=RiskConfig(max_slippage_points=25.0, data_quality_block=True)),
+    )
+    sim.reset(seed=1)
+    assert sim.step(1).info["opened"] is not None, "bar 119 is clean"
+
+    assert sim.bar_index == 120
+    assert sim.data_quality_ok is False
+    assert sim.slippage_points == pytest.approx(250.0)
+    assert sim.action_masks().tolist() == [True, False, False, True]
+
+    held = sim.step(0)
+    assert held.info["blocked"] is None and held.info["position"] is not None
+
+    closed = sim.step(3)
+    assert closed.info["blocked"] is None
+    trade = closed.info["trade"]
+    assert trade is not None and trade.reason == "manual"
+    assert closed.info["position"] is None
+
+
+def test_equity_force_close_is_unaffected_by_the_new_gates():
+    sim = Simulator(
+        flat_frame(),
+        Settings(
+            risk=RiskConfig(
+                weekly_loss_pct=0.001,
+                max_slippage_points=25.0,
+                data_quality_block=True,
+            )
+        ),
+    )
+    sim.reset(seed=1)
+    result = sim.step(1)
+    trade = result.info["trade"]
+    assert trade is not None and trade.reason == "weekly_loss_limit"
+    assert result.info["position"] is None
+
+
+def test_unusable_bars_keep_default_off_parity():
+    frame = flat_frame()
+    spread = frame.spread.copy()
+    spread[119:] = np.nan
+    atr = frame.atr.copy()
+    atr[121] = np.nan
+    degraded = replace(frame, spread=spread, atr=atr)
+
+    actions = [1, 0, 0, 3, 0, 0, 0]
+    default = Simulator(degraded, Settings())
+    zeroed = Simulator(
+        degraded,
+        Settings(risk=RiskConfig(max_slippage_points=0.0, data_quality_block=False)),
+    )
+    default.reset(seed=1)
+    zeroed.reset(seed=1)
+    for action in actions:
+        a = default.step(action)
+        b = zeroed.step(action)
+        assert a.reward == b.reward
+        assert a.info["equity"] == b.info["equity"]
+        assert a.info["blocked"] == b.info["blocked"]
+        assert a.info["position"] == b.info["position"]
+        assert a.info["trade"] == b.info["trade"]
+
+
+def test_the_new_gates_have_no_per_call_override():
+    assert list(inspect.signature(RiskEngine.allow_new_extended).parameters) == [
+        "self",
+        "account",
+        "ts",
+    ]
+    state_fields = {field.name: field for field in fields(AccountState)}
+    assert state_fields["slippage_points"].default is None
+    assert state_fields["data_quality_ok"].default is True
+
+    simulator_params = inspect.signature(Simulator.__init__).parameters
+    assert not any(
+        "slippage" in name or "quality" in name for name in simulator_params
+    ), "the gates come from frozen Settings, not from a call argument"

@@ -33,6 +33,13 @@ A tripped weekly, drawdown or emergency switch force-closes an open position
 with the switch name as ``Trade.reason``. With every Phase 11 field at ``0``
 the loop and its results are the pre-Phase-11 behaviour.
 
+The entry snapshot also carries ``slippage_points`` (the same
+``ATR * slippage_atr_frac / point`` the fill will pay) and ``data_quality_ok``
+(the decision bar's ATR, spread and gap from the previous bar). The engine
+compares them only when ``max_slippage_points`` is non-zero and
+``data_quality_block`` is on, so both gates are per-bar entry blocks that never
+touch HOLD or CLOSE.
+
 Strategy context
 ----------------
 With a ``strategy_selector`` the observation gains six values at the end: a
@@ -117,6 +124,35 @@ _OPEN_PENALTY: Final[float] = 0.05
 #: Flow observation: signed imbalance, its excess over the gate threshold, and
 #: the 5-bar change.
 _FLOW_CONTEXT: Final[int] = 3
+
+#: Floor for the stale-bar gap tolerance, in minutes. Matches the data
+#: validator's default (``scalping.data.validate``); the effective threshold is
+#: the larger of this floor and the frame's own median bar spacing, so an H1
+#: frame is not flagged for its normal 60-minute cadence while a missing H1 bar
+#: (a 120-minute gap) still is.
+_MIN_STALE_GAP_MINUTES: Final[float] = 10.0
+
+
+def _gap_minutes(ts: np.ndarray) -> np.ndarray:
+    """Open-to-open gap to the previous bar in minutes; ``NaN`` on row 0."""
+    stamps = np.asarray(ts, dtype="datetime64[us]")
+    gaps = np.full(stamps.shape, np.nan, dtype=np.float64)
+    if stamps.size > 1:
+        delta = np.diff(stamps).astype(np.timedelta64(1, "us")).astype(np.int64)
+        gaps[1:] = delta / 60_000_000.0
+    return gaps
+
+
+def _stale_gap_threshold(gaps: np.ndarray) -> float:
+    """Largest tolerated bar gap: the frame's median spacing, floored.
+
+    Timestamps are schedule metadata, not market observations, and the cadence
+    is fixed before the run, so deriving the threshold from the frame's own
+    spacing does not look ahead at any price, feature or label.
+    """
+    positive = gaps[np.isfinite(gaps) & (gaps > 0)]
+    nominal = float(np.median(positive)) if positive.size else 0.0
+    return max(_MIN_STALE_GAP_MINUTES, nominal)
 
 
 def _flow_features(flow: np.ndarray, threshold: np.ndarray) -> np.ndarray:
@@ -279,6 +315,10 @@ class Simulator:
             self.obs_dim += _STRATEGY_CONTEXT
         self._last_index = (len(features.X) if end is None else min(int(end), len(features.X))) - 1
         self._first_index = max(int(start), features.valid_from + self.window - 1, self.window - 1)
+        # Bar-gap metadata for the data-quality gate: the gap before each bar
+        # and the cadence this frame is expected to keep.
+        self._bar_gaps = _gap_minutes(features.ts)
+        self._stale_gap_minutes = _stale_gap_threshold(self._bar_gaps)
 
         # Both matrices are frame-wide but causal for the rows they expose, so
         # building them once is equivalent to rebuilding a row per step without
@@ -338,6 +378,16 @@ class Simulator:
         """Index of the bar the current episode started from."""
         return self._episode_start
 
+    @property
+    def slippage_points(self) -> float | None:
+        """Estimated entry slippage on the current decision bar, in points."""
+        return self._slippage_points_at(self._i)
+
+    @property
+    def data_quality_ok(self) -> bool:
+        """Whether the current decision bar's data is usable for an entry."""
+        return self._data_quality_at(self._i)
+
     def action_masks(self) -> np.ndarray:
         """Boolean availability of HOLD, BUY, SELL and CLOSE at this bar.
 
@@ -349,8 +399,9 @@ class Simulator:
         * position open: HOLD and CLOSE (a second entry would be rejected);
         * flat: HOLD plus BUY/SELL only when :meth:`_entry_reason` finds no block
           — session hours, daily/weekly loss, drawdown, kill switches,
-          consecutive-loss pause, spread limit, flow/signal gate, missing ATR or
-          a lot below the contract minimum;
+          consecutive-loss pause, spread limit, slippage cap, unusable bar
+          data, flow/signal gate, missing ATR or a lot below the contract
+          minimum;
         * flat while every entry is blocked: HOLD only.
 
         The mask never hides an action the loop would accept; if it allows BUY
@@ -655,9 +706,7 @@ class Simulator:
                 atr = self._atr(self._i)
                 side = Side.LONG if action == _BUY else Side.SHORT
                 slippage = self.settings.costs.slippage_atr_frac * atr
-                entry = (
-                    bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
-                )
+                entry = bar.ask_close + slippage if side is Side.LONG else bar.bid_close - slippage
                 sl, tp = self.risk.sl_tp(entry, side, atr)
                 sizing = self.risk.size(account.equity, entry, sl)
                 self.broker.open(
@@ -696,6 +745,8 @@ class Simulator:
             consecutive_losses=self.consecutive_losses,
             paused_until=self.paused_until,
             spread_points=self.spread_points,
+            slippage_points=self._slippage_points_at(self._i),
+            data_quality_ok=self._data_quality_at(self._i),
         )
 
     def _book(self, trade: Trade) -> None:
@@ -737,6 +788,48 @@ class Simulator:
         if not isfinite(spread) or spread < 0:
             return None
         return spread / point
+
+    def _slippage_points_at(self, index: int) -> float | None:
+        """Estimated slippage of an entry at ``index``, in contract points.
+
+        Built from the same two inputs the fill uses — ``_atr`` and
+        ``CostConfig.slippage_atr_frac`` — so ``max_slippage_points`` caps the
+        order that would actually be sent instead of a separate estimate.
+        """
+        point = self.settings.contract.point
+        if not isfinite(point) or point <= 0:
+            return None
+        atr = self._atr(index)
+        if atr <= 0:
+            return None
+        slippage = self.settings.costs.slippage_atr_frac * atr
+        if not isfinite(slippage) or slippage < 0:
+            return None
+        return slippage / point
+
+    def _data_quality_at(self, index: int) -> bool:
+        """True when the bar at ``index`` is usable for an entry.
+
+        Checks the decision bar only, and only its own inputs: ATR present and
+        positive, spread present and non-negative (the raw feature, before
+        :meth:`_bar` sanitises a bad spread to zero), and the gap from the
+        previous bar within :attr:`_stale_gap_minutes`. An out-of-range index
+        has no bar to judge and reports ``True``; :meth:`_entry_reason` refuses
+        to act there for other reasons.
+        """
+        atr_rows = len(self.features.atr)
+        if not 0 <= index < atr_rows:
+            return True
+        atr = float(self.features.atr[index])
+        if not isfinite(atr) or atr <= 0:
+            return False
+        if index >= len(self.features.spread):
+            return False
+        spread = float(self.features.spread[index])
+        if not isfinite(spread) or spread < 0:
+            return False
+        gap = float(self._bar_gaps[index]) if index < len(self._bar_gaps) else float("nan")
+        return not (isfinite(gap) and gap > self._stale_gap_minutes)
 
     # --- strategy ----------------------------------------------------------
 
