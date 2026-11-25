@@ -723,6 +723,7 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                             "scanned_sentences": extraction.scanned_sentences,
                             "duplicate": True,
                             "stored_path": existing.stored_path,
+                            "warnings": list(record.warnings),
                             "index": str(index_path),
                         }
                     )
@@ -766,6 +767,7 @@ def _ingest_handler(context: HandlerContext) -> Handler:
                         "scanned_sentences": extraction.scanned_sentences,
                         "duplicate": record.duplicate,
                         "stored_path": record.stored_path,
+                        "warnings": list(record.warnings),
                         "index": str(index_path),
                     }
                 )

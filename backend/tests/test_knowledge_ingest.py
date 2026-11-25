@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import importlib.util
+import tomllib
 import zipfile
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -16,6 +18,7 @@ from scalping.knowledge import (
     DocumentRecord,
     UnsupportedFormat,
 )
+from scalping.knowledge import ingest as ingest_module
 
 KNOWLEDGE_SRC = Path(__file__).resolve().parents[1] / "src" / "scalping" / "knowledge"
 
@@ -44,6 +47,68 @@ def _docx(path: Path, paragraphs: list[tuple[str, str]]) -> Path:
 
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+PYPDF_INSTALLED = importlib.util.find_spec("pypdf") is not None
+
+
+def _pdf_bytes(pages: list[str]) -> bytes:
+    """Write a minimal valid PDF with one Helvetica text line per page.
+
+    An empty string produces a page with an empty content stream, which is the
+    shape of a scanned/blank page for a text extractor. The writer is
+    hand-rolled so the test suite does not need a PDF-producing dependency.
+    """
+    count = len(pages)
+    font_number = 3 + 2 * count
+    objects: dict[int, bytes] = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: (
+            f"<< /Type /Pages /Kids [{' '.join(f'{3 + 2 * i} 0 R' for i in range(count))}] "
+            f"/Count {count} >>"
+        ).encode("ascii"),
+        font_number: (
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"
+        ),
+    }
+    for index, text in enumerate(pages):
+        page_number = 3 + 2 * index
+        content_number = page_number + 1
+        escaped = text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode("latin-1")
+        objects[page_number] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Contents {content_number} 0 R "
+            f"/Resources << /Font << /F1 {font_number} 0 R >> >> >>"
+        ).encode("ascii")
+        objects[content_number] = (
+            b"<< /Length "
+            + str(len(stream)).encode("ascii")
+            + b" >>\nstream\n"
+            + stream
+            + b"\nendstream"
+        )
+
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    for number in sorted(objects):
+        offsets[number] = len(out)
+        out += f"{number} 0 obj\n".encode("ascii") + objects[number] + b"\nendobj\n"
+    xref_at = len(out)
+    size = font_number + 1
+    out += f"xref\n0 {size}\n".encode("ascii")
+    out += b"0000000000 65535 f \n"
+    for number in range(1, size):
+        out += f"{offsets[number]:010d} 00000 n \n".encode("ascii")
+    out += (f"trailer\n<< /Size {size} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n").encode(
+        "ascii"
+    )
+    return bytes(out)
+
+
+def _pdf(path: Path, pages: list[str]) -> Path:
+    path.write_bytes(_pdf_bytes(pages))
+    return path
 
 
 def test_ingest_text_records_provenance_and_preserves_bytes(tmp_path: Path) -> None:
@@ -192,6 +257,7 @@ def test_docx_paragraph_text_and_headings(tmp_path: Path) -> None:
     assert record.sections[1].text == "Regime labels are not trade signals."
 
 
+@pytest.mark.skipif(PYPDF_INSTALLED, reason="pypdf is installed; PDF extraction is supported")
 def test_pdf_is_reported_unsupported_without_a_dependency(tmp_path: Path) -> None:
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"%PDF-1.4\n% not parsed here\n")
@@ -202,10 +268,118 @@ def test_pdf_is_reported_unsupported_without_a_dependency(tmp_path: Path) -> Non
     assert record.format == "pdf"
     assert record.sections == ()
     assert record.error is not None
-    assert "optional parser" in record.error
+    assert "uv sync --extra pdf" in record.error
     assert Path(record.stored_path).read_bytes() == source.read_bytes()
-    with pytest.raises(UnsupportedFormat, match="optional parser"):
+    with pytest.raises(UnsupportedFormat, match="uv sync --extra pdf"):
         DocumentIngestor(tmp_path / "k").extract(source)
+
+
+def test_pdf_without_the_optional_extra_reports_the_install_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The absence path is deterministic even when pypdf is installed here."""
+    monkeypatch.setattr(ingest_module, "_pypdf_available", lambda: False)
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF-1.4\n% not parsed here\n")
+
+    record = DocumentIngestor(tmp_path / "k").ingest(source)
+
+    assert record.status == "unsupported"
+    assert record.parser == "none"
+    assert record.warnings == ()
+    assert record.error is not None
+    assert "pypdf" in record.error
+    assert "uv sync --extra pdf" in record.error
+    assert Path(record.stored_path).read_bytes() == source.read_bytes()
+
+
+def test_pdf_dependency_stays_optional() -> None:
+    pyproject = Path(__file__).resolve().parents[1] / "pyproject.toml"
+    data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    core = data["project"]["dependencies"]
+    assert not any(
+        requirement.split(">")[0].split("=")[0].strip() == "pypdf" for requirement in core
+    )
+    assert data["project"]["optional-dependencies"]["pdf"] == ["pypdf>=5"]
+
+
+@pytest.mark.skipif(not PYPDF_INSTALLED, reason="needs the optional pypdf extra")
+def test_pdf_pages_become_numbered_sections(tmp_path: Path) -> None:
+    source = _pdf(
+        tmp_path / "book.pdf",
+        [
+            "Liquidity sweeps precede reversals.",
+            "Volatility compression precedes expansion.",
+        ],
+    )
+
+    record = DocumentIngestor(tmp_path / "k").ingest(source)
+
+    assert record.status == "indexed"
+    assert record.format == "pdf"
+    assert record.parser == "pypdf"
+    assert record.error is None
+    assert record.warnings == ()
+    assert [section.label for section in record.sections] == ["page 1", "page 2"]
+    assert [section.heading for section in record.sections] == ["", ""]
+    assert record.sections[0].text == "Liquidity sweeps precede reversals."
+    assert record.sections[1].text == "Volatility compression precedes expansion."
+    assert record.doc_id == _sha(source)
+    assert Path(record.stored_path).read_bytes() == source.read_bytes()
+
+
+@pytest.mark.skipif(not PYPDF_INSTALLED, reason="needs the optional pypdf extra")
+def test_pdf_without_text_pages_is_reported_not_faked(tmp_path: Path) -> None:
+    source = _pdf(tmp_path / "scan.pdf", ["Readable page.", "", "Another readable page."])
+
+    record = DocumentIngestor(tmp_path / "k").ingest(source)
+
+    assert record.status == "indexed"
+    assert [section.label for section in record.sections] == ["page 1", "page 3"]
+    assert len(record.warnings) == 1
+    assert "page 2" in record.warnings[0]
+    assert "OCR is not implemented" in record.warnings[0]
+    assert all("page 2" not in section.label for section in record.sections)
+
+
+@pytest.mark.skipif(not PYPDF_INSTALLED, reason="needs the optional pypdf extra")
+def test_pdf_without_any_text_fails_without_ocr(tmp_path: Path) -> None:
+    source = _pdf(tmp_path / "scanned.pdf", ["", ""])
+
+    record = DocumentIngestor(tmp_path / "k").ingest(source)
+
+    assert record.status == "extraction_failed"
+    assert record.sections == ()
+    assert record.error is not None
+    assert "OCR" in record.error and "not implemented" in record.error
+    assert "pages 1, 2" in record.error
+    assert Path(record.stored_path).read_bytes() == source.read_bytes()
+
+
+@pytest.mark.skipif(not PYPDF_INSTALLED, reason="needs the optional pypdf extra")
+def test_corrupt_pdf_is_recorded_and_original_kept(tmp_path: Path) -> None:
+    source = tmp_path / "broken.pdf"
+    source.write_bytes(b"%PDF-1.4 not really a document")
+
+    record = DocumentIngestor(tmp_path / "k").ingest(source)
+
+    assert record.status == "extraction_failed"
+    assert record.sections == ()
+    assert record.error is not None
+    assert "PDF" in record.error
+    assert Path(record.stored_path).read_bytes() == source.read_bytes()
+    with pytest.raises(ingest_module.ExtractionError):
+        DocumentIngestor(tmp_path / "k").extract(source)
+
+
+@pytest.mark.skipif(not PYPDF_INSTALLED, reason="needs the optional pypdf extra")
+def test_strict_pdf_extract_returns_page_sections(tmp_path: Path) -> None:
+    source = _pdf(tmp_path / "book.pdf", ["Page one text."])
+
+    sections = DocumentIngestor(tmp_path / "k").extract(source)
+
+    assert [section.label for section in sections] == ["page 1"]
+    assert sections[0].text == "Page one text."
 
 
 def test_extraction_failure_is_recorded_and_original_kept(tmp_path: Path) -> None:

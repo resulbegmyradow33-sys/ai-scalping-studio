@@ -4,8 +4,9 @@ The package turns local research documents into provenance records, extracted
 sections, a searchable SQLite index and structured hypotheses with citations.
 It is deliberately deterministic and offline:
 
-* only the Python standard library parses documents; PDF needs an optional
-  parser and is reported as unsupported rather than quietly skipped;
+* every format except PDF uses only the Python standard library; PDF text
+  extraction needs the optional ``pdf`` extra (``pypdf``) and is reported as
+  unsupported, with an install hint, rather than quietly skipped;
 * the index is SQLite FTS5 when available, otherwise a documented ``LIKE``
   fallback, never an external search service;
 * no language model is used or required, and extraction is not training;
