@@ -205,10 +205,57 @@ exit code `2`.
 
 ### 2.6 Promotion: production policy versus test policy
 
-There is **no CLI and no HTTP endpoint** for DSL evidence promotion. Promotion
-is a library call, and only a registered production policy may run it.
+`discovery promote` is the runtime call site for DSL evidence promotion. It is
+the only CLI path, and only a registered production policy may run it.
 `PROMOTION_V1` is the only entry in `PRODUCTION_POLICIES`. The legacy
 `/api/strategy/calibrate` path promotes the old card; it is not this path.
+
+Dry run first. It evaluates the policy and writes neither the archive nor the
+holdout ledger:
+
+```bash
+uv run --project backend python -m scalping.cli discovery promote \
+  --archive runs/discovery/discovery.sqlite \
+  --candidate "<candidate_id from discovery run>" \
+  --evidence runs/evidence.json \
+  --data-root data \
+  --reason "promotion-v1 dry run" \
+  --dry-run --out runs/promotion.dryrun.json
+```
+
+A real promotion that needs the locked holdout is a **one-shot, owner-approved**
+act. The evidence must pass every non-holdout check first; the holdout is spent
+only when both flags below are present. The token is read from a file or an
+environment variable and is never printed:
+
+```bash
+# token file: one line, chmod 600, never committed
+uv run --project backend python -m scalping.cli discovery promote \
+  --archive runs/discovery/discovery.sqlite \
+  --candidate "<candidate_id from discovery run>" \
+  --evidence runs/evidence.json \
+  --data-root data \
+  --scope XAUUSD:M1 \
+  --reason "owner approved the one-shot holdout spend" \
+  --spend-holdout \
+  --approval-token-file ~/.secrets/xauusd-approval.token \
+  --out runs/promotion.json
+```
+
+or `--approval-token-env SCALPING_APPROVAL_TOKEN`. The ledger is
+`runs/discovery/holdout.sqlite`, beside the archive. A dataset build gets exactly
+one evaluation: a second attempt exits `2` with `holdout_spent`, and a failure
+after the unlock leaves the holdout spent with no result.
+
+Exit codes: `0` accepted, `1` rejected by the policy, `2` refused (non-production
+policy, missing approval, spent holdout, identity mismatch, missing dataset or
+spec) or invalid input. `--out` receives the decision record on every path,
+including refusals. The record carries the code list, policy id/version/digest
+and evidence/dataset identity; it never carries the token. If the evidence was
+built with a settings YAML, pass the same `--settings`; a different digest is an
+`identity_mismatch` refusal, not a silent re-run.
+
+The library call remains available; it is what the command uses:
 
 ```python
 import json
@@ -508,7 +555,8 @@ daemon while the first is alive.
 | Dataset build says no H1 bars | `no XAUUSD H1 bars under ...` | `dataset build` defaults to `--timeframe H1` | pass `--timeframe M1` |
 | Discovery has no validation rows | `the built dataset has no validation rows; discovery may not read the test split, so there is nothing to search on` | too little history for the split geometry | ingest more bars or lower `--purge`/`--embargo`; never shrink the test split |
 | Validation slice too short | `the validation split has N rows; a W-bar observation window needs at least W+1 to make one decision` | `--window` too large for the slice | ingest more data or reduce `--window` |
-| Promotion rejected | code `missing_locked_oos`; message `the policy requires a locked out-of-sample section and the bundle has none` | bundle built by `discovery evidence` has `locked_oos: null` | complete the holdout protocol; do not bypass the policy |
+| Promotion rejected | code `missing_locked_oos`; message `the policy requires a locked out-of-sample section and the bundle has none` | bundle built by `discovery evidence` has `locked_oos: null` | rerun `discovery promote` with `--spend-holdout` and an owner approval token; do not bypass the policy |
+| Promotion refuses to spend | code `approval_missing` or `holdout_not_spent` | no token file/env, or `--spend-holdout` omitted | supply both; the holdout is one-shot and owner-approved |
 | Promotion refused outright | `non_production_policy: only a registered production policy may promote; '<id>' v1 digest ... is not registered` | modified/copied policy, or a test policy | use `PROMOTION_V1` unchanged |
 | Paper advance job fails as retryable | job error prefix `bar_gap:`; message `session '...': missing bar at <ts> before <ts>` | a bar is missing at the timeframe cadence | ingest the missing bar, then let the retry run. `bar_order`, `session_conflict`, `continuous_refused` are permanent |
 | Holdout cannot be spent twice | `holdout_spent: holdout was already spent at <ts>; a second spec cannot reuse it` | the one-shot ledger already spent this `(dataset_id, dataset_checksum)` | use a new dataset checksum; do not delete the ledger |
@@ -570,6 +618,7 @@ do not leave an unattended run on it.
 | `discovery run` | bounded search + decision | `dataset_id`, `validation`, `trials`, `accepted`, `decision`, `reason`, `best`, `baseline`, `comparison`, `archive` |
 | `discovery evidence` | persist artifact + bundle | `persisted`, `dataset_checksum`, `artifact`, `bundle`, `spec`, `evidence_checksum`, `folds` |
 | `discovery reproduce` | checksum re-derivation | `reproduced`, `checksum`, `expected`, `mismatches` |
+| `discovery promote` | policy evaluation and governed champion | `status`, `accepted`, `codes`, `policy_digest`, `decision`, `holdout`, `champion` |
 | `acceptance run` | synthetic end-to-end | `status`, `claims`, `stages[]`, `report`, `synthetic` |
 | `serve` | API | `status`, `host`, `port` |
 | `orchestrator run --once` | one tick | `status`, `tick` |

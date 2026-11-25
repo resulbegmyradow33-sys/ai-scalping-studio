@@ -379,6 +379,56 @@ Two structural limits are worth stating. The bundle records its fold/CI
 trail is local SQLite, not a signed ledger: it proves what this process wrote, not
 that a different process could not have written something else.
 
+### Runtime promotion (`discovery promote`)
+
+`scalping.discovery.promote.promote_evidence(PromoteRequest)` is the runtime call
+site between a written evidence bundle and the archive. It adds no policy rule
+and no force flag:
+
+1. it loads the bundle with the strict reader (checksum, schema and required
+   sections) and refuses a candidate id, code version, dataset checksum or
+   settings digest that is not the request's `ExpectedIdentity`;
+2. it resolves `policy_id` only inside `PRODUCTION_POLICIES`; an unregistered or
+   modified policy is refused with `non_production_policy` and nothing is
+   written;
+3. it evaluates the policy with the current champion's stored evidence (an
+   evidence champion is the comparison baseline; an exploratory or manual
+   champion is replaced as an audited first evidence promotion).
+
+There are two outcomes after that evaluation:
+
+- **Accepted without a holdout spend.** This happens only when the bundle
+  already carries a valid `locked_oos` section (or, hypothetically, for a
+  non-production policy, which the runtime refuses). The call goes straight to
+  `promote_with_evidence`.
+- **`missing_locked_oos`.** The production policy cannot promote yet. The
+  runtime spends the sealed holdout only when *all* of these are true:
+  `spend_holdout=True`; a non-empty owner approval token is supplied from a file,
+  an environment variable or an in-process value; the candidate exists with an
+  accepted trial on the same dataset checksum/settings digest/code version; and
+  the bar store and dataset artifact still rebuild to the recorded checksum.
+  It derives a named non-production **eligibility** policy from the target
+  policy (`require_locked_oos=False`, same thresholds), evaluates once, unlocks
+  the ledger, evaluates the test rows once, attaches the frozen section,
+  re-evaluates the production policy and only then calls
+  `promote_with_evidence`.
+
+The holdout ledger is `<archive directory>/holdout.sqlite`. A dataset build gets
+one evaluation: a second attempt is refused with `holdout_spent` before any
+policy work, and a failure after the unlock leaves it spent with no result.
+Nothing retries.
+
+Every path returns a decision record (`accepted`, `rejected` or `refused`) with
+the stable code list, policy id/version/digest, evidence checksum and dataset
+identity. The owner approval token is checked only for non-emptiness and is never
+stored, logged or printed. The CLI (`discovery promote`) writes the same record
+as one JSON line and optionally to `--out`; exit codes are `0` accepted, `1`
+rejected and `2` refused or invalid input. `--dry-run` evaluates the production
+policy only and writes neither the archive nor the ledger.
+
+The command is still an explicit human/governance act. No orchestrator job and
+no schedule calls it, and a rejection or refusal leaves the champion unchanged.
+
 
 `scalping.discovery.champion.ChampionProvider` reads the champion and returns a
 `StrategySpec` that has passed `validate()` and whose recomputed hash still
@@ -445,8 +495,9 @@ anything by themselves.
   counterpart is the discovery promotion policy (previous section).
 - A locked final OOS section produced inside this module. The holdout slice
   (`scalping.discovery.holdout`) attaches it; until then `require_locked_oos=True`
-  rejects every promotion. The holdout protocol is not yet wired into
-  orchestration and has not been spent on real data.
+  rejects every promotion. The runtime `discovery promote` command wires the
+  protocol to an explicit owner approval, but it is not scheduled by the
+  orchestrator and has not been spent on real data.
 - Drift-triggered retraining: the report exists, the automation that reads it
   does not.
 - Regime-level promotion rules; `min_regime_coverage` only checks that labels
