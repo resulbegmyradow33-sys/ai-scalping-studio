@@ -429,7 +429,12 @@ def _feature_cache(args: argparse.Namespace) -> FeatureCache | None:
 
 
 def _features_for(
-    args: argparse.Namespace, frame: pl.DataFrame, symbol: str, timeframe: str
+    args: argparse.Namespace,
+    frame: pl.DataFrame,
+    symbol: str,
+    timeframe: str,
+    *,
+    groups: tuple[str, ...] | None = None,
 ) -> FeatureFrame:
     """Build the matrix through the cache; a hit is bit-identical to a build."""
     return cached_build_features(
@@ -438,6 +443,7 @@ def _features_for(
         timeframe=timeframe,
         frame=frame,
         settings=Settings(),
+        groups=groups,
     )
 
 
@@ -447,12 +453,12 @@ def _cmd_dataset_build(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         None
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     bundle = build_dataset(
         features,
         symbol=args.symbol,
@@ -485,12 +491,12 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     spec = TrainSpec(
         model=args.model,
         horizon=args.horizon,
@@ -537,12 +543,12 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     spec = TrainSpec(
         model=args.model,
         horizon=args.horizon,

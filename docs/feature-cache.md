@@ -1,8 +1,9 @@
 # Feature cache
 
-Disk cache for the 59-column feature matrix. `build_features` is the expensive
-step shared by training, walk-forward evaluation and candidate search; this
-cache materialises one `FeatureFrame` per input combination and returns the same
+Disk cache for the causal feature matrix (59 columns by default, optional groups
+such as `htf` appended when requested). `build_features` is the expensive step
+shared by training, walk-forward evaluation and candidate search; this cache
+materialises one `FeatureFrame` per input combination and returns the same
 arrays afterwards. The cache is an optimisation, never a correctness proof: the
 bit-identity tests are.
 
@@ -27,14 +28,16 @@ are loaded with `allow_pickle=False`, so an object array cannot be read back.
 
 ## Key
 
-`FeatureCache.key_for(symbol, timeframe, frame_meta, settings)` is a BLAKE2b-256
-digest of a canonical JSON payload (`sort_keys`, no whitespace, no NaN):
+`FeatureCache.key_for(symbol, timeframe, frame_meta, settings, groups=None)` is a
+BLAKE2b-256 digest of a canonical JSON payload (`sort_keys`, no whitespace, no
+NaN):
 
 | Field | Content | Why |
 |---|---|---|
 | `version` | `CACHE_VERSION` | Bumped when a feature **formula** changes without a column change |
 | `symbol`, `timeframe` | the request's identifiers | Different instruments never share a matrix |
-| `registry` | sha256 of `WARMUP` + the canonical `FEATURE_COLUMNS` tuple | A column added, removed or reordered misses instead of mixing matrices |
+| `registry` | sha256 of `WARMUP`, the canonical `FEATURE_COLUMNS` tuple and the optional-group names | A column added, removed, reordered or regrouped misses instead of mixing matrices |
+| `groups` | the optional groups the build requested (`htf`), normalised | A 59-column entry is never served for a 64-column request; base-only selections share the default key |
 | `data.rows`, `data.first_ts`, `data.last_ts` | row count and bounds | Cheap sanity identity, visible in the manifest |
 | `data.fingerprint` | BLAKE2b-160 of `ts`, OHLC, quotes, `spread`, `volume` (name, dtype, length and bytes per column, rows sorted by `ts`) | Detects a value change that leaves row count and bounds untouched |
 | `costs` | the full `CostConfig` block | `spread_floor`/`spread_vol_mult` feed `prepare_bars`; the whole block is keyed conservatively |
@@ -108,6 +111,8 @@ checksum. Different keys use different files and cannot collide.
 | Rows reordered, `provider` label changed | No (sorted, excluded) |
 | Any `CostConfig` field | Yes (conservative; only the two spread fields alter the frame) |
 | `FEATURE_COLUMNS` or `WARMUP` | Yes (registry digest) |
+| Optional group names / columns (`htf`) | Yes (registry digest) |
+| Optional group selected for the build (`groups=("htf",)`) | Yes (`groups` field) |
 | Feature formula changed in place | **No** — bump `CACHE_VERSION` in `features/cache.py` |
 | New cache format / validation rule | Bump `CACHE_VERSION` |
 

@@ -42,8 +42,8 @@ the historical behaviour is unchanged.
 | `m1_source` | true | an M1 frame the higher timeframes are derived from |
 
 Rules: `volume_*` needs `bar_volume`; `spread_*` needs `spread`
-(`real_quotes` **or** `modeled_spread`); `m5_*`/`m15_*`/`htf_*` need an M1
-source; any `flow_*` column is reserved for the tick layer and needs
+(`real_quotes` **or** `modeled_spread`); `m5_*`/`m15_*`/`m30_*`/`h4_*`/`htf_*`
+need an M1 source; any `flow_*` column is reserved for the tick layer and needs
 `tick_flow`. An unavailable selection raises `FeatureUnavailableError` and
 names every missing input, so a manifest cannot quietly describe unsupported
 features.
@@ -182,9 +182,9 @@ Higher-timeframe features (`features/context.py::htf_context`) join a bucket
 only after it closes: the bucket timestamp is shifted forward by one bucket
 width and applied with `join_asof(backward)`. A row at `t` therefore sees the
 last bucket with `start + width <= t`; the bucket containing `t` is never used.
-The rule is timeframe-agnostic (`_bucket_width` reads the frame's spacing), but
-the feature matrix currently consumes M5 and M15 only: M30/H4 are data-layer
-timeframes with no feature prefix yet.
+The rule is timeframe-agnostic (`_bucket_width` reads the frame's spacing). The
+default matrix consumes M5 and M15. M30/H4 context is an **opt-in** group
+(`htf`, below), not part of the 59 default columns.
 
 Weekends are gaps, not buckets. `resample` emits no empty bucket and never
 carries a Friday close into Sunday. Under the XAUUSD window
@@ -196,6 +196,65 @@ aggregated into their bucket (volume summed) and reported by `validate_bars` as
 `duplicate_timestamps`; the store also dedupes on write, so `data derive`
 cannot consume them. A missing minute shortens its bucket and is reported as a
 `time_gaps` warning above the threshold; labels stay on the grid.
+
+### Optional M30/H4 feature group (`htf`)
+
+The 59-column matrix and its order are frozen for compatibility. Higher-timeframe
+context beyond M5/M15 is available as a documented optional group, appended
+after column 58 only when requested:
+
+| Column | Timeframe | Meaning |
+|---|---|---|
+| `m30_trend` | M30 | `market_structure` trend state, `-1/0/1`, at the last closed M30 bucket |
+| `m30_ret` | M30 | close-to-close simple return of the last closed M30 bucket |
+| `h4_trend` | H4 | `market_structure` trend state, `-1/0/1`, at the last closed H4 bucket |
+| `h4_ret` | H4 | close-to-close simple return of the last closed H4 bucket |
+| `h4_atr_frac` | H4 | ATR(14) of the last closed H4 bucket divided by its close |
+
+Causal rule: a bucket stamped `s` becomes visible at `s + width` and not one
+millisecond earlier, where `width` is the frame's own spacing (30m or 4h). The
+join is `join_asof(backward)`, so a decision bar exactly at `s + width` sees the
+bucket. A truncated source cannot change a value already joined; a bucket that
+is still forming is never read, even if the decision bar sits inside it. Rows
+before the first closed bucket are forward filled with the first available value
+and then `0.0`, like the M5/M15 columns; the warm-up head keeps that behaviour.
+
+Enable it by asking for the group wherever a feature frame is built:
+
+```python
+from scalping.features.build import build_features
+
+features = build_features(m1_bars, groups=("htf",))  # 64 columns
+```
+
+```bash
+uv run python -m scalping.cli dataset build \
+  --symbol XAUUSD --timeframe M1 --root ../data-real-store \
+  --groups price,momentum,multi_timeframe,htf --out ../runs/dataset.json
+```
+
+`TrainSpec.groups`, the ML API request's `spec.groups`, the CLI `--groups`
+flag and `build_dataset(..., groups=...)` accept `htf`. `columns_for(("htf",))`
+returns the five names; `FEATURE_COLUMNS` and `columns_for(None)` stay at 59.
+The dataset manifest records `groups` and the exact `columns`, so a rebuild
+selects the same optional columns. `build_dataset` refuses an `htf` selection
+when the supplied `FeatureFrame` was built without it.
+
+Limitations:
+
+- The group needs an M1 source and enough history: `h4_atr_frac` is only warm
+  after 14 closed H4 buckets, and earlier rows are forward filled rather than
+  dropped (`valid_from` remains the 60-bar M1 warm-up).
+- Availability is grid-based, not session-complete: a shortened Friday H4
+  bucket still becomes visible only at its grid end (`start + 4h`), which is
+  conservative but delays the last partial bucket.
+- The five columns are registered for *selection*, not for knowledge-routed
+  proposals: `PROPOSAL_GROUPS` still lists the seven default groups, so an
+  ingested hypothesis cannot require `htf` until that schema is extended.
+- The feature cache keys the effective optional groups (`CACHE_VERSION` 2), so
+  a 59-column entry is never served for a 64-column request.
+- These columns have no validated predictive evidence yet; they are inputs for a
+  falsifiable experiment, not a trading claim.
 
 ### Feature naming and aliases
 

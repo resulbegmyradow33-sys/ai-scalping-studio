@@ -10,8 +10,11 @@ The key is a :func:`hashlib.blake2b` digest of a canonical JSON payload:
 * ``symbol`` and ``timeframe``,
 * the **data identity**: row count, first/last timestamp and a digest of the raw
   bar columns that feed the builder (``ts``, OHLC, quotes, spread, volume),
-* a *registry version*: the canonical ``FEATURE_COLUMNS`` tuple plus ``WARMUP``,
-  so a column added, removed or reordered misses instead of mixing matrices,
+* a *registry version*: the canonical ``FEATURE_COLUMNS`` tuple, the optional
+  group names and ``WARMUP``, so a column added, removed or reordered misses
+  instead of mixing matrices,
+* the optional groups the build requested (normalised to ``()`` when none), so a
+  59-column entry is never served for a 64-column request,
 * the cache format version, and
 * the full :class:`~scalping.types.CostConfig` block. Only ``spread_floor`` and
   ``spread_vol_mult`` actually reach :func:`~scalping.features.prepare.prepare_bars`,
@@ -55,6 +58,7 @@ import polars as pl
 
 from scalping.config import Settings
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame, build_features
+from scalping.features.registry import OPTIONAL_FEATURE_GROUPS, build_columns, optional_groups
 from scalping.types import CostConfig
 
 __all__ = [
@@ -71,7 +75,8 @@ logger = logging.getLogger(__name__)
 
 #: Version of the on-disk layout *and* of the feature formulas the key assumes.
 #: Bump it when a formula changes without a change to ``FEATURE_COLUMNS``.
-CACHE_VERSION: Final[int] = 1
+#: Version 2 adds the optional-group field to the manifest and the key.
+CACHE_VERSION: Final[int] = 2
 
 #: Sub-directory a CLI/API caller uses under its data or runs root.
 FEATURE_CACHE_DIRNAME: Final[str] = ".feature-cache"
@@ -157,7 +162,13 @@ def frame_meta(frame: pl.DataFrame) -> FrameMeta:
 
 def registry_version() -> str:
     """Digest of the canonical feature layout; changes with columns or warm-up."""
-    payload = {"warmup": WARMUP, "columns": list(FEATURE_COLUMNS)}
+    payload = {
+        "warmup": WARMUP,
+        "columns": list(FEATURE_COLUMNS),
+        # Optional columns are built only on request, but their names and
+        # formulas are part of what a cached matrix means.
+        "optional": {name: list(columns) for name, columns in OPTIONAL_FEATURE_GROUPS.items()},
+    }
     return hashlib.sha256(_canonical(payload)).hexdigest()[:16]
 
 
@@ -223,12 +234,14 @@ class FeatureCache:
         timeframe: str,
         meta: FrameMeta,
         costs: CostConfig,
+        groups: tuple[str, ...],
     ) -> dict[str, Any]:
         return {
             "version": CACHE_VERSION,
             "symbol": symbol,
             "timeframe": timeframe,
             "registry": registry_version(),
+            "groups": list(groups),
             "costs": asdict(costs),
             "data": meta.to_dict(),
         }
@@ -239,13 +252,20 @@ class FeatureCache:
         timeframe: str,
         frame_meta: FrameMeta,
         settings: Settings | CostConfig,
+        *,
+        groups: tuple[str, ...] | None = None,
     ) -> str:
         """Stable cache key for one input combination.
 
-        Pure function of its arguments (plus the module-level registry digest),
-        so two processes computing it for the same bars agree byte for byte.
+        ``groups`` is normalised to the optional groups actually built, so a
+        base-only selection shares the default entry while requesting ``htf``
+        misses instead of reusing a 59-column matrix. Pure function of its
+        arguments (plus the module-level registry digest), so two processes
+        computing it for the same bars agree byte for byte.
         """
-        payload = self._payload(symbol, timeframe, frame_meta, _costs_of(settings))
+        payload = self._payload(
+            symbol, timeframe, frame_meta, _costs_of(settings), optional_groups(groups)
+        )
         return hashlib.blake2b(_canonical(payload), digest_size=32).hexdigest()
 
     # --- read ----------------------------------------------------------
@@ -287,7 +307,12 @@ class FeatureCache:
         columns = manifest.get("columns")
         if not isinstance(columns, list) or not all(isinstance(name, str) for name in columns):
             return self._reject(key, "manifest columns are not a list of names")
-        if tuple(columns) != FEATURE_COLUMNS:
+        groups = manifest.get("groups")
+        if not isinstance(groups, list) or not all(isinstance(name, str) for name in groups):
+            return self._reject(key, "manifest groups are not a list of names")
+        if any(name not in OPTIONAL_FEATURE_GROUPS for name in groups):
+            return self._reject(key, "manifest names an unknown optional feature group")
+        if tuple(columns) != build_columns(groups):
             return self._reject(key, "manifest columns differ from the registry")
 
         declared = manifest.get("arrays")
@@ -382,8 +407,26 @@ class FeatureCache:
                 logger.exception("cannot quarantine feature cache file %s", path)
 
     # --- write ---------------------------------------------------------
-    def save(self, key: str, frame: FeatureFrame) -> Path:
-        """Persist ``frame`` under ``key`` atomically and return the ``.npz`` path."""
+    def save(
+        self,
+        key: str,
+        frame: FeatureFrame,
+        *,
+        groups: tuple[str, ...] | None = None,
+    ) -> Path:
+        """Persist ``frame`` under ``key`` atomically and return the ``.npz`` path.
+
+        ``groups`` is the optional-group selection the frame was built with. It
+        is stored in the manifest so a loader can prove the column list matches
+        what the registry says that selection produces.
+        """
+        effective_groups = optional_groups(groups)
+        expected = build_columns(effective_groups)
+        if tuple(frame.columns) != expected:
+            raise ValueError(
+                "frame columns do not match the requested optional groups: "
+                f"expected {len(expected)} columns, got {len(frame.columns)}"
+            )
         started = time.perf_counter()
         self._check_frame(frame)
         directory = self._directory(key)
@@ -413,6 +456,7 @@ class FeatureCache:
             "created_at": datetime.now(UTC).isoformat(timespec="seconds"),
             "rows": int(frame.X.shape[0]),
             "valid_from": int(frame.valid_from),
+            "groups": list(effective_groups),
             "columns": list(frame.columns),
             "checksum": _checksum(frame),
             "arrays": {
@@ -521,24 +565,36 @@ def cached_build_features(
     timeframe: str,
     frame: pl.DataFrame,
     settings: Settings | CostConfig,
+    groups: tuple[str, ...] | None = None,
 ) -> FeatureFrame:
     """Return the cached matrix for ``frame``, building and saving it on a miss.
 
     ``cache=None`` disables the path entirely and is the exact historical
-    behaviour. A failed save is logged and ignored: a full or read-only cache
+    behaviour. ``groups`` selects optional feature groups such as ``htf``; it is
+    part of the cache key, so a 59-column entry is never reused for a 64-column
+    request. A failed save is logged and ignored: a full or read-only cache
     directory must not fail a training run.
     """
     costs = _costs_of(settings)
+    effective_groups = optional_groups(groups)
+    # A base-only selection builds the same 59 columns as ``None``; keep the
+    # historical two-argument call so existing wrappers see no signature change.
+    build_groups = groups if effective_groups else None
     if cache is None or frame.is_empty():
-        return build_features(frame, costs)
+        if build_groups is None:
+            return build_features(frame, costs)
+        return build_features(frame, costs, groups=build_groups)
     meta = frame_meta(frame)
-    key = cache.key_for(symbol, timeframe, meta, costs)
+    key = cache.key_for(symbol, timeframe, meta, costs, groups=groups)
     cached = cache.load(key)
     if cached is not None:
         return cached
-    features = build_features(frame, costs)
+    if build_groups is None:
+        features = build_features(frame, costs)
+    else:
+        features = build_features(frame, costs, groups=build_groups)
     try:
-        cache.save(key, features)
+        cache.save(key, features, groups=effective_groups)
     except OSError:
         logger.exception("cannot save feature cache entry %s", key)
     return features
