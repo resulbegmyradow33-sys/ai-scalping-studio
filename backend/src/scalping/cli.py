@@ -73,6 +73,7 @@ from scalping.env.simulator import WINDOW
 from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
 from scalping.features.registry import DEFAULT_GROUPS
+from scalping.ml.ablation import run_ablation
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
@@ -561,6 +562,44 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
         timeframe=args.timeframe,
         spec=spec,
         config=config,
+    )
+    payload = result.to_dict()
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
+
+
+def _cmd_ml_ablation(args: argparse.Namespace) -> None:
+    """Run the fixed all / leave-one-out / single-group feature ablation."""
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = _features_for(args, frame, args.symbol, args.timeframe)
+    groups = (
+        DEFAULT_GROUPS
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
+    )
+    spec = TrainSpec(
+        model=args.model,
+        horizon=args.horizon,
+        groups=groups,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        seed=args.seed,
+        include_flat=args.include_flat,
+    )
+    result = run_ablation(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        spec=spec,
     )
     payload = result.to_dict()
     if args.out is not None:
@@ -1351,6 +1390,33 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_cv.add_argument("--out", default=None, help="optional full report path")
     ml_cv.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_cv.set_defaults(handler=_cmd_ml_cv)
+
+    ml_ablation = ml_commands.add_parser(
+        "ablation", help="fixed all / leave-one-out / single-group feature ablation"
+    )
+    ml_ablation.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    ml_ablation.add_argument("--timeframe", default="H1")
+    ml_ablation.add_argument("--model", default="logistic")
+    ml_ablation.add_argument(
+        "--groups",
+        default="all",
+        help="comma-separated feature groups to ablate, or all (every registered group)",
+    )
+    ml_ablation.add_argument("--horizon", type=int, default=5)
+    ml_ablation.add_argument("--train-fraction", type=float, default=0.70)
+    ml_ablation.add_argument("--validation-fraction", type=float, default=0.15)
+    ml_ablation.add_argument("--purge", type=int, default=5)
+    ml_ablation.add_argument("--embargo", type=int, default=5)
+    ml_ablation.add_argument("--seed", type=int, default=0)
+    ml_ablation.add_argument(
+        "--include-flat",
+        action="store_true",
+        help="keep exact-zero returns as a third class (usually harmful)",
+    )
+    ml_ablation.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_ablation.add_argument("--out", default=None, help="optional full report path")
+    ml_ablation.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    ml_ablation.set_defaults(handler=_cmd_ml_ablation)
 
     ml_evaluate = ml_commands.add_parser("evaluate", help="trade a saved classifier")
     ml_evaluate.add_argument("--run", required=True, help="runs/ml/<run> directory")
