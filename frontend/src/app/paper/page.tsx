@@ -724,7 +724,15 @@ function StartSessionForm({ onCreated }: StartSessionFormProps) {
       )}
 
       <div className="flex flex-wrap items-center gap-3">
-        <button type="submit" disabled={starting} className={PRIMARY_BUTTON}>
+        <button
+          type="submit"
+          disabled={starting}
+          // Blurring an invalid field on mousedown inserts its inline error and
+          // moves this button before mouseup, so the click misses and the form
+          // never submits. Keep focus where it is; submit still validates.
+          onMouseDown={(event) => event.preventDefault()}
+          className={PRIMARY_BUTTON}
+        >
           {starting ? "Kaydediliyor…" : "Oturumu kaydet"}
         </button>
         <p className="text-xs text-slate-400">
