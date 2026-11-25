@@ -1,5 +1,68 @@
 # STATUS — autonomous system status
 
+## Current refresh — 2026-11-25 (supersedes older snapshot notes below)
+
+Verified `main`: `e17d820054f31777098bb4d87cc1c676d6f9390d`.
+The four required CI checks on this exact commit (backend, frontend, Python
+CodeQL analysis and JavaScript/TypeScript CodeQL analysis) are **green**.
+The older "Known red on main" paragraph below describes a previous commit and
+must not be read as the current status.
+
+### Changes now present on main
+
+- **#143 — real XAUUSD H1 discovery smoke:** 29,586 bars, 25 trials, 22
+  evaluated candidates. The best candidate traded zero times and the recorded
+  decision was `no_trade`. A separate high-trade candidate had negative
+  expectancy (-0.0926 R) and 0/3 positive folds. This is exploratory real-data
+  evidence only; it is not locked-OOS validation or profitability.
+- **#149 — multiple-testing selection control:** adds adjusted screening and
+  bootstrap/complexity-aware advice. It advises; it does not promote.
+- **#151 — synthetic end-to-end acceptance:** validates wiring through
+  discovery, evidence, optional holdout, paper and matured outcomes. Its claims
+  explicitly keep real-data validation and profitability false.
+- **#153 — approved proposal bridge:** only approved, scope-checked and
+  deduplicated proposals may enqueue `discovery.run`; proposals do not approve
+  themselves or create orders.
+- **#156 — continuous paper runner:** `paper.advance` uses the continuous
+  runner and an evidence-governed champion, with append-only continuation and
+  restart/duplicate handling.
+- **#159 — evidence producer:** closes #136; discovery can atomically persist
+  dataset artifacts, evidence bundles and spec sidecars, then verify them by
+  read-back and reproduction.
+- **#169 — deterministic evidence checksums:** regime aggregation is stable
+  across worker/thread counts. Older bundles with the prior checksum identity
+  may correctly report mismatches.
+
+### Remaining limitations
+
+- The XAUUSD H1 run did **not** find a tradable candidate. NO TRADE is the
+  correct result, not a system failure.
+- No candidate has passed an untouched, independent real-market locked OOS
+  evaluation. No real holdout validation, sustained forward paper trading or
+  profitability claim is established by these changes.
+- Evidence generation/reproduction is now wired, but production promotion
+  still requires explicit review and a complete accepted evidence bundle;
+  proposal routing is not autonomous promotion.
+- Target-M2 acceptance with the user's local data and long-running resource
+  measurements still needs to be executed on that machine.
+
+### Current open work (not merged)
+
+- #174: reject missing, malformed, fractional or insufficient trade-count
+  evidence when selecting a tradable best candidate.
+- #177: label legacy UI replay honestly and provide a fail-closed
+  `--no-legacy-fallback` switch.
+- #175: audited local owner controls for orchestrator pause/resume/safe-mode.
+- #170: operator runbook, including local control API and safety guidance.
+- #171: feature-cache real-store measurements. The published figures are
+  bounded slices and are not a full-store acceptance test.
+
+These PRs remain separate review branches. A green check on a PR or synthetic
+acceptance does not establish a trading edge. Do not merge them without the
+required review and branch-protection checks.
+
+---
+
 Snapshot: **2026-11-24 (second refresh)**, verified `main` at
 `693f8a37ed5f5fdfbabb7bbbed0bd468468c9875` (merge of #121).
 
