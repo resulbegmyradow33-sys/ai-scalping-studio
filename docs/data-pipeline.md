@@ -155,8 +155,12 @@ session.is_open(datetime(2026, 1, 3, 12, tzinfo=UTC))  # Saturday -> False
 ## Timeframes
 
 `TIMEFRAMES` maps M1, M5, M15, M30, H1, H4, D1 to Polars rules. `resample`
-accepts any of them. Tick data is aggregated to M1 by the tick scripts; it is
-not stored as a tick table in the main store.
+accepts any of them. Buckets are **left-closed and left-labelled**: a 03:59 M1
+bar belongs to the 00:00 H4 bucket, a 04:00 bar starts the next one; M30 closes
+on :29/:59. `tests/test_store.py` covers the M30/H4 boundaries, OHLC/volume and
+last-quote aggregation, and that a derived M30 store matches `resample`. Tick
+data is aggregated to M1 by the tick scripts; it is not stored as a tick table
+in the main store.
 
 ### Alignment semantics
 

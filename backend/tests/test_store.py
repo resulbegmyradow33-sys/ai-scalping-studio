@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -170,3 +170,86 @@ def test_failed_write_leaves_previous_partition_intact(tmp_path, monkeypatch):
     out = s.read("XAUUSD", "M1")
     assert out.height == 3
     assert out["close"].to_list() == [1.5, 2.5, 3.5]
+
+
+def minute_bars(start: datetime, n: int) -> pl.DataFrame:
+    ts = [start + timedelta(minutes=i) for i in range(n)]
+    return pl.DataFrame(
+        {
+            "ts": ts,
+            "open": [100.0 + i for i in range(n)],
+            "high": [101.0 + i for i in range(n)],
+            "low": [99.0 + i for i in range(n)],
+            "close": [100.5 + i for i in range(n)],
+            "bid_close": [100.4 + i for i in range(n)],
+            "ask_close": [100.6 + i for i in range(n)],
+            "spread": [0.2] * n,
+            "volume": [1] * n,
+        }
+    )
+
+
+def test_resample_m30_and_h4_bucket_alignment():
+    frame = minute_bars(datetime(2026, 1, 5, 0, 0, tzinfo=UTC), 8 * 60)
+
+    m30 = resample(frame, "30m")
+    h4 = resample(frame, "4h")
+
+    assert m30.height == 16
+    assert h4.height == 2
+    assert m30["ts"].to_list()[:3] == [
+        datetime(2026, 1, 5, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 5, 0, 30, tzinfo=UTC),
+        datetime(2026, 1, 5, 1, 0, tzinfo=UTC),
+    ]
+    assert h4["ts"].to_list() == [
+        datetime(2026, 1, 5, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 5, 4, 0, tzinfo=UTC),
+    ]
+
+    first = m30.row(0, named=True)
+    assert (first["open"], first["high"], first["low"], first["close"]) == (
+        100.0,
+        130.0,
+        99.0,
+        129.5,
+    )
+    assert first["volume"] == 30
+    assert first["bid_close"] == 129.4
+    assert first["ask_close"] == 129.6
+    assert first["spread_mean"] == pytest.approx(0.2)
+
+    first_h4 = h4.row(0, named=True)
+    assert (first_h4["open"], first_h4["close"], first_h4["volume"]) == (100.0, 339.5, 240)
+
+
+def test_resample_boundaries_are_left_closed():
+    frame = minute_bars(datetime(2026, 1, 5, 3, 55, tzinfo=UTC), 10)  # 03:55..04:04
+
+    h4 = resample(frame, "4h")
+
+    assert h4["volume"].to_list() == [5, 5]
+    assert h4["ts"].to_list() == [
+        datetime(2026, 1, 5, 0, 0, tzinfo=UTC),
+        datetime(2026, 1, 5, 4, 0, tzinfo=UTC),
+    ]
+    assert h4["close"].to_list() == [100.5 + 4, 100.5 + 9]
+
+
+def test_derived_m30_store_matches_resample(tmp_path):
+    from scalping.data.registry import timeframe_rule
+
+    store = ParquetStore(tmp_path)
+    source = minute_bars(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), 120)
+    store.write("XAUUSD", "M1", source)
+
+    expected = resample(store.read("XAUUSD", "M1"), timeframe_rule("M30")).rename(
+        {"spread_mean": "spread"}
+    )
+    store.write("XAUUSD", "M30", expected)
+
+    stored = store.read("XAUUSD", "M30")
+    assert stored.height == 4
+    assert stored["ts"].to_list() == expected["ts"].to_list()
+    assert stored["volume"].to_list() == [30, 30, 30, 30]
+    assert stored["close"].to_list() == expected["close"].to_list()
