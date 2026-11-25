@@ -9,6 +9,53 @@ the single simulator, which owns sizing, fills, stops and risk. The modules
 here only read the closed `Trade` list or rerun the same policy with different
 execution costs. There is no second accounting implementation.
 
+## Panel: the Backtesting page (`/backtesting`)
+
+The dashboard page is a thin client over two existing endpoints. It adds no
+accounting of its own: every displayed number is the response's `metrics`.
+
+| Purpose | Endpoint | What it returns |
+|---|---|---|
+| Run selector | `GET /api/runs` | registry rows; the page keeps only `status == completed` |
+| Replay | `POST /api/backtest` | `{run_id, symbol}` → `{report_path, metrics}` |
+
+The request model has exactly two fields. There is no cost-multiplier input on
+this page because `BacktestRequest` does not accept one; cost stress and
+walk-forward live on `POST /api/evaluate`, which the page does not call.
+
+The response has no equity or trade array. `BacktestResponse` is `report_path`
+plus `metrics`; the page renders an equity block only if a future response adds
+a finite `equity` array, and otherwise prints an explicit "API does not return
+an equity curve" state. It never rebuilds a curve from `net_profit` or
+`max_drawdown`.
+
+`metrics_payload` maps non-finite floats (a `profit_factor` of `inf`) to JSON
+`null`; the metric cards show those as `—`. The route answers `404` for an
+unknown run, `409` for a live or failed run (it cannot be replayed), and `422`
+for a malformed symbol; each becomes a labelled error rather than a result.
+
+Monte Carlo trade-sequence analysis remains CLI-only
+(`scalping.cli backtest montecarlo`); no HTTP route exposes it, so the page
+shows a "CLI only" note and no distribution chart. The same note names
+`POST /api/evaluate` as the separate home of walk-forward and cost stress.
+
+Accessibility: the selector is a labelled `<select>` with a hint, the
+available-run table has a `<caption>` and `scope="col"`/`scope="row"` headers
+inside a focusable scroll region, results are announced through one polite live
+region, and the equity block is a focusable `role="region"` with a text summary
+in its caption.
+
+Tests cover the loaded state, a missing run list (`404`), a run-list API error,
+a `404`/`409` backtest, an absent metrics object, the optional equity array,
+symbol validation, and the CLI-only note. `frontend/e2e/pages.spec.ts` adds the
+no-runs branch.
+
+What this page proves: that a stored policy can be replayed through the
+backtest endpoint and that the returned metrics are displayed unchanged. What
+it does not prove: that the policy is profitable, out-of-sample-valid or
+promotable. Those require the walk-forward, cost-stress and holdout evidence
+described below.
+
 ## Monte Carlo trade-sequence analysis
 
 `scalping.backtest.montecarlo` answers one question: given the trades we

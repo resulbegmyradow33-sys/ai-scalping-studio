@@ -8,6 +8,7 @@ const items = [
   { href: "/training", label: "Eğitim" },
   { href: "/labs/ml", label: "ML Laboratuvarı" },
   { href: "/performance", label: "Performans" },
+  { href: "/backtesting", label: "Backtesting" },
   { href: "/paper", label: "Paper Trading" },
   { href: "/autonomy", label: "Otonomi" },
   { href: "/intelligence", label: "Piyasa Zekâsı" },

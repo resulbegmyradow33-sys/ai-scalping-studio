@@ -1,0 +1,609 @@
+{
+  "schema_version": 1,
+  "kind": "paper-gap-policy-acceptance",
+  "date": "2026-11-25",
+  "issue": 141,
+  "context": "Gap policy merged after PR #140; measured on the two exact real gaps from #140.",
+  "evidence_level": "plumbing only: a fixed test-only DSL spec ran through ContinuousPaperRunner; no evidence champion exists, no profitability claim, not validated",
+  "repository": {
+    "branch": "feat/m2paper",
+    "base": "main",
+    "base_commit": "06c853c",
+    "source_changes": "none; docs and evidence only"
+  },
+  "environment": {
+    "machine": "arm64 macOS-27.2.1-arm64-arm-64bit",
+    "python": "3.12.13",
+    "polars": "2.1.0",
+    "numpy": "2.5.5",
+    "commit": "06c853c88b83b29c31b7478702fc9bb848f2e840",
+    "settings": {
+      "contract": {
+        "size": 100.0,
+        "point": 0.001,
+        "min_lot": 0.01,
+        "lot_step": 0.01,
+        "commission_per_lot": 7.0,
+        "leverage": 20.0,
+        "initial_balance": 10000.0
+      },
+      "risk": {
+        "risk_pct": 0.005,
+        "daily_loss_pct": 0.03,
+        "max_notional_x": 20.0,
+        "max_positions": 1,
+        "max_bars_in_trade": 120,
+        "sl_atr_mult": 1.0,
+        "tp_atr_mult": 2.0,
+        "weekly_loss_pct": 0.0,
+        "max_drawdown_pct": 0.0,
+        "consecutive_loss_pause": 0,
+        "max_spread_points": 0.0,
+        "min_equity_frac": 0.0,
+        "pause_bars": 0,
+        "max_slippage_points": 0.0,
+        "data_quality_block": false
+      },
+      "costs": {
+        "spread_floor": 0.2,
+        "spread_vol_mult": 0.1,
+        "slippage_atr_frac": 0.05,
+        "commission_per_lot": 7.0
+      }
+    },
+    "settings_digest": "2226685b488a17e799a58f8d7e1da7db74be94352663575c0447516c0951c5ed",
+    "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+    "spec": {
+      "kind": "strategy",
+      "spec_version": 1,
+      "entries": [
+        {
+          "kind": "entry",
+          "side": "long",
+          "condition": {
+            "kind": "compare",
+            "op": ">",
+            "left": {
+              "kind": "const",
+              "value": 1.0
+            },
+            "right": {
+              "kind": "const",
+              "value": 0.0
+            }
+          }
+        }
+      ],
+      "exits": [
+        {
+          "kind": "exit",
+          "condition": {
+            "kind": "compare",
+            "op": ">",
+            "left": {
+              "kind": "const",
+              "value": 0.0
+            },
+            "right": {
+              "kind": "const",
+              "value": 1.0
+            }
+          }
+        }
+      ],
+      "holding": {
+        "kind": "holding_limit",
+        "bars": 5
+      },
+      "no_trade": null,
+      "sizing": null,
+      "max_lookback": 2
+    }
+  },
+  "spec": {
+    "label": "test-only holding spec (plumbing)",
+    "reason": "no production/evidence champion exists for either scope",
+    "hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+    "canonical": {
+      "kind": "strategy",
+      "spec_version": 1,
+      "entries": [
+        {
+          "kind": "entry",
+          "side": "long",
+          "condition": {
+            "kind": "compare",
+            "op": ">",
+            "left": {
+              "kind": "const",
+              "value": 1.0
+            },
+            "right": {
+              "kind": "const",
+              "value": 0.0
+            }
+          }
+        }
+      ],
+      "exits": [
+        {
+          "kind": "exit",
+          "condition": {
+            "kind": "compare",
+            "op": ">",
+            "left": {
+              "kind": "const",
+              "value": 0.0
+            },
+            "right": {
+              "kind": "const",
+              "value": 1.0
+            }
+          }
+        }
+      ],
+      "holding": {
+        "kind": "holding_limit",
+        "bars": 5
+      },
+      "no_trade": null,
+      "sizing": null,
+      "max_lookback": 2
+    }
+  },
+  "data": {
+    "m1": {
+      "source_store": "/Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-ticks5-store",
+      "source_timeframe": "M1",
+      "source_checksum": "f60e1260f64a9b68c77f874d5b0addf1",
+      "source_rows": 1773331,
+      "slice": "2021-05-23T00:00:00Z..2021-05-26T00:00:00Z",
+      "slice_rows": 2760,
+      "slice_checksum": "404374d2e3c51644d703b9265a2fbe4d",
+      "provenance": {
+        "source": "ticks:data-ticks5",
+        "synthetic": false
+      },
+      "known_gap_from_140": "2021-05-24T04:04:00Z missing before 04:05",
+      "synthetic_bars_written": 0
+    },
+    "h1": {
+      "source_store": "/Users/resul2004/Documents/ai-scalping-studio/.worktrees/v1/data-real-store",
+      "source_timeframe": "H1",
+      "source_checksum": "e48cd48d6aa1cdfb8071a511f0a2464a",
+      "source_rows": 100083,
+      "slice": "2009-05-01T00:00:00Z..2009-06-05T00:00:00Z",
+      "slice_rows": 592,
+      "slice_checksum": "d91ed3e8dec16036360a02912fec2e96",
+      "provenance": {
+        "source": "csv:data-real-csv",
+        "synthetic": false
+      },
+      "known_gap_from_140": "2009-05-25T17:00:00Z missing before 22:00",
+      "synthetic_bars_written": 0
+    },
+    "mode": "bounded writable copies in backend/runs/paper-gaps-2026-11-25/ (gitignored); the source stores were read only"
+  },
+  "session_aware": {
+    "m1": {
+      "case": "m1-session-aware",
+      "timeframe": "M1",
+      "gap_policy": "session_aware",
+      "runtime_s": 0.703,
+      "peak_rss_mb": 115.5,
+      "signals": 2640,
+      "ledger_rows": {
+        "sessions": 1,
+        "signals": 2640,
+        "orders": 2638,
+        "fills": 22,
+        "positions": 22,
+        "trades": 22,
+        "equity_curve": 2640,
+        "paper_gaps": 3
+      },
+      "gaps": [
+        {
+          "from_ts": "2021-05-24T04:03:00+00:00",
+          "to_ts": "2021-05-24T04:05:00+00:00",
+          "missing_bars": 1,
+          "policy": "session_aware"
+        },
+        {
+          "from_ts": "2021-05-24T20:59:00+00:00",
+          "to_ts": "2021-05-24T22:00:00+00:00",
+          "missing_bars": 60,
+          "policy": "session_aware"
+        },
+        {
+          "from_ts": "2021-05-25T20:59:00+00:00",
+          "to_ts": "2021-05-25T22:00:00+00:00",
+          "missing_bars": 60,
+          "policy": "session_aware"
+        }
+      ],
+      "error": null,
+      "summary": {
+        "session_id": "auto-XAUUSD-M1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 2640,
+        "new_signals": 2640,
+        "new_trades": 22,
+        "bars_processed": 2640,
+        "trades": 22,
+        "last_bar_ts": "2021-05-25T23:59:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 3,
+        "missing_bars": 121,
+        "gaps_recorded": 3
+      }
+    },
+    "h1": {
+      "case": "h1-session-aware",
+      "timeframe": "H1",
+      "gap_policy": "session_aware",
+      "runtime_s": 0.134,
+      "peak_rss_mb": 107.2,
+      "signals": 472,
+      "ledger_rows": {
+        "sessions": 1,
+        "signals": 472,
+        "orders": 425,
+        "fills": 136,
+        "positions": 136,
+        "trades": 136,
+        "equity_curve": 472,
+        "paper_gaps": 1
+      },
+      "gaps": [
+        {
+          "from_ts": "2009-05-25T16:00:00+00:00",
+          "to_ts": "2009-05-25T22:00:00+00:00",
+          "missing_bars": 5,
+          "policy": "session_aware"
+        }
+      ],
+      "error": null,
+      "summary": {
+        "session_id": "auto-XAUUSD-H1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 472,
+        "new_signals": 472,
+        "new_trades": 136,
+        "bars_processed": 472,
+        "trades": 136,
+        "last_bar_ts": "2009-06-04T23:00:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 1,
+        "missing_bars": 5,
+        "gaps_recorded": 1
+      }
+    }
+  },
+  "strict_refusal": {
+    "m1": {
+      "case": "m1-strict",
+      "error": "BarGapError: session 'auto-XAUUSD-M1-9fe13e03e88263bd': missing bar at 2021-05-24T04:04:00+00:00 before 2021-05-24T04:05:00+00:00",
+      "ledger_rows": {
+        "sessions": 0,
+        "signals": 0,
+        "orders": 0,
+        "fills": 0,
+        "positions": 0,
+        "trades": 0,
+        "equity_curve": 0,
+        "paper_gaps": 0
+      },
+      "runtime_s": 0.035
+    },
+    "h1": {
+      "case": "h1-strict",
+      "error": "BarGapError: session 'auto-XAUUSD-H1-9fe13e03e88263bd': missing bar at 2009-05-25T17:00:00+00:00 before 2009-05-25T22:00:00+00:00",
+      "ledger_rows": {
+        "sessions": 0,
+        "signals": 0,
+        "orders": 0,
+        "fills": 0,
+        "positions": 0,
+        "trades": 0,
+        "equity_curve": 0,
+        "paper_gaps": 0
+      },
+      "runtime_s": 0.007
+    }
+  },
+  "timing": {
+    "m1-session-aware": {
+      "samples_s": [
+        0.55,
+        0.583,
+        0.586
+      ],
+      "median_s": 0.583
+    },
+    "h1-session-aware": {
+      "samples_s": [
+        0.113,
+        0.117,
+        0.122
+      ],
+      "median_s": 0.117
+    }
+  },
+  "resume_across_gap": {
+    "m1": {
+      "pre_slice": "2021-05-23..2021-05-24T04:00Z",
+      "pre_bars": 241,
+      "bars_added": 2519,
+      "first_advance": {
+        "session_id": "auto-XAUUSD-M1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 121,
+        "new_signals": 121,
+        "new_trades": 6,
+        "bars_processed": 121,
+        "trades": 6,
+        "last_bar_ts": "2021-05-24T03:59:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 0,
+        "missing_bars": 0,
+        "gaps_recorded": 0
+      },
+      "second_advance": {
+        "session_id": "auto-XAUUSD-M1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 2519,
+        "new_signals": 2519,
+        "new_trades": 16,
+        "bars_processed": 2640,
+        "trades": 22,
+        "last_bar_ts": "2021-05-25T23:59:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 3,
+        "missing_bars": 121,
+        "gaps_recorded": 3
+      },
+      "prefix_signals": 121,
+      "prefix_unchanged": true,
+      "total_signals": 2640,
+      "ledger_rows": {
+        "sessions": 1,
+        "signals": 2640,
+        "orders": 2638,
+        "fills": 22,
+        "positions": 22,
+        "trades": 22,
+        "equity_curve": 2640,
+        "paper_gaps": 3
+      }
+    },
+    "h1": {
+      "pre_slice": "2009-05-01..2009-05-25T16:00Z",
+      "pre_bars": 398,
+      "bars_added": 194,
+      "first_advance": {
+        "session_id": "auto-XAUUSD-H1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 278,
+        "new_signals": 278,
+        "new_trades": 82,
+        "bars_processed": 278,
+        "trades": 82,
+        "last_bar_ts": "2009-05-25T15:00:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 0,
+        "missing_bars": 0,
+        "gaps_recorded": 0
+      },
+      "second_advance": {
+        "session_id": "auto-XAUUSD-H1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 194,
+        "new_signals": 194,
+        "new_trades": 54,
+        "bars_processed": 472,
+        "trades": 136,
+        "last_bar_ts": "2009-06-04T23:00:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 1,
+        "missing_bars": 5,
+        "gaps_recorded": 1
+      },
+      "prefix_signals": 278,
+      "prefix_unchanged": true,
+      "total_signals": 472,
+      "ledger_rows": {
+        "sessions": 1,
+        "signals": 472,
+        "orders": 425,
+        "fills": 136,
+        "positions": 136,
+        "trades": 136,
+        "equity_curve": 472,
+        "paper_gaps": 1
+      }
+    }
+  },
+  "append_later": {
+    "m1": {
+      "store": "slice grown from 2021-05-24T10:00Z to 2021-05-24T20:00Z",
+      "first_advance": {
+        "session_id": "auto-XAUUSD-M1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 480,
+        "new_signals": 480,
+        "new_trades": 6,
+        "bars_processed": 480,
+        "trades": 6,
+        "last_bar_ts": "2021-05-24T09:59:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 1,
+        "missing_bars": 1,
+        "gaps_recorded": 1
+      },
+      "second_advance": {
+        "session_id": "auto-XAUUSD-M1-9fe13e03e88263bd",
+        "spec_hash": "9fe13e03e88263bd3d6809eb390a3bb23de24ce917b49743956332c32a923e77",
+        "status": "running",
+        "new_bars": 600,
+        "new_signals": 600,
+        "new_trades": 8,
+        "bars_processed": 1080,
+        "trades": 14,
+        "last_bar_ts": "2021-05-24T19:59:00+00:00",
+        "done": false,
+        "reason": null,
+        "gaps_skipped": 0,
+        "missing_bars": 0,
+        "gaps_recorded": 0
+      },
+      "prefix_signals": 480,
+      "prefix_unchanged": true,
+      "total_signals": 1080,
+      "ledger_rows": {
+        "sessions": 1,
+        "signals": 1080,
+        "orders": 1079,
+        "fills": 14,
+        "positions": 14,
+        "trades": 14,
+        "equity_curve": 1080,
+        "paper_gaps": 1
+      }
+    }
+  },
+  "integrity": {
+    "m1-session-aware": {
+      "store_bars": 2760,
+      "first_store_ts": "2021-05-24T00:00:00+00:00",
+      "last_store_ts": "2021-05-26T00:00:00+00:00",
+      "signals": 2640,
+      "first_signal_ts": "2021-05-24T01:59:00+00:00",
+      "last_signal_ts": "2021-05-25T23:59:00+00:00",
+      "expected_signals": 2640,
+      "signals_match_expected": true,
+      "all_signal_ts_in_store": true,
+      "all_equity_ts_in_store": true,
+      "distinct_signal_ts": 2640,
+      "gap_instants_absent_from_store": true,
+      "gaps": [
+        {
+          "from_ts": "2021-05-24T04:03:00+00:00",
+          "to_ts": "2021-05-24T04:05:00+00:00",
+          "missing_bars": 1,
+          "policy": "session_aware"
+        },
+        {
+          "from_ts": "2021-05-24T20:59:00+00:00",
+          "to_ts": "2021-05-24T22:00:00+00:00",
+          "missing_bars": 60,
+          "policy": "session_aware"
+        },
+        {
+          "from_ts": "2021-05-25T20:59:00+00:00",
+          "to_ts": "2021-05-25T22:00:00+00:00",
+          "missing_bars": 60,
+          "policy": "session_aware"
+        }
+      ],
+      "store_checksum_matches_sidecar": true,
+      "rows": {
+        "sessions": 1,
+        "signals": 2640,
+        "orders": 2638,
+        "fills": 22,
+        "positions": 22,
+        "trades": 22,
+        "equity_curve": 2640,
+        "paper_gaps": 3
+      }
+    },
+    "h1-session-aware": {
+      "store_bars": 592,
+      "first_store_ts": "2009-05-01T00:00:00+00:00",
+      "last_store_ts": "2009-06-05T00:00:00+00:00",
+      "signals": 472,
+      "first_signal_ts": "2009-05-07T23:00:00+00:00",
+      "last_signal_ts": "2009-06-04T23:00:00+00:00",
+      "expected_signals": 472,
+      "signals_match_expected": true,
+      "all_signal_ts_in_store": true,
+      "all_equity_ts_in_store": true,
+      "distinct_signal_ts": 472,
+      "gap_instants_absent_from_store": true,
+      "gaps": [
+        {
+          "from_ts": "2009-05-25T16:00:00+00:00",
+          "to_ts": "2009-05-25T22:00:00+00:00",
+          "missing_bars": 5,
+          "policy": "session_aware"
+        }
+      ],
+      "store_checksum_matches_sidecar": true,
+      "rows": {
+        "sessions": 1,
+        "signals": 472,
+        "orders": 425,
+        "fills": 136,
+        "positions": 136,
+        "trades": 136,
+        "equity_curve": 472,
+        "paper_gaps": 1
+      }
+    },
+    "cross_run_prefix": {
+      "m1-session-aware_vs_m1-resume-gap": {
+        "compared": 2640,
+        "identical_prefix": true
+      },
+      "h1-session-aware_vs_h1-resume-gap": {
+        "compared": 472,
+        "identical_prefix": true
+      }
+    }
+  },
+  "commands": [
+    {
+      "stage": "prepare and measure",
+      "command": "cd backend && uv run python runs/paper-gaps-2026-11-25/measure.py --driver",
+      "note": "throwaway harness in gitignored backend/runs/; it builds the bounded slices, runs every case in a fresh process and writes measurements.json"
+    },
+    {
+      "stage": "single case",
+      "command": "cd backend && uv run python runs/paper-gaps-2026-11-25/measure.py --case m1-session-aware"
+    },
+    {
+      "stage": "evidence regeneration",
+      "command": "cd backend && uv run python runs/paper-gaps-2026-11-25/assemble.py"
+    }
+  ],
+  "limitations": [
+    "Fixed test-only DSL spec (const-long, holding limit 5). This is plumbing, not discovery and not a champion.",
+    "No risk tuning: default Settings, including daily_loss_pct=0.03. The M1 run hit the daily loss gate and recorded 2,606 rejected entries with reason daily_loss_limit; these are signals and orders, not skipped bars.",
+    "Not profitable and not validated: no OOS, no cost stress, no locked holdout was spent.",
+    "M1: 3 gap rows. One is the #140 hole (04:04, 1 bar); the other two are the 21:00-22:00 hour on 2021-05-24/25 (60 bars each), which the registry's XAUUSD session marks open. The feed has no bars there in this 2021 slice, so they are recorded as real missing bars.",
+    "H1: 1 gap row, the #140 hole (17:00-21:59, 5 bars). This feed prints 21:00 bars, so the daily hour is not a gap in the H1 slice.",
+    "One symbol, two short slices, one machine. Gap counts are slice-local, not a dataset-wide gap census.",
+    "Peak RSS is process maximum resident set size measured inside each fresh Python process, including interpreter and imports.",
+    "Out-of-order/duplicate refusal and skip_with_report were not re-measured here; they are covered by the merged test suite."
+  ],
+  "unproven": [
+    "Behaviour of the gap policy over a full multi-year store at once.",
+    "Gap rate of the upstream feeds over time (the 2021 M1 slice lacks the 21:00 hour that the 2022/2025 slices print).",
+    "Any trading edge; the run is a plumbing record."
+  ]
+}
