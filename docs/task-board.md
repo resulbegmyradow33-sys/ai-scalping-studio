@@ -187,9 +187,7 @@ branches; cite them as evidence, not as repository files.
 - [x] PPO with Gymnasium environment.
 - [x] Behavior-cloning warm start.
 - [x] VecNormalize, random starts, checkpoints, pause/resume.
-- [x] Hold baseline in the RL run (`baseline_hold_net_profit`).
-- [ ] PARTIAL: rule baseline exists in backtest/evaluator; random baseline and
-      both in the RL run manifest are open.
+- [x] Rule, hold and random baselines in the RL run manifest (`baseline_*_net_profit`).
 - [ ] PARTIAL: flow mask (#76) is merged; full risk/session/spread/ATR/lot mask
       and evaluation wiring is #181 (no #181 commit is on `06c853c`). Training
       still uses plain PPO (no MaskablePPO dependency).

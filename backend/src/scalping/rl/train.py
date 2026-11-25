@@ -540,6 +540,54 @@ def _hold_baseline(features: FeatureFrame, settings: Settings) -> float | None:
     return float(result.metrics.net_profit)
 
 
+def _rule_baseline(features: FeatureFrame, settings: Settings) -> float | None:
+    """Net profit of the ret_5 momentum baseline on the training window.
+
+    Same signal as ``scalping.cli``'s rule baseline: buy while the last bar's
+    5-bar momentum is positive, hold otherwise. It is a comparison arm, not the
+    learning agent.
+    """
+    columns = list(features.columns)
+    if "ret_5" not in columns:
+        return None
+    index = (WINDOW - 1) * len(columns) + columns.index("ret_5")
+
+    def policy(obs: np.ndarray) -> int:
+        return 1 if float(obs[index]) > 0.0 else 0
+
+    try:
+        result = run_backtest(
+            policy,
+            features,
+            settings,
+            policy_name="rule:ret_5-baseline",
+            max_steps=len(features.ts) + 1,
+        )
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return float(result.metrics.net_profit)
+
+
+def _random_baseline(features: FeatureFrame, settings: Settings, *, seed: int) -> float | None:
+    """Net profit of a uniform random action policy, seeded for reproducibility."""
+    rng = np.random.default_rng(seed)
+
+    def policy(_obs: np.ndarray) -> int:
+        return int(rng.integers(0, 4))
+
+    try:
+        result = run_backtest(
+            policy,
+            features,
+            settings,
+            policy_name="random-baseline",
+            max_steps=len(features.ts) + 1,
+        )
+    except (TypeError, ValueError, RuntimeError):
+        return None
+    return float(result.metrics.net_profit)
+
+
 def train(
     config: TrainConfig,
     features: FeatureFrame,
@@ -786,6 +834,8 @@ def train(
             and checkpoint_callback is not None
         ):
             baseline = _hold_baseline(features, settings)
+            rule_baseline = _rule_baseline(features, settings)
+            random_baseline = _random_baseline(features, settings, seed=config.seed)
             metrics_callback.status = final_status
             metrics = metrics_callback.write()
             distribution = metrics.get("action_dist")
@@ -794,6 +844,8 @@ def train(
             manifest_writer.base.update(
                 {
                     "baseline_hold_net_profit": baseline,
+                    "baseline_rule_net_profit": rule_baseline,
+                    "baseline_random_net_profit": random_baseline,
                     "degenerate": degenerate,
                     "reward_mean_normalized": metrics.get("reward_mean"),
                     "trades": trades,
