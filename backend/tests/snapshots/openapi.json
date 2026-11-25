@@ -311,6 +311,187 @@
         "symbol"
       ]
     },
+    "DiscoveryCandidateDetail": {
+      "properties": {
+        "candidate": "DiscoveryCandidateItem | null",
+        "configured": "boolean",
+        "decision_total": "integer | null",
+        "decisions": "array<DiscoveryDecisionItem> | null",
+        "limit": "integer",
+        "lineage": "array<DiscoveryLineageEdge> | null",
+        "offset": "integer",
+        "readable": "boolean",
+        "spec": "object | null",
+        "trial_total": "integer | null",
+        "trials": "array<DiscoveryTrialItem> | null"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "offset",
+        "readable"
+      ]
+    },
+    "DiscoveryCandidateItem": {
+      "properties": {
+        "accepted_trials": "integer",
+        "best_metrics": "object | null",
+        "best_value": "number | null",
+        "candidate_id": "string",
+        "code_version": "string",
+        "complexity": "integer",
+        "created_at": "string",
+        "mutation": "string | null",
+        "parent_a": "string | null",
+        "parent_b": "string | null",
+        "trials": "integer"
+      },
+      "required": [
+        "accepted_trials",
+        "candidate_id",
+        "code_version",
+        "complexity",
+        "created_at",
+        "trials"
+      ]
+    },
+    "DiscoveryCandidatePage": {
+      "properties": {
+        "configured": "boolean",
+        "items": "array<DiscoveryCandidateItem> | null",
+        "limit": "integer",
+        "metric": "string",
+        "offset": "integer",
+        "readable": "boolean",
+        "total": "integer | null"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "metric",
+        "offset",
+        "readable"
+      ]
+    },
+    "DiscoveryChampion": {
+      "properties": {
+        "accepted_trials": "integer | null",
+        "candidate_id": "string",
+        "evidence_checksum": "string | null",
+        "mode": "string | null",
+        "policy_digest": "string | null",
+        "policy_id": "string | null",
+        "policy_version": "integer | null",
+        "promoted_at": "string | null",
+        "reason": "string | null",
+        "scope": "string",
+        "trials": "integer | null"
+      },
+      "required": [
+        "candidate_id",
+        "scope"
+      ]
+    },
+    "DiscoveryDecisionItem": {
+      "enums": {
+        "decision": [
+          "promoted",
+          "rejected",
+          "no_change",
+          "no_trade",
+          "rolled_back"
+        ]
+      },
+      "properties": {
+        "candidate_id": "string",
+        "champion_id": "string | null",
+        "created_at": "string",
+        "decision": "enum[promoted|rejected|no_change|no_trade|rolled_back]",
+        "detail": "object | null",
+        "id": "integer",
+        "reason": "string"
+      },
+      "required": [
+        "candidate_id",
+        "created_at",
+        "decision",
+        "id",
+        "reason"
+      ]
+    },
+    "DiscoveryLineageEdge": {
+      "properties": {
+        "parent_id": "string",
+        "relation": "string"
+      },
+      "required": [
+        "parent_id",
+        "relation"
+      ]
+    },
+    "DiscoverySummary": {
+      "properties": {
+        "accepted_trials": "integer | null",
+        "candidates": "integer | null",
+        "champions": "array<DiscoveryChampion> | null",
+        "champions_readable": "boolean",
+        "configured": "boolean",
+        "datasets": "integer | null",
+        "decisions": "integer | null",
+        "limit": "integer",
+        "readable": "boolean",
+        "rejected_trials": "integer | null",
+        "scope": "string | null",
+        "trials": "integer | null"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "readable"
+      ]
+    },
+    "DiscoveryTrialItem": {
+      "properties": {
+        "accepted": "boolean",
+        "candidate_id": "string",
+        "code_version": "string",
+        "created_at": "string",
+        "dataset_checksum": "string | null",
+        "dataset_id": "string",
+        "id": "integer",
+        "metrics": "object",
+        "rejections": "array<string>",
+        "seed": "integer",
+        "settings_digest": "string | null"
+      },
+      "required": [
+        "accepted",
+        "candidate_id",
+        "code_version",
+        "created_at",
+        "dataset_id",
+        "id",
+        "metrics",
+        "rejections",
+        "seed"
+      ]
+    },
+    "DiscoveryTrialPage": {
+      "properties": {
+        "configured": "boolean",
+        "items": "array<DiscoveryTrialItem> | null",
+        "limit": "integer",
+        "offset": "integer",
+        "readable": "boolean",
+        "total": "integer | null"
+      },
+      "required": [
+        "configured",
+        "limit",
+        "offset",
+        "readable"
+      ]
+    },
     "DownloadRequest": {
       "enums": {
         "provider": [
@@ -1147,6 +1328,57 @@
       "request": null,
       "responses": {
         "200": "object",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/discovery/candidates": {
+      "query": {
+        "limit": "integer",
+        "metric": "string",
+        "offset": "integer",
+        "scope": "string | null"
+      },
+      "request": null,
+      "responses": {
+        "200": "DiscoveryCandidatePage",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/discovery/candidates/{candidate_id}": {
+      "query": {
+        "limit": "integer",
+        "metric": "string",
+        "offset": "integer"
+      },
+      "request": null,
+      "responses": {
+        "200": "DiscoveryCandidateDetail",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/discovery/summary": {
+      "query": {
+        "limit": "integer",
+        "scope": "string | null"
+      },
+      "request": null,
+      "responses": {
+        "200": "DiscoverySummary",
+        "422": "HTTPValidationError"
+      }
+    },
+    "GET /api/discovery/trials": {
+      "query": {
+        "accepted": "boolean | null",
+        "candidate_id": "string | null",
+        "dataset_id": "string | null",
+        "limit": "integer",
+        "offset": "integer",
+        "scope": "string | null"
+      },
+      "request": null,
+      "responses": {
+        "200": "DiscoveryTrialPage",
         "422": "HTTPValidationError"
       }
     },
