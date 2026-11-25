@@ -23,9 +23,9 @@ approximation that is Monday 17:00 UTC.
 
 Kill switches
 -------------
-All Phase 11 limits are disabled at their default ``0`` and the engine never
-invents a missing anchor. Semantics, all condition-driven unless ``pause_bars``
-latches them:
+All Phase 11 limits are disabled at their default ``0`` (``False`` for the
+data-quality flag) and the engine never invents a missing anchor. Semantics, all
+condition-driven unless ``pause_bars`` latches them:
 
 * ``weekly_loss_pct`` — loss from ``week_start_equity`` at or beyond the
   fraction. Blocks entries and force-closes; clears when the week anchor rolls.
@@ -40,6 +40,10 @@ latches them:
   ``pause_bars == 0``.
 * ``max_spread_points`` — blocks entries when ``spread_points`` strictly
   exceeds the cap. Per-bar only; never latched.
+* ``max_slippage_points`` — blocks entries when the estimated fill slippage
+  (``slippage_points``) strictly exceeds the cap. Per-bar only; never latched.
+* ``data_quality_block`` — when true, blocks entries while the decision bar's
+  ``data_quality_ok`` is false. Per-bar only; never latched.
 * ``pause_bars`` — when positive, a tripped weekly/drawdown/emergency or
   consecutive-loss switch stays latched for that many decision bars after the
   trip bar (entries resume on the bar whose timestamp equals ``paused_until``).
@@ -131,6 +135,12 @@ class RiskEngine:
         _check_optional_fraction("risk.max_drawdown_pct", risk.max_drawdown_pct)
         _check_optional_fraction("risk.min_equity_frac", risk.min_equity_frac)
         _check_optional_non_negative("risk.max_spread_points", risk.max_spread_points)
+        _check_optional_non_negative("risk.max_slippage_points", risk.max_slippage_points)
+        if not isinstance(risk.data_quality_block, bool):
+            raise TypeError(
+                "risk.data_quality_block must be a bool, "
+                f"got {type(risk.data_quality_block).__name__}"
+            )
         if risk.consecutive_loss_pause < 0:
             raise ValueError(
                 f"risk.consecutive_loss_pause must be >= 0, got {risk.consecutive_loss_pause!r}"
@@ -221,9 +231,10 @@ class RiskEngine:
         """Full entry gate, including every Phase 11 kill switch.
 
         Order after the legacy checks: weekly loss, max drawdown, emergency
-        equity floor, consecutive losses, max spread, then a latched
-        ``paused_until``. A missing anchor (``None``) or a disabled limit
-        (``0``) skips that check; the engine never invents an anchor.
+        equity floor, consecutive losses, max spread, max slippage, data
+        quality, then a latched ``paused_until``. A missing anchor (``None``),
+        a disabled limit (``0``) or a disabled flag skips that check; the
+        engine never invents an anchor or a measurement.
         """
         # The snapshot is expected to be anchored to the session ``ts`` names.
         # Computing the anchor validates ts (aware, normalised to UTC) and makes
@@ -250,6 +261,10 @@ class RiskEngine:
             return False, "consecutive_loss_pause"
         if self._spread_tripped(account):
             return False, "max_spread"
+        if self._slippage_tripped(account):
+            return False, "slippage_limit"
+        if self._data_quality_tripped(account):
+            return False, "data_quality_block"
         if self._paused(account, ts):
             return False, "kill_switch_pause"
         return True, None
@@ -290,6 +305,24 @@ class RiskEngine:
             return False
         _check_finite("account.spread_points", account.spread_points)
         return account.spread_points > limit
+
+    def _slippage_tripped(self, account: AccountState) -> bool:
+        """True when the estimated fill slippage strictly exceeds the cap.
+
+        ``slippage_points`` is measured by the simulator from the same ATR and
+        ``CostConfig.slippage_atr_frac`` the fill uses, so the cap describes the
+        order that would actually be sent. ``None`` (no ATR) skips the check:
+        the missing ATR is already a separate block, and the cap must not invent
+        a slippage number.
+        """
+        limit = self._risk.max_slippage_points
+        if limit <= 0 or account.slippage_points is None:
+            return False
+        _check_finite("account.slippage_points", account.slippage_points)
+        return account.slippage_points > limit
+
+    def _data_quality_tripped(self, account: AccountState) -> bool:
+        return self._risk.data_quality_block and not account.data_quality_ok
 
     def _paused(self, account: AccountState, ts: datetime) -> bool:
         """True while a ``pause_bars`` latch is still engaged.

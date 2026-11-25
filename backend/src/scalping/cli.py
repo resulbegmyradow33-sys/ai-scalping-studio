@@ -74,6 +74,7 @@ from scalping.features.build import FEATURE_COLUMNS, WARMUP, FeatureFrame
 from scalping.features.cache import FEATURE_CACHE_DIRNAME, FeatureCache, cached_build_features
 from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.ablation import run_ablation
+from scalping.ml.anomaly import AnomalySpec, detect_anomalies
 from scalping.ml.cv import CVConfig, cross_validate
 from scalping.ml.evaluate import evaluate_model
 from scalping.ml.train import TrainSpec, load_result, save_result, train_classifier
@@ -429,7 +430,12 @@ def _feature_cache(args: argparse.Namespace) -> FeatureCache | None:
 
 
 def _features_for(
-    args: argparse.Namespace, frame: pl.DataFrame, symbol: str, timeframe: str
+    args: argparse.Namespace,
+    frame: pl.DataFrame,
+    symbol: str,
+    timeframe: str,
+    *,
+    groups: tuple[str, ...] | None = None,
 ) -> FeatureFrame:
     """Build the matrix through the cache; a hit is bit-identical to a build."""
     return cached_build_features(
@@ -438,6 +444,7 @@ def _features_for(
         timeframe=timeframe,
         frame=frame,
         settings=Settings(),
+        groups=groups,
     )
 
 
@@ -447,12 +454,12 @@ def _cmd_dataset_build(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         None
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     bundle = build_dataset(
         features,
         symbol=args.symbol,
@@ -485,12 +492,12 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     spec = TrainSpec(
         model=args.model,
         horizon=args.horizon,
@@ -502,6 +509,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         seed=args.seed,
         evaluate_test=args.evaluate_test,
         include_flat=args.include_flat,
+        incremental_chunks=args.incremental_chunks,
         calibrate=args.calibrate,
     )
     result = train_classifier(
@@ -516,6 +524,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         {
             "model": args.model,
             "dataset_id": result.dataset_id,
+            "incremental_chunks": spec.incremental_chunks,
             "train": result.split_counts["train"],
             "validation": result.split_counts["validation"],
             "test": result.split_counts["test"],
@@ -535,12 +544,12 @@ def _cmd_ml_cv(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    features = _features_for(args, frame, args.symbol, args.timeframe)
     groups = (
         DEFAULT_GROUPS
         if args.groups == "all"
         else tuple(part.strip() for part in args.groups.split(",") if part.strip())
     )
+    features = _features_for(args, frame, args.symbol, args.timeframe, groups=groups)
     spec = TrainSpec(
         model=args.model,
         horizon=args.horizon,
@@ -604,6 +613,51 @@ def _cmd_ml_ablation(args: argparse.Namespace) -> None:
         spec=spec,
     )
     payload = result.to_dict()
+    if args.out is not None:
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+        payload["out"] = str(out)
+    _print_json(payload)
+
+
+def _cmd_ml_anomaly(args: argparse.Namespace) -> None:
+    """Fit an isolation forest on train rows and score validation/test rows.
+
+    The output is a diagnostic: score distribution, training-quantile
+    threshold, anomaly rate and an optional AUC against a training-derived
+    "large move" label. Nothing here is a trading signal or a candidate.
+    """
+    store = ParquetStore(args.root)
+    frame = store.read(args.symbol, args.timeframe)
+    if frame.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
+    features = _features_for(args, frame, args.symbol, args.timeframe)
+    groups = (
+        DEFAULT_GROUPS
+        if args.groups == "all"
+        else tuple(part.strip() for part in args.groups.split(",") if part.strip())
+    )
+    splits = tuple(part.strip() for part in args.splits.split(",") if part.strip())
+    spec = AnomalySpec(
+        horizon=args.horizon,
+        groups=groups,
+        train_fraction=args.train_fraction,
+        validation_fraction=args.validation_fraction,
+        purge_bars=args.purge,
+        embargo_bars=args.embargo,
+        seed=args.seed,
+        quantile=args.quantile,
+    )
+    report = detect_anomalies(
+        features,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        spec=spec,
+        splits=splits,
+        magnitude_quantile=None if args.no_magnitude_labels else args.magnitude_quantile,
+    )
+    payload = report.to_dict()
     if args.out is not None:
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -1182,10 +1236,16 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         HandlerContext,
         register_default_handlers,
     )
+    from scalping.orchestrator.paper_triggers import (
+        KIND_PAPER_OUTCOMES,
+        PaperOutcomeTriggerSource,
+        register_paper_outcome_handler,
+    )
     from scalping.orchestrator.store import JobStore
 
-    if args.no_scan and (args.watch_dir or args.watch_data_dir):
-        raise CliError("--no-scan cannot be combined with a watch directory")
+    paper_ledgers = tuple(args.watch_paper_ledger or ())
+    if args.no_scan and (args.watch_dir or args.watch_data_dir or paper_ledgers):
+        raise CliError("--no-scan cannot be combined with a watch source")
     if args.watch_dir and args.watch_data_dir:
         raise CliError("--watch-dir and --watch-data-dir cannot be combined")
     if args.watch_dir and args.watch_kind == KIND_DATASET_BUILD:
@@ -1193,6 +1253,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             "--watch-kind dataset.build cannot infer symbol/timeframe from a bare file;"
             " use --watch-data-dir"
         )
+    if args.allow_synthetic and not paper_ledgers:
+        raise CliError("--allow-synthetic requires at least one --watch-paper-ledger")
     research_kinds = tuple(
         sorted(
             {
@@ -1200,6 +1262,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 KIND_DISCOVERY_RUN,
                 KIND_PAPER_ADVANCE,
                 KIND_PAPER_ANALYSE,
+                KIND_PAPER_OUTCOMES,
             }
         )
     )
@@ -1214,7 +1277,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     )
     store = JobStore(Path(args.db))
     try:
-        triggers: tuple[TriggerSource, ...] = ()
+        sources: list[TriggerSource] = []
         if args.watch_dir:
             try:
                 source = FileTriggerSource(
@@ -1224,13 +1287,25 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 )
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
-            triggers = (_WatchSource(source, args.watch_kind),)
+            sources.append(_WatchSource(source, args.watch_kind))
         elif args.watch_data_dir:
             try:
                 data_source = DataFileTriggerSource(Path(args.watch_data_dir), store=store)
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
-            triggers = (data_source,)
+            sources.append(data_source)
+        # One source per explicit ledger path, in the order given. There is no
+        # implicit default: <archive-root>/paper.sqlite is never bound unless
+        # the operator passes it, and the read-only HTTP API cannot bind one.
+        sources.extend(
+            PaperOutcomeTriggerSource(
+                Path(path),
+                store=store,
+                allow_synthetic=args.allow_synthetic,
+            )
+            for path in paper_ledgers
+        )
+        triggers = tuple(sources)
         registry = Orchestrator(store)
         register_default_handlers(
             registry,
@@ -1240,6 +1315,10 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 archive_root=Path(args.archive_root),
             ),
         )
+        if paper_ledgers:
+            # Proposal-only: it records the outcome and recommends the next
+            # research cycle; it never enqueues discovery or runs a search.
+            register_paper_outcome_handler(registry, allow_synthetic=args.allow_synthetic)
         daemon = OrchestratorDaemon(store, registry, config, triggers=triggers)
         if args.once:
             result = daemon.tick()
@@ -1361,6 +1440,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="keep exact-zero returns as a third class (usually harmful)",
     )
     ml_train.add_argument(
+        "--incremental-chunks",
+        type=int,
+        default=0,
+        help="0 = one batch fit; N > 1 = N ordered partial_fit chunks (sgd only)",
+    )
+    ml_train.add_argument(
         "--calibrate",
         choices=("none", "temperature"),
         default="none",
@@ -1401,6 +1486,44 @@ def _build_parser() -> argparse.ArgumentParser:
     ml_cv.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     ml_cv.set_defaults(handler=_cmd_ml_cv)
 
+    ml_anomaly = ml_commands.add_parser(
+        "anomaly", help="score feature rows with an isolation forest (not a classifier)"
+    )
+    ml_anomaly.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    ml_anomaly.add_argument("--timeframe", default="H1")
+    ml_anomaly.add_argument("--groups", default="all")
+    ml_anomaly.add_argument("--horizon", type=int, default=5)
+    ml_anomaly.add_argument("--train-fraction", type=float, default=0.70)
+    ml_anomaly.add_argument("--validation-fraction", type=float, default=0.15)
+    ml_anomaly.add_argument("--purge", type=int, default=5)
+    ml_anomaly.add_argument("--embargo", type=int, default=5)
+    ml_anomaly.add_argument("--seed", type=int, default=0)
+    ml_anomaly.add_argument(
+        "--quantile",
+        type=float,
+        default=0.99,
+        help="training-score quantile used as the anomaly threshold",
+    )
+    ml_anomaly.add_argument(
+        "--splits",
+        default="validation",
+        help="comma-separated splits to score; test is available but not read by default",
+    )
+    ml_anomaly.add_argument(
+        "--magnitude-quantile",
+        type=float,
+        default=0.9,
+        help="training |return| quantile for the optional large-move label",
+    )
+    ml_anomaly.add_argument(
+        "--no-magnitude-labels",
+        action="store_true",
+        help="report scores without an AUC separation number",
+    )
+    ml_anomaly.add_argument("--root", default=str(DEFAULT_ROOT))
+    ml_anomaly.add_argument("--out", default=None, help="optional full report path")
+    ml_anomaly.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
+    ml_anomaly.set_defaults(handler=_cmd_ml_anomaly)
     ml_ablation = ml_commands.add_parser(
         "ablation", help="fixed all / leave-one-out / single-group feature ablation"
     )
@@ -1821,6 +1944,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "watch a market-data root for new Parquet/CSV and enqueue one"
             " dataset.build per <symbol>/<timeframe>; incompatible with --watch-dir"
+        ),
+    )
+    run.add_argument(
+        "--watch-paper-ledger",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "watch a paper ledger for matured outcomes and enqueue one"
+            " paper.outcomes proposal per new batch; repeat for several ledgers"
+        ),
+    )
+    run.add_argument(
+        "--allow-synthetic",
+        action="store_true",
+        help=(
+            "let --watch-paper-ledger treat batches recorded as synthetic as"
+            " proposals; default refuses them as market evidence"
         ),
     )
     run.add_argument(

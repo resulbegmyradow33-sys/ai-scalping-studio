@@ -6,22 +6,49 @@ simulator run, and it is never promoted from this page alone.
 
 ## Implemented models
 
-| Name | Estimator | Notes |
-|---|---|---|
-| `logistic` | `LogisticRegression` | balanced class weights, multinomial |
-| `random_forest` | `RandomForestClassifier` | 300 trees, depth 10, leaf 20 |
-| `extra_trees` | `ExtraTreesClassifier` | 300 trees, depth 12, leaf 20 |
-| `hist_gradient` | `HistGradientBoostingClassifier` | 300 iterations, depth 6 |
-| `lightgbm` | `LGBMClassifier` | 500 trees, 31 leaves, balanced weights |
-| `xgboost` | `XGBClassifier` | 500 trees, depth 6, histogram, label-encoded wrapper |
+| Name | Task | Estimator | Notes |
+|---|---|---|---|
+| `logistic` | direction | `LogisticRegression` | balanced class weights, multinomial |
+| `random_forest` | direction | `RandomForestClassifier` | 300 trees, depth 10, leaf 20 |
+| `extra_trees` | direction | `ExtraTreesClassifier` | 300 trees, depth 12, leaf 20 |
+| `hist_gradient` | direction | `HistGradientBoostingClassifier` | 300 iterations, depth 6 |
+| `sgd` | direction | `SGDClassifier` | log loss, balanced weights, no shuffle, `partial_fit` |
+| `lightgbm` | direction | `LGBMClassifier` | 500 trees, 31 leaves, balanced weights |
+| `xgboost` | direction | `XGBClassifier` | 500 trees, depth 6, histogram, label-encoded wrapper |
+| `isolation_forest` | anomaly | `IsolationForest` | unsupervised outlier score, **never** a classifier |
 
 Dependencies: scikit-learn, LightGBM and XGBoost. On macOS both boosting
 libraries need the OpenMP runtime (`brew install libomp`); the imports are lazy,
 so the rest of the CLI and simulator keep working without it. CI's Linux wheels
 ship OpenMP.
 
-SGDClassifier, isolation forest and SVM are **not implemented yet**; the
-roadmap keeps them in Phase 5 rather than pretending the list is complete.
+An SVM is still **not implemented**; the roadmap keeps it in Phase 5 rather than
+pretending the list is complete. SGD and isolation forest are implemented below,
+with their own semantics.
+
+## Task types: direction versus anomaly
+
+`scalping.ml.models` exports two disjoint registries and one task map:
+
+- `MODEL_NAMES` — the direction classifiers above. These are the names
+  `POST /api/ml/train` and `ml train` accept, they expose `predict_proba` over
+  the dataset's class labels, and they are the only models eligible to become a
+  promotion candidate.
+- `ANOMALY_MODEL_NAMES` — `("isolation_forest",)`. It has no classes, no
+  direction probability and no promotion path.
+- `ALL_MODEL_NAMES` = both registries; `MODEL_TASKS` maps every name to
+  `"direction"` or `"anomaly"`.
+- `model_task(name)`, `is_promotion_candidate(name)` and
+  `build_anomaly_model()` make the distinction explicit in code.
+
+`build_model("isolation_forest")` raises with a pointer to the anomaly module,
+and `train_classifier(model="isolation_forest")` raises before fitting. That is
+deliberate: an anomaly score is a statement about how unusual a row is, not a
+probability that the next bar rises. Forcing it into `predict_proba` would
+manufacture a direction signal the model never learned. `is_promotion_candidate`
+returns `False` for every anomaly name, and every anomaly report carries
+`promotion_eligible: false`.
+
 
 ## Data contract
 
@@ -114,9 +141,10 @@ cd backend
 uv run python -m scalping.cli ml train \
   --root ../data-ticks5-store \
   --symbol XAUUSD --timeframe H1 \
-  --model logistic --horizon 5 \
+  --model sgd --horizon 5 \
   --groups price,momentum,volatility \
   --purge 5 --embargo 5 \
+  --incremental-chunks 8 \
   --out runs/ml
 ```
 
@@ -128,6 +156,114 @@ uv run python -m scalping.cli ml train ... --evaluate-test
 
 Output is one JSON line with the dataset id, split counts, validation metrics,
 baseline, optional test metrics and artifact paths.
+
+## Incremental SGD
+
+Two ways to fit `sgd` in chunks, both deterministic:
+
+- `ml train --incremental-chunks N` with `N > 1`;
+- the library helper `scalping.ml.incremental.incremental_fit(estimator, X, y,
+  chunks=N, classes=...)`.
+
+Chunking semantics are fixed and documented:
+
+- chunks are **contiguous** slices in the caller's row order (chronological for
+  a dataset bundle), never shuffled inside the helper; the first blocks absorb
+  the division remainder, so `(rows, N)` fully determines the split;
+- the class set is computed once from the full `y` and passed to every
+  `partial_fit`, so a chunk that happens to contain one class cannot shrink the
+  output columns;
+- `chunks=1` is a normal batch `fit`; `chunks>1` requires `partial_fit`, and a
+  model without it (any tree ensemble here) raises instead of silently falling
+  back;
+- `SGDClassifier.partial_fit` rejects `class_weight="balanced"`, so the helper
+  computes balanced weights once from the full training labels, clears the
+  parameter and passes them as `sample_weight` on each chunk. The weighting
+  therefore does not depend on chunk boundaries.
+
+Honest limitation: N chunk passes are **not** the same optimisation as one batch
+`fit` with `max_iter=N`. A batch epoch visits every row in order; chunking visits
+chunk 1, 2, … and only returns to chunk 1 on the next pass, so the two take a
+different path through the same rows while the learning-rate schedule advances by
+chunk size. What is guaranteed is reproducibility: the same seed, rows and chunk
+count give bit-identical coefficients, and on the synthetic learnable test frame
+validation accuracy matches the batch fit and log loss stays within 0.05 absolute.
+On real data measure the gap with `ml cv` or a paired run before choosing; do not
+assume it away.
+
+`sgd` also fits the raw feature matrix: there is no scaler in this slice. On the
+real H1 features its probabilities saturate near 0/1 and its calibration is
+poor, so read it as a fast linear baseline rather than a calibrated probability
+source. A standardiser would have to be fitted on training rows only and is left
+for a later slice.
+
+## Anomaly detection (not a classifier)
+
+`scalping.ml.anomaly` fits an isolation forest on the **training** rows only and
+scores later rows with `score = -model.score_samples(X)`, so **higher means more
+anomalous**. There is no `predict_proba` and no class. The operational threshold
+is the training-score quantile:
+
+```
+threshold = quantile(train_scores, spec.quantile)   # default 0.99
+flagged   = score > threshold
+```
+
+Fit and scoring are separated: validation/test rows are never used to fit the
+detector or to choose the threshold. `AnomalyScore` reports, per split, the row
+count, threshold, anomaly rate, and the score mean/std/min/max (all finite by
+construction). `AnomalyReport.to_dict()` adds the dataset id, columns, spec,
+split counts and `promotion_eligible: false`.
+
+The optional **separation** number exists only when labels are supplied. By
+default the label is "large move": `|future return| >=` the same quantile of the
+**training** absolute returns (`--magnitude-quantile`, default 0.9), computed on
+train rows only. With both classes present the report includes a ROC AUC of the
+anomaly score against that label; a single-class label vector reports
+`auc: null` with a reason instead of a made-up number. Pass
+`--no-magnitude-labels` (or `magnitude_quantile=None`) to omit it entirely.
+
+```bash
+cd backend
+uv run python -m scalping.cli ml anomaly \
+  --root ../data-ticks5-store \
+  --symbol XAUUSD --timeframe H1 \
+  --groups price,momentum,volatility \
+  --quantile 0.99 --splits validation \
+  --out runs/anomaly-report.json
+```
+
+`--splits` defaults to `validation`; `test` is available but, like every other
+one-shot OOS read, is not spent by default.
+
+Limitations, stated plainly:
+
+- a high anomaly score is not a BUY/SELL signal, not a probability and not an
+  edge; it describes unusualness relative to the training window;
+- the isolation forest is fitted on feature rows, so regime or volatility shift
+  changes what counts as normal; a score is only meaningful against the same
+  training window;
+- an AUC against large moves is a diagnostic, not a strategy backtest; it does
+  not pay costs and is not walk-forward evidence;
+- an anomaly run is **never** a promotion candidate (`is_promotion_candidate`
+  and `promotion_eligible` both say so). Use it to generate a falsifiable
+  hypothesis and test that hypothesis on a new window.
+
+## Feature importances
+
+`scalping.ml.models.feature_importances(estimator)` is the documented accessor.
+It returns a 1-D, finite, non-negative copy aligned with the fitted feature
+columns for `random_forest`, `extra_trees`, `lightgbm` and `xgboost`, and `None`
+for models that do not expose `feature_importances_` (`logistic`, `sgd`,
+`hist_gradient`) or for an unfitted estimator. The XGBoost wrapper delegates to
+its fitted booster. No `|coef_|` substitute is invented for the linear models:
+coefficient magnitudes are not comparable to split/impurity counts, and the
+accessor would be lying about what it measures.
+
+Importances describe where the fitted model spent its splits. They are not
+causal effects, not out-of-sample evidence and not a reason to drop features
+without testing the resulting model.
+
 
 ## Purged cross-validation
 
@@ -317,7 +453,7 @@ request field names a path.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/api/ml/models` | Model names `POST /train` accepts, from `scalping.ml.models.MODEL_NAMES` |
+| `GET` | `/api/ml/models` | Direction model names `POST /train` accepts, from `scalping.ml.models.MODEL_NAMES`; anomaly detection is CLI/library only |
 | `POST` | `/api/ml/train` | Validate, prepare and start a run; `202 {run_id}` |
 | `GET` | `/api/ml/runs` | `{run_id, status, created_at, model, symbol, timeframe, dataset_id}` rows, newest first |
 | `GET` | `/api/ml/runs/{run_id}` | Status, config, validation/test prediction metrics, calibration, split counts, columns, spec, dataset id |
@@ -485,6 +621,10 @@ log loss alone did not.
 - No hyperparameter search (Phase 16 of the brief): purged CV compares a fixed
   spec, it does not tune it, and it never reads the test split.
 - No promotion. A model in `runs/ml/` is an experiment, not the live strategy.
+- Incremental SGD is reproducible but not proven equivalent to the batch fit on
+  real data; the gap must be measured per dataset.
+- Anomaly scores and their AUC against large moves are diagnostics. No anomaly
+  run has been turned into a validated trading policy, and none may be promoted.
 - No out-of-sample calibration check: the temperature is fitted and reported
   on the same validation rows. Calibration is not an edge and cannot repair a
   model that has none.

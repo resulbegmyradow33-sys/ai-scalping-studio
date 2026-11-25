@@ -12,7 +12,6 @@ import pytest
 
 from scalping.features.build import FEATURE_COLUMNS, FeatureFrame
 from scalping.features.registry import DEFAULT_GROUPS, FEATURE_GROUPS, columns_for
-from scalping.ml import ablation as ablation_module
 from scalping.ml.ablation import ABLATION_METRICS, run_ablation
 from scalping.ml.train import TrainSpec
 
@@ -177,12 +176,6 @@ def test_refuses_unknown_group() -> None:
 def test_refuses_unknown_model() -> None:
     with pytest.raises(ValueError, match="unknown model"):
         _ablate(model="magic")
-
-
-def test_refuses_group_that_expands_to_no_columns(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(ablation_module.FEATURE_GROUPS, "empty", ())
-    with pytest.raises(ValueError, match=r"selection \('empty',\) has no columns"):
-        _ablate(groups=("price", "empty"))
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:

@@ -160,9 +160,11 @@ Progress (2026-11-22):
 
 Progress (2026-11-24): #133 pins M30/H4 alignment semantics (a higher-timeframe
 value reaches a decision bar only after its bucket closes) and the chained
-resampling path. M30/H4 remain data-layer timeframes; the feature layer still
-consumes M5/M15 (`htf_context` is timeframe-agnostic). `log_ret_3` is a
-documented read-only alias for the log-return column.
+resampling path. M30/H4 context is now an opt-in feature group (`htf`:
+`m30_trend`, `m30_ret`, `h4_trend`, `h4_ret`, `h4_atr_frac`) appended after the
+frozen 59 columns; the default matrix still consumes M5/M15 only (`htf_context`
+is timeframe-agnostic). `log_ret_3` is a documented read-only alias for the
+log-return column.
 
 Remaining: availability rules (flow only with tick volumes), wiring the manifest
 id into the trainer/registry, and a persisted array format for large datasets.
