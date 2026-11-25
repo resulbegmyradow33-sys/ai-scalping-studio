@@ -32,6 +32,8 @@ process, not an operating-system service.
 | `backend/tests/test_orchestrator_resources.py` | Limits, caching, fail-closed probes, samples |
 | `backend/tests/test_orchestrator_daemon.py` | Tick order, dedupe, controls, guard defer, isolation, start/stop, CLI |
 | `backend/tests/test_data_triggers.py` | Market-data layout inference, dedupe across restart and crash, refusals, caps, CLI |
+| `backend/tests/test_paper_outcome_triggers.py` | Matured-outcome eligibility, cursor/pending ack, provenance, proposal-only handler |
+| `backend/tests/test_paper_outcome_cli.py` | `--watch-paper-ledger` wiring, repeatable flags, synthetic opt-in, restart dedupe, no implicit/HTTP source |
 | `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
 ## What is not in this slice
@@ -84,7 +86,7 @@ no second registration table.
 | `max_jobs_per_tick` | `10` | Cap passed to `run_until_idle`; `0` scans and enqueues but claims nothing. |
 | `stop_grace_seconds` | `5.0` | How long `stop()` joins the loop before returning; bounded to 0–300. |
 | `heavy_kinds` | `()` | Passed to the core's one-heavy-job rule. The CLI passes `HEAVY_HANDLER_KINDS`. |
-| `research_kinds` | `()` | Kinds the persisted `disable research` control excludes. The CLI passes dataset, discovery, paper advance and paper analyse. |
+| `research_kinds` | `()` | Kinds the persisted `disable research` control excludes. The CLI passes dataset, discovery, paper advance, paper analyse and paper outcomes. |
 
 An explicit `guard=` argument overrides the profile; status reports both the
 configured `guard_profile` and the actual guard `type`, plus
@@ -180,24 +182,44 @@ uv run scalping.cli orchestrator run --forever --watch-dir docs/research
 # <symbol>/<timeframe>; files outside that layout are refused, never guessed
 uv run scalping.cli orchestrator run --forever --watch-data-dir data
 
+# watch one paper ledger: each matured, attributable batch enqueues one
+# paper.outcomes proposal for the next research cycle
+uv run scalping.cli orchestrator run --forever --watch-paper-ledger runs/paper.sqlite
+
+# repeat the flag for several ledgers; a batch recorded as synthetic stays
+# refused unless --allow-synthetic is given explicitly
+uv run scalping.cli orchestrator run --forever \
+  --watch-paper-ledger runs/paper-a.sqlite \
+  --watch-paper-ledger runs/paper-b.sqlite
+
 # tests/dev only: no measured guard, status says unmeasured
 uv run scalping.cli orchestrator run --once --profile none
 ```
 
 `--db` defaults to `runs/orchestrator.sqlite3`; `--root`, `--runs-root` and
 `--archive-root` feed the existing `HandlerContext` (`--root data`,
-`--runs-root runs`, `--archive-root data`, with the paper ledger at
-`<archive-root>/paper.sqlite`, matching the API default).
+`--runs-root runs`, `--archive-root data`). The API's paper ledger default
+`<archive-root>/paper.sqlite` is **not** a trigger default: a ledger is read
+only when `--watch-paper-ledger` names it.
+
+| Flag | Repeatable | Default | Effect | Conflict |
+|---|---|---|---|---|
+| `--watch-dir DIR` | no | none | Bind one `FileTriggerSource`; each new/changed file enqueues `--watch-kind` | `--watch-data-dir`, `--no-scan` |
+| `--watch-data-dir DIR` | no | none | Bind one `DataFileTriggerSource`; new files enqueue `dataset.build` for the layout's `<symbol>/<timeframe>` | `--watch-dir`, `--no-scan` |
+| `--watch-paper-ledger PATH` | yes | none | Bind one `PaperOutcomeTriggerSource` per path and register the proposal-only `paper.outcomes` handler | `--no-scan` |
+| `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
+| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
-and the queue is filled by another process. `--watch-dir` binds one
-`FileTriggerSource`; `--watch-kind` defaults to `knowledge.ingest` and the CLI
-adapts the file payload to that handler's `document_path`. A raw file payload
-cannot satisfy `dataset.build` (it needs `symbol` and `timeframe`), so
-`--watch-kind dataset.build` is a CLI error and points at `--watch-data-dir`,
-which binds `DataFileTriggerSource` instead. `--no-scan` is meaningful only in
-the default mode; combining it with either watch flag is a CLI error, and the
-two watch flags are mutually exclusive in one process.
+and the queue is filled by another process. `--watch-kind` defaults to
+`knowledge.ingest` and the CLI adapts the file payload to that handler's
+`document_path`. A raw file payload cannot satisfy `dataset.build` (it needs
+`symbol` and `timeframe`), so `--watch-kind dataset.build` is a CLI error and
+points at `--watch-data-dir`. `--watch-dir` and `--watch-data-dir` are mutually
+exclusive; paper-ledger sources may be combined with either of them, and the
+resulting sources are scanned in the order the flags appear (the single
+directory watcher first, then the ledger paths). `--no-scan` is a CLI error
+with any watch flag.
 
 `--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
 store error). A job-level handler failure is a recorded job outcome and still
@@ -1069,15 +1091,63 @@ proposes the next research cycle; it still does not start it. Without a callback
 the proposal is `queue_discovery` with `executed: false`, which is a recorded
 recommendation, not work.
 
+#### Daemon and CLI wiring
+
+`orchestrator run --watch-paper-ledger PATH` is the only production wiring. The
+CLI binds one `PaperOutcomeTriggerSource` per occurrence, in flag order, and
+registers `make_paper_outcome_handler` when at least one ledger is named. The
+path is explicit: the `<archive-root>/paper.sqlite` default used by the API
+viewer is never bound implicitly, and the read-only HTTP routes have no way to
+supply a ledger, a policy hook or a trigger.
+
+The daemon then calls the existing `scan_once` on every tick, like any other
+source, so the matured batch becomes one `paper.outcomes` job in the persistent
+queue. `--allow-synthetic` is forwarded to **both** sides: the source may emit a
+batch recorded as `synthetic: true`, and the handler accepts it. Without the
+flag the source refuses it before enqueue (`reason: synthetic_outcome`) and the
+handler would also refuse an older queued job, so the opt-in cannot become
+one-sided by configuration drift.
+
+The guarantee is unchanged by the wiring: the registered handler is
+proposal-only. It validates the payload, logs `paper.outcome_received` and
+returns `queue_discovery` or `no_action` with `queued: false` and
+`executed: false`. It receives a read-only `JobStoreReader`, so it cannot
+enqueue a discovery run, build a dataset, advance paper or promote a champion.
+Turning the proposal into queue work remains the separate, explicit bridge
+described below; the CLI does not enable it.
+
+`paper.outcomes` is in the CLI's `research_kinds`, so the persisted
+`disable research` control refuses its claim like the other research kinds.
+Scanning and enqueueing continue while paused, safe mode or research-disabled,
+per the daemon rule above; only the claim is refused, with a recorded reason.
+
+Limits of this wiring:
+
+- **One read per source per tick.** N ledger paths mean N sequential ledger
+  scans in the daemon thread, each bounded by `max_sessions` and
+  `max_proposals`. Naming the same path twice is redundant work; the cursor and
+  the job key still make it one job, but it is two reads.
+- **The poll is the cadence.** There is no filesystem watcher and no market
+  clock. A batch that matures between ticks waits for the next tick, and the
+  daemon does not know whether a bar arrived.
+- **The flag is not state.** Removing `--watch-paper-ledger` stops new
+  proposals; it does not delete the cursor, which lives in the job store, or
+  retroactively cancel jobs already queued.
+- **No HTTP trigger binding.** The autonomy API remains a read-only viewer;
+  the owner control API only toggles persisted controls. Neither accepts a
+  ledger path, starts or stops a daemon, or enqueues an outcome.
+
 #### Honest limits
 
-- **Single process, no scheduler and no market clock.** `scan()` is a call.
-  Nothing polls the ledger, sleeps or decides that a bar has arrived; a daemon
-  or CLI is future work.
+- **No internal scheduler and no market clock.** `scan()` is a call. The CLI
+  binds it with `--watch-paper-ledger` and the daemon's poll decides the
+  cadence; nothing here watches a bar or a file event, and no component knows
+  that a trade has matured beyond the next scan.
 - **Read cost grows with the ledger.** Each scan reads every session's signals,
   trades and positions through `matured_outcomes`. The `max_sessions` cap bounds
   one scan; a larger ledger is covered over several scans by the rotation
-  offset, so a full cycle costs proportionally more wall time.
+  offset, so a full cycle costs proportionally more wall time. Repeatable
+  `--watch-paper-ledger` flags multiply that cost per tick.
 - **Rotation is offset-based.** Inserting a session or changing its activity
   between scans can shift the offset, so a session may be visited twice (the
   fingerprint makes that a no-op) or skipped until the next wrap. It cannot
@@ -1363,7 +1433,12 @@ between jobs; `:memory:` is rejected by `start()` and stays single-threaded for
 `status()`; `status()` is readable from another thread for a file store and is
 JSON-safe; the CLI `--once` exits 2 on a tick error but 0 on a job failure;
 `--forever` reports a dead worker with exit 1; and `--watch-dir` enqueues a
-document once and dedupes the second pass.
+document once and dedupes the second pass. `test_paper_outcome_cli.py` pins the
+paper seam: one source per repeatable `--watch-paper-ledger`, a proposal-only
+result with no discovery job, default synthetic refusal plus the explicit
+opt-in on both source and handler, cursor and store-key dedupe across a CLI
+restart, no source without the flag (even at `<archive-root>/paper.sqlite`) and
+no HTTP binding.
 
 ### Integration coverage (Phase 18)
 
