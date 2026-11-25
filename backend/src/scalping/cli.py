@@ -664,6 +664,7 @@ def _cmd_discovery_run(args: argparse.Namespace) -> None:
             patience=args.patience,
             max_lookback=args.max_lookback,
             max_depth=args.max_depth,
+            min_best_trades=args.min_best_trades,
         )
         result = run_discovery(config, root=args.root)
     except (DiscoveryRunError, ValueError) as exc:
@@ -1557,6 +1558,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="comma-separated cost multipliers (default 1.5,2.0; '' disables)",
     )
     d_run.add_argument("--min-trades", type=int, default=0)
+    d_run.add_argument(
+        "--min-best-trades",
+        type=int,
+        default=1,
+        help="closed trades a candidate needs to be the run's best "
+        "(0 disables the rule; compatibility and flat-policy runs only)",
+    )
     d_run.add_argument("--min-expectancy-r", type=float, default=0.0)
     d_run.add_argument("--min-profit-factor", type=float, default=0.0)
     d_run.add_argument("--max-drawdown", type=float, default=0.0)
