@@ -4,6 +4,12 @@ The tests pin what the harness is allowed to say. A passing run proves the
 plumbing executes; it never proves market validation, paper-trading evidence or
 profitability. The failure test forces a stage error and checks that the run
 stops there, writes a failed report and raises the typed result.
+
+Paper governance is pinned here too. The harness must never paper-trade the
+discovery candidate that promotion rejected: without a governed evidence
+champion the paper and outcome stages are auditable skips. The champion cases
+seed a fixture archive through the real promotion/provider APIs; they exercise
+the mechanism, not a market claim.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from dataclasses import replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -21,14 +28,40 @@ from typing import Any
 import pytest
 
 import scalping.acceptance.run as acceptance_run
+from promotion_evidence import evidence_for
+from promotion_support import promote_for_tests, registered_test_policies
 from scalping.acceptance import (
     STAGE_NAMES,
     AcceptanceConfig,
     AcceptanceError,
+    AcceptanceStage,
     run_acceptance,
 )
+from scalping.discovery.archive import DiscoveryArchive
+from scalping.discovery.promotion import (
+    PROMOTION_V1,
+    EvidenceIdentity,
+    PromotionRefused,
+    evaluate_promotion,
+)
+from scalping.discovery.protocols import TrialResult
+from scalping.paper.ledger import PaperLedger
 
 START = "2026-01-05"
+
+# Fixture champion: an evidence-mode promotion recorded through the real archive
+# API on a hand-built, non-synthetic bundle. It proves provider wiring only.
+SCOPE = "XAUUSD:M1"
+CHAMPION_CODE = "test-acceptance-champion"
+CHAMPION_DATASET_ID = "validation:XAUUSD:M1:h1:fixture"
+CHAMPION_DATASET_CHECKSUM = "c1" * 32
+CHAMPION_SETTINGS_DIGEST = "c2" * 32
+FIXTURE_POLICY = replace(
+    PROMOTION_V1,
+    policy_id="acceptance-harness-fixture",
+    version=1,
+    require_locked_oos=False,
+)
 
 
 def config(tmp_path: Path, **overrides: Any) -> AcceptanceConfig:
@@ -50,6 +83,109 @@ def config(tmp_path: Path, **overrides: Any) -> AcceptanceConfig:
 
 def stage(result: Any, name: str) -> Any:
     return next(item for item in result.stages if item.name == name)
+
+
+def fixture_evidence(spec_hash: str) -> Any:
+    """A hand-built evidence bundle for the champion fixture; no simulation."""
+    return evidence_for(
+        spec_hash=spec_hash,
+        dataset_id=CHAMPION_DATASET_ID,
+        symbol="XAUUSD",
+        timeframe="M1",
+        code_version=CHAMPION_CODE,
+        dataset_checksum=CHAMPION_DATASET_CHECKSUM,
+        settings_digest=CHAMPION_SETTINGS_DIGEST,
+        expectancy_r=0.3,
+    )
+
+
+def seed_champion(path: Path) -> tuple[str, int]:
+    """Promote a fixture spec into the harness archive through the real APIs."""
+    spec = acceptance_run.acceptance_spec()
+    with DiscoveryArchive(path) as archive:
+        record = archive.add_candidate(spec, code_version=CHAMPION_CODE)
+        archive.record_trial(
+            record.candidate_id,
+            TrialResult(
+                metrics={"expectancy_r": 0.5, "net_profit": 3.0, "trades": 25.0},
+                accepted=True,
+            ),
+            dataset_id=CHAMPION_DATASET_ID,
+            code_version=CHAMPION_CODE,
+            seed=0,
+            dataset_checksum=CHAMPION_DATASET_CHECKSUM,
+            settings_digest=CHAMPION_SETTINGS_DIGEST,
+        )
+        champion = promote_for_tests(
+            archive,
+            record.candidate_id,
+            fixture_evidence(record.candidate_id),
+            FIXTURE_POLICY,
+            scope=SCOPE,
+            reason="acceptance paper-provider mechanism fixture",
+            expected_identity=EvidenceIdentity(
+                code_version=CHAMPION_CODE,
+                dataset_checksum=CHAMPION_DATASET_CHECKSUM,
+                settings_digest=CHAMPION_SETTINGS_DIGEST,
+            ),
+        )
+    return record.candidate_id, champion.promotion_id
+
+
+def run_with_champion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Any, str, int]:
+    """Run the harness with a fixture champion and an accepted fixture decision.
+
+    The synthetic holdout ledger is deliberately skipped here: it is a separate
+    mechanism fixture and cannot authorize a governed paper session. Only the
+    provider seam and the paper stage are under test.
+    """
+    real_discovery = acceptance_run._AcceptanceRun._stage_discovery
+    real_promotion = acceptance_run._AcceptanceRun._stage_promotion
+    champion_id: str = ""
+    promotion_id: int = 0
+
+    def seeding_discovery(run: Any) -> Any:
+        nonlocal champion_id, promotion_id
+        result = real_discovery(run)
+        champion_id, promotion_id = seed_champion(run.run_dir / "discovery.sqlite")
+        return result
+
+    def skipped_holdout(run: Any) -> AcceptanceStage:
+        return AcceptanceStage(
+            name="holdout",
+            status="skipped",
+            detail="synthetic holdout ledger is a separate mechanism fixture",
+            artifacts={},
+            checksums={},
+            counts={"attached": False, "spent": False},
+        )
+
+    def fixture_promotion(run: Any) -> Any:
+        result = real_promotion(run)
+        run.pre_decision = evaluate_promotion(
+            fixture_evidence(acceptance_run.acceptance_spec().canonical_hash()),
+            FIXTURE_POLICY,
+        )
+        run._write_json(
+            run.run_dir / "promotion.json",
+            {"decision": run.pre_decision.to_dict(), "fixture": True},
+        )
+        return replace(
+            result,
+            detail="fixture decision accepted (mechanism test, not market validation)",
+            counts={
+                **result.counts,
+                "accepted": True,
+                "rejections": list(run.pre_decision.codes),
+            },
+        )
+
+    monkeypatch.setattr(acceptance_run._AcceptanceRun, "_stage_discovery", seeding_discovery)
+    monkeypatch.setattr(acceptance_run._AcceptanceRun, "_stage_holdout", skipped_holdout)
+    monkeypatch.setattr(acceptance_run._AcceptanceRun, "_stage_promotion", fixture_promotion)
+    with registered_test_policies(FIXTURE_POLICY):
+        result = run_acceptance(config(tmp_path))
+    return result, champion_id, promotion_id
 
 
 def test_happy_path_runs_every_stage_with_honest_claims(
@@ -105,13 +241,18 @@ def test_happy_path_runs_every_stage_with_honest_claims(
     assert promotion.counts["policy_id"] == "acceptance-test-policy"
     assert promotion.counts["policy_id"] != "promotion-v1"
 
+    # Promotion rejected on this synthetic sample and no governed champion
+    # exists, so neither the paper engine nor the outcome reader may run.
     paper = stage(result, "paper_advance")
+    assert paper.status == "skipped"
+    assert paper.error_code is not None
+    assert paper.counts["paper_traded"] is False
     assert paper.counts["real_money"] is False
-    assert paper.counts["bars_processed"] > 0
+    assert (Path(result.report_path).parent / "paper.sqlite").exists() is False
 
     outcomes = stage(result, "matured_outcomes")
-    assert outcomes.counts["closed_trades"] >= 1
-    assert outcomes.counts["open_trades"] >= 0
+    assert outcomes.status == "skipped"
+    assert outcomes.counts["paper_traded"] is False
 
     # The synthetic store is a temp directory and is removed unless --keep.
     assert Path(result.store_path).parent == Path(tempfile.gettempdir())
@@ -137,12 +278,122 @@ def test_same_config_is_deterministic(tmp_path: Path) -> None:
             "dataset": stage(result, "dataset").checksums["dataset"],
             "evidence": stage(result, "evidence").checksums["evidence"],
             "promotion": stage(result, "promotion").checksums["decision"],
-            "outcomes": stage(result, "matured_outcomes").checksums["fingerprint"],
         }
 
     assert checksums(first) == checksums(second)
     assert stage(first, "evidence").counts == stage(second, "evidence").counts
+    assert stage(first, "paper_advance").counts == stage(second, "paper_advance").counts
     assert stage(first, "matured_outcomes").counts == stage(second, "matured_outcomes").counts
+
+
+def test_rejected_promotion_never_reaches_the_paper_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected discovery candidate must never be paper traded by the harness."""
+
+    def forbidden_runner(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the paper engine ran after promotion rejected")
+
+    monkeypatch.setattr(acceptance_run, "AutonomousPaperRunner", forbidden_runner)
+    result = run_acceptance(config(tmp_path))
+
+    promotion = stage(result, "promotion")
+    assert promotion.counts["accepted"] is False
+    paper = stage(result, "paper_advance")
+    assert paper.status == "skipped"
+    assert paper.error_code == "promotion_rejected"
+    assert paper.counts["paper_traded"] is False
+    assert paper.counts["real_money"] is False
+    assert paper.counts["rejections"] == promotion.counts["rejections"]
+    assert stage(result, "matured_outcomes").status == "skipped"
+    report = json.loads(Path(result.report_path).read_text())
+    assert report["claims"]["paper_traded"] is False
+    assert report["claims"]["validated"] is False
+
+
+def test_promotion_refusal_prevents_any_paper_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A structural promotion refusal stops the run before the paper stage."""
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise PromotionRefused("structural promotion check failed")
+
+    def forbidden_runner(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("the paper engine ran after a promotion refusal")
+
+    monkeypatch.setattr(acceptance_run, "evaluate_promotion", refuse)
+    monkeypatch.setattr(acceptance_run, "AutonomousPaperRunner", forbidden_runner)
+
+    with pytest.raises(AcceptanceError) as caught:
+        run_acceptance(config(tmp_path))
+
+    assert caught.value.stage == "promotion"
+    assert [item.name for item in caught.value.result.stages] == [
+        "import_validate",
+        "dataset",
+        "discovery",
+        "evidence",
+        "promotion",
+    ]
+    assert (Path(caught.value.result.report_path).parent / "paper.sqlite").exists() is False
+
+
+def test_governed_champion_is_the_only_paper_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Paper uses the provider's exact champion, never the discovery best spec."""
+    result, candidate_id, promotion_id = run_with_champion(tmp_path, monkeypatch)
+
+    best_candidate = stage(result, "discovery").counts["best_candidate"]
+    assert candidate_id != best_candidate
+    assert stage(result, "promotion").counts["accepted"] is True
+
+    paper = stage(result, "paper_advance")
+    assert paper.status == "passed"
+    assert paper.counts["spec_hash"] == candidate_id
+    assert paper.counts["candidate_id"] == candidate_id
+    assert paper.counts["promotion_id"] == promotion_id
+    assert paper.counts["champion_mode"] == "evidence"
+    assert paper.counts["paper_traded"] is False  # synthetic bars are not a market trial
+
+    ledger_path = Path(result.report_path).parent / "paper.sqlite"
+    with PaperLedger.open_reader(ledger_path) as ledger:
+        session = ledger.session(paper.counts["session_id"])
+    assert session is not None
+    assert session.model_version == candidate_id
+    assert session.config["extra"]["dsl"]["spec_hash"] == candidate_id
+
+    outcomes = stage(result, "matured_outcomes")
+    assert outcomes.status == "passed"
+    assert outcomes.counts["strategy_hash"] == candidate_id
+
+
+def test_synthetic_fixture_never_claims_real_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even with a passed governed paper stage, the run is still synthetic."""
+    result, _, _ = run_with_champion(tmp_path, monkeypatch)
+    assert stage(result, "paper_advance").status == "passed"
+
+    report = json.loads(Path(result.report_path).read_text())
+    assert report["synthetic"] is True
+    assert report["claims"] == {
+        "implemented": True,
+        "tested": True,
+        "validated": False,
+        "paper_traded": False,
+        "profitable": False,
+    }
+    assert report["scope"] == {
+        "synthetic_data": True,
+        "out_of_sample": False,
+        "market_evidence": False,
+        "real_money": False,
+    }
+    assert any(
+        "synthetic" in note.lower() and "holdout" in note.lower() for note in report["notes"]
+    )
 
 
 def test_stage_failure_is_typed_and_writes_a_failed_report(
