@@ -137,8 +137,9 @@ uv run python -m scalping.cli discovery run --root ../data-ticks5-store \
   --symbol XAUUSD --timeframe M5 --max-trials 64 --seed 0
 ```
 
-Main is red on `tests/test_api_autonomy.py` as of 2026-11-24; the cause and the
-latest green CI run id are recorded in `STATUS.md`.
+The latest verified `main` snapshot is `e17d820` (2026-11-25), with
+backend, frontend and both CodeQL language checks green. `STATUS.md` records
+the exact commit, merged changes, open PRs and remaining validation gaps.
 
 ## Data
 
