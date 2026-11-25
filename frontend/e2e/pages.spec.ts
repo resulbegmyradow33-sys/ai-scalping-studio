@@ -242,6 +242,22 @@ test("performance page shows the empty state with no backtest", async ({ page })
   expectCleanBrowser(state);
 });
 
+test("backtesting page shows the empty state with no runs", async ({ page }) => {
+  const state = await harness(page);
+
+  await open(page, "/backtesting", "Backtesting — AI Scalping Studio");
+
+  await expect(page.getByRole("heading", { level: 1, name: "Backtesting" })).toBeVisible();
+  await expect(page.getByTestId("backtest-runs-empty")).toContainText("Henüz koşu yok");
+  await expect(page.getByRole("button", { name: "Backtest çalıştır" })).toBeDisabled();
+  // No response was received, so no metric card or equity chart may exist.
+  await expect(page.getByTestId("backtest-result")).toHaveCount(0);
+  await expect(page.getByTestId("metric-trades")).toHaveCount(0);
+
+  await expectNoUnreadableText(page);
+  expectCleanBrowser(state);
+});
+
 test("paper page shows the paper-only notice and an empty ledger", async ({ page }) => {
   const state = await harness(page);
 

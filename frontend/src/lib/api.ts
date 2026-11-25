@@ -3,6 +3,8 @@ import type {
   AutonomyEventPage,
   AutonomyJobPage,
   AutonomyStatus,
+  BacktestRequest,
+  BacktestResponse,
   CalibrateRequest,
   CalibrateResponse,
   DataQuality,
@@ -56,6 +58,9 @@ const ML_PREPARE_TIMEOUT_MS = 60_000;
 
 /** `/api/ml/evaluate` runs the simulator once per stress multiplier. */
 const ML_EVALUATE_TIMEOUT_MS = 300_000;
+
+/** `/api/backtest` replays the full stored slice through the simulator. */
+const BACKTEST_TIMEOUT_MS = 300_000;
 
 /** `/api/paper/.../close` takes a short `BEGIN IMMEDIATE`; still not a cache hit. */
 const PAPER_CLOSE_TIMEOUT_MS = 15_000;
@@ -216,6 +221,12 @@ export const api = {
 
   controlRun(id: string, action: RunControlAction): Promise<OkResponse> {
     return post<OkResponse>(`/api/runs/${encodeURIComponent(id)}/control`, { action });
+  },
+
+  backtest(body: BacktestRequest): Promise<BacktestResponse> {
+    // One chronological replay; the backend rebuilds features and trades the
+    // whole stored slice, so this is not a 5 s read.
+    return post<BacktestResponse>("/api/backtest", body, BACKTEST_TIMEOUT_MS);
   },
 
   getStrategyCard(): Promise<StrategyCard> {
