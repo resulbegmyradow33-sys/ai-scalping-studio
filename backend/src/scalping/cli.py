@@ -53,9 +53,12 @@ from scalping.datasets.builder import build_dataset, save_manifest
 from scalping.discovery.evidence import CandidateEvidence, EvidenceConfig, EvidenceError
 from scalping.discovery.persist import (
     PersistError,
+    load_evidence_bundle,
     load_strategy_spec,
     persist_evidence_run,
 )
+from scalping.discovery.promote import PromoteRequest, promote_evidence
+from scalping.discovery.promotion import PRODUCTION_POLICIES, ExpectedIdentity
 from scalping.discovery.reproduce import (
     ReproduceError,
     ReproduceMismatch,
@@ -902,6 +905,104 @@ def _cmd_discovery_evidence(args: argparse.Namespace) -> None:
         raise CliError(str(exc)) from exc
 
     _print_json(result.to_dict())
+
+
+def _write_promotion_record(path: str | None, payload: dict[str, Any]) -> None:
+    """Write the decision record for every attempt, not only a success."""
+    if path is None:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(payload, indent=2, default=_json_default) + "\n")
+
+
+def _promotion_input_failure(args: argparse.Namespace, code: str, message: str) -> NoReturn:
+    """One refused record for an unreadable bundle; no policy ran."""
+    policy = next(
+        (item for item in PRODUCTION_POLICIES.values() if item.policy_id == args.policy),
+        None,
+    )
+    payload: dict[str, Any] = {
+        "status": "refused",
+        "accepted": False,
+        "dry_run": bool(args.dry_run),
+        "scope": args.scope,
+        "candidate_id": args.candidate,
+        "reason": message,
+        "codes": [code],
+        "policy_id": args.policy,
+        "policy_version": None if policy is None else policy.version,
+        "policy_digest": None if policy is None else policy.digest,
+        "evidence_checksum": None,
+        "dataset_id": None,
+        "dataset_checksum": None,
+        "decision": None,
+        "holdout": None,
+        "champion": None,
+        "approval_source": None,
+    }
+    _write_promotion_record(args.out, payload)
+    _print_json(payload)
+    raise _ExitCode(2)
+
+
+def _cmd_discovery_promote(args: argparse.Namespace) -> None:
+    """Evaluate one evidence bundle and promote it only when every gate passes.
+
+    ``--dry-run`` evaluates the production policy and writes nothing. A real
+    promotion that needs the locked holdout requires both ``--spend-holdout``
+    and an owner token from ``--approval-token-file`` or ``--approval-token-env``.
+    The token is never echoed. Exit codes: 0 accepted, 1 rejected, 2 refused or
+    invalid input.
+    """
+    if args.approval_token_file is not None and args.approval_token_env is not None:
+        raise CliError("pass only one of --approval-token-file and --approval-token-env")
+
+    try:
+        evidence = load_evidence_bundle(args.evidence)
+    except PersistError as exc:
+        _promotion_input_failure(args, exc.code, str(exc))
+
+    settings = Settings()
+    if args.settings is not None:
+        try:
+            settings = Settings.load(args.settings)
+        except (OSError, TypeError, ValueError) as exc:
+            raise CliError(f"cannot read --settings {args.settings}: {exc}") from exc
+
+    scope = args.scope or f"{evidence.symbol}:{evidence.timeframe}"
+    identity = ExpectedIdentity.current(
+        dataset_checksum=evidence.dataset_checksum,
+        settings=settings,
+        code_version=discovery_code_version(),
+    )
+    token: str | Path | None = None
+    if args.approval_token_file is not None:
+        token = Path(args.approval_token_file)
+    elif args.approval_token_env is not None:
+        token = f"env:{args.approval_token_env}"
+
+    request = PromoteRequest(
+        archive_path=args.archive,
+        candidate_id=args.candidate,
+        evidence_path=args.evidence,
+        scope=scope,
+        expected_identity=identity,
+        data_root=args.data_root,
+        reason=args.reason,
+        policy_id=args.policy,
+        spend_holdout=bool(args.spend_holdout),
+        approval_token=token,
+        dry_run=bool(args.dry_run),
+        settings=settings,
+    )
+    result = promote_evidence(request)
+    payload = result.to_dict()
+    _write_promotion_record(args.out, payload)
+    _print_json(payload)
+    if result.status == "accepted":
+        return
+    raise _ExitCode(1 if result.status == "rejected" else 2)
 
 
 # --- backtest ------------------------------------------------------------------
@@ -1864,6 +1965,54 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     d_evidence.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     d_evidence.set_defaults(handler=_cmd_discovery_evidence)
+
+    d_promote = discovery_commands.add_parser(
+        "promote",
+        help="evaluate one evidence bundle and promote a governed champion",
+    )
+    d_promote.add_argument(
+        "--archive",
+        default="runs/discovery/discovery.sqlite",
+        help="SQLite discovery archive; the holdout ledger lives beside it",
+    )
+    d_promote.add_argument("--candidate", required=True, help="candidate id (spec hash)")
+    d_promote.add_argument("--evidence", required=True, help="evidence bundle JSON")
+    d_promote.add_argument(
+        "--scope",
+        default=None,
+        help="symbol:timeframe; defaults to the bundle's symbol and timeframe",
+    )
+    d_promote.add_argument("--data-root", default=str(DEFAULT_ROOT), help="bar store root")
+    d_promote.add_argument(
+        "--settings",
+        default=None,
+        help="YAML settings the evidence was built with; defaults to Settings()",
+    )
+    d_promote.add_argument("--policy", default="promotion-v1", help="registered policy id")
+    d_promote.add_argument("--reason", required=True, help="why this promotion is requested")
+    d_promote.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="evaluate the policy only; never writes the archive or spends the holdout",
+    )
+    d_promote.add_argument(
+        "--spend-holdout",
+        action="store_true",
+        help="explicitly allow the one-shot locked holdout to be spent",
+    )
+    approval = d_promote.add_mutually_exclusive_group()
+    approval.add_argument(
+        "--approval-token-file",
+        default=None,
+        help="file holding the owner approval token (never printed)",
+    )
+    approval.add_argument(
+        "--approval-token-env",
+        default=None,
+        help="environment variable holding the owner approval token (never printed)",
+    )
+    d_promote.add_argument("--out", default=None, help="optional decision-record JSON path")
+    d_promote.set_defaults(handler=_cmd_discovery_promote)
 
     acceptance = commands.add_parser(
         "acceptance", help="run the synthetic end-to-end acceptance harness"
