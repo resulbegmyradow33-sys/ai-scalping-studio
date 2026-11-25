@@ -577,21 +577,39 @@ page instead of a 500.
 ## Paper Trading page
 
 `/paper` in the frontend is a view of this ledger and nothing else. It calls
-only `/api/paper`, does not open sessions, does not start a runner and has no
-broker path. The one write it performs is closing a running session.
+only `/api/paper`, does not start a runner and has no broker path. It performs
+two writes: a session record (`POST /sessions`) and closing a running session
+(`POST /sessions/{id}/close`).
 
+- **Start session** — a labelled form posts `symbol`, `timeframe`, `strategy`,
+  `model_version` and an optional JSON-object `config` to `/sessions`. Client
+  validation mirrors the API schema (`SymbolId` pattern/length, the seven
+  `PaperTimeframe` values, strategy 1–64 characters, model version ≤128,
+  config must parse to an object); a failed submit moves focus to the first
+  invalid field and announces a summary. A `201` selects the returned id and
+  re-reads the list; `409` and `422` are shown as their own alerts with the
+  server's detail. The form states that the server records exactly what was
+  submitted and selects no champion, and the page never starts a runner.
 - **Sessions** — newest first, with status, symbol/timeframe, strategy, model
-  version and start/end. An absent ledger is an explicit empty state that says
-  the page does not open sessions; it is not a fabricated list.
+  version and start/end. An absent ledger is an explicit empty state that
+  points at the form; it is not a fabricated list.
 - **Session detail** — balance, equity, the open position, the closed-trade
   count and the last bar timestamp from `/sessions/{id}`. A `null` balance or
   equity renders as a dash: there is no placeholder account and no P&L total
   computed in the browser.
+- **Equity curve** — the loaded equity window is drawn with the shared
+  `LineChart` and a window summary: first mark, last mark, their difference
+  (and percentage) and the mark count. The difference is labelled as a window
+  delta, because the ledger exposes no starting balance and the page will not
+  invent one. With no marks, an unreadable page or unparseable timestamps the
+  figure says so and draws nothing (`/api/paper/sessions/{id}/equity`).
+  The svg `<title>` is the chart's text alternative and the equity table below
+  is the semantic data alternative.
 - **Tables** — positions, orders, closed trades and equity, one endpoint each,
   requested in 20-row pages. The pager is bounded by
   `offset + items.length >= total`, so it never asks for a page the ledger does
   not have. Equity pages *backwards*: `offset=0` is the newest window and each
-  step moves into older marks.
+  step moves into older marks. The chart follows the same loaded window.
 - **Attribution** — strategy, `model_version` and, when the stored config has
   them, `extra.dsl.spec_hash`, `extra.dsl.spec_version` and
   `extra.dataset_id`. A session without a DSL hash says so instead of showing a
@@ -607,7 +625,8 @@ broker path. The one write it performs is closing a running session.
 
 The page shows a visible paper-only notice: no real money, no broker and no
 order entry. It is a ledger view, not a trading terminal — there is no live
-price, no strategy selection and no way to open a session from it.
+price, no strategy selection and no market execution; opening a session writes
+a row that nothing in the page drives.
 
 ## MT5 demo adapter
 
@@ -701,8 +720,12 @@ and `open_session` refuses a mistyped provenance block before the insert.
 `frontend/src/app/paper/page.test.tsx` covers the page: an empty ledger, a
 loaded session with attribution, a `404` session, close `200` and `409`, bounded
 session and equity pagination, list/detail error states with retry, polling only
-while running with cleanup on unmount, and a ledger with no balance, hash or
-position (dashes and explicit sentences, never invented numbers).
+while running with cleanup on unmount, a ledger with no balance, hash or
+position (dashes and explicit sentences, never invented numbers), the equity
+chart with points and its window summary, explicit no-chart states for an empty
+or unparseable window, a successful start (`201`, payload, list refresh, focus on
+the notice), local validation with focus on the first invalid field, and `409`
+and `422` responses from the start endpoint.
 
 ```bash
 cd backend
