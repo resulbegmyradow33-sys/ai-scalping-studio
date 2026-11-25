@@ -107,6 +107,7 @@ __all__ = [
     "REASON_ARCHIVE_UNAVAILABLE",
     "REASON_AWAITING_BAR",
     "REASON_BARS_UNAVAILABLE",
+    "REASON_CURSOR_CORRUPT",
     "REASON_INVALID_CHAMPION",
     "REASON_INVALID_SCOPE",
     "REASON_LEDGER_UNAVAILABLE",
@@ -144,6 +145,9 @@ REASON_BARS_UNAVAILABLE: Final[str] = "bars_unavailable"
 REASON_LEDGER_UNAVAILABLE: Final[str] = "ledger_unavailable"
 REASON_WARMING_UP: Final[str] = "warming_up"
 REASON_AWAITING_BAR: Final[str] = "awaiting_bar"
+#: The persisted cursor exists but cannot be read or carries an invalid policy.
+#: Fail closed: an unreadable cursor could hide a different recorded policy.
+REASON_CURSOR_CORRUPT: Final[str] = "cursor_corrupt"
 #: The store's provenance sidecar names synthetic data and the scheduler was not
 #: given the explicit ``allow_synthetic=True`` opt-in.
 REASON_SYNTHETIC: Final[str] = "synthetic_data"
@@ -301,19 +305,20 @@ class PaperAdvanceScheduler:
         )
         self._store = ParquetStore(self.data_root)
         self._pending: _Cursor | None = None
+        #: Suppresses a repeated corrupt-cursor line within one process.
+        self._cursor_refusal: str | None = None
 
     # ------------------------------------------------------------------ protocol
 
     def scan(self) -> list[Trigger]:
         """Return one advance trigger per scope with a new decision bar."""
+        # Nothing may be persisted unless this scan loads a usable cursor.
+        self._pending = None
         cursor = self._load_cursor()
+        if cursor is None:
+            return []
         if cursor.gap_policy != self.gap_policy:
-            legacy = "" if cursor.policy_recorded else " (a pre-policy cursor ran strict)"
-            raise SchedulerPolicyMismatch(
-                f"cursor {self.cursor_key!r} recorded gap_policy"
-                f" {cursor.gap_policy!r}, not the configured {self.gap_policy!r}{legacy};"
-                " a restart cannot change the policy silently"
-            )
+            raise SchedulerPolicyMismatch(self._policy_mismatch_message(cursor))
         self._pending = cursor
         cursor.new_scopes = set()
         triggers: list[Trigger] = []
@@ -623,7 +628,7 @@ class PaperAdvanceScheduler:
         """Whether this scope's recorded provenance forbids scheduling it."""
         try:
             recorded = load_provenance(self.data_root, symbol, timeframe)
-        except (OSError, TypeError, ValueError) as exc:
+        except (OSError, KeyError, TypeError, ValueError) as exc:
             self._note(
                 cursor,
                 scope,
@@ -652,20 +657,44 @@ class PaperAdvanceScheduler:
             detail=_json({"scope": scope or None, "reason": reason, "detail": detail}),
         )
 
-    def _load_cursor(self) -> _Cursor:
+    def _policy_mismatch_message(self, cursor: _Cursor) -> str:
+        if cursor.policy_recorded:
+            recorded = f"recorded gap_policy {cursor.gap_policy!r}"
+        else:
+            recorded = f"predates the gap_policy field and ran {DEFAULT_GAP_POLICY!r}"
+        return (
+            f"cursor {self.cursor_key!r} {recorded}, not the configured"
+            f" {self.gap_policy!r}; a restart cannot change the policy silently"
+        )
+
+    def _refuse_cursor(self, detail: str) -> None:
+        """Record one auditable refusal for a cursor that cannot be trusted."""
+        if self._cursor_refusal == detail:
+            return
+        self._cursor_refusal = detail
+        self.store.append_event(
+            EVENT_REFUSED,
+            detail=_json({"scope": None, "reason": REASON_CURSOR_CORRUPT, "detail": detail}),
+        )
+
+    def _loaded(self, cursor: _Cursor) -> _Cursor:
+        self._cursor_refusal = None
+        return cursor
+
+    def _load_cursor(self) -> _Cursor | None:
         raw = self.store.get_state(self.cursor_key)
         if raw is None:
             # No cursor yet: nothing was emitted, so the configured policy is the
             # first one and there is no earlier choice to preserve.
-            return _Cursor(gap_policy=self.gap_policy)
+            return self._loaded(_Cursor(gap_policy=self.gap_policy))
         try:
             parsed = json.loads(raw)
-        except ValueError:
-            # A corrupt cursor costs a re-read; the queue dedupe still holds. No
-            # prior policy can be trusted from an unreadable document.
-            return _Cursor(gap_policy=self.gap_policy)
+        except ValueError as exc:
+            self._refuse_cursor(f"cursor is not valid JSON: {exc}")
+            return None
         if not isinstance(parsed, dict):
-            return _Cursor(gap_policy=self.gap_policy)
+            self._refuse_cursor(f"cursor is a JSON {type(parsed).__name__}, not an object")
+            return None
         offset = parsed.get("offset")
         raw_policy = parsed.get("gap_policy")
         if raw_policy is None:
@@ -674,17 +703,19 @@ class PaperAdvanceScheduler:
         elif isinstance(raw_policy, str) and raw_policy in GAP_POLICIES:
             policy, recorded = raw_policy, True
         else:
-            raise SchedulerPolicyMismatch(
-                f"cursor {self.cursor_key!r} records an invalid gap_policy"
-                f" {raw_policy!r}; refusing to scan rather than guess"
+            self._refuse_cursor(f"cursor records an invalid gap_policy {raw_policy!r}")
+            return None
+        return self._loaded(
+            _Cursor(
+                emitted=_text_map(parsed.get("emitted")),
+                not_queued=_text_map(parsed.get("not_queued")),
+                pending_ack=_text_map(parsed.get("pending_ack")),
+                offset=(
+                    0 if isinstance(offset, bool) or not isinstance(offset, int) else max(offset, 0)
+                ),
+                gap_policy=policy,
+                policy_recorded=recorded,
             )
-        return _Cursor(
-            emitted=_text_map(parsed.get("emitted")),
-            not_queued=_text_map(parsed.get("not_queued")),
-            pending_ack=_text_map(parsed.get("pending_ack")),
-            offset=0 if isinstance(offset, bool) or not isinstance(offset, int) else max(offset, 0),
-            gap_policy=policy,
-            policy_recorded=recorded,
         )
 
 

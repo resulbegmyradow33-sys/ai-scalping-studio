@@ -980,7 +980,7 @@ scheduler = PaperAdvanceScheduler(
 |---|---|
 | `kind` | `paper.advance` (the registered handler's kind) |
 | `dedupe_key` | `paper.advance:{scope}:{last_bar_ts}` |
-| payload | `symbol`, `timeframe`, `bars` — exactly the handler's contract |
+| payload | `symbol`, `timeframe`, `bars`, `gap_policy` — exactly the handler's contract |
 | `max_retries` | `1` by default |
 | cursor | `state["trigger.paper.advance:{archive}:{ledger}"]` |
 
@@ -1006,11 +1006,15 @@ and no job:
 | `ledger_unavailable` | the ledger exists but cannot be read |
 | `warming_up` | fewer bars than the first decision index needs |
 | `awaiting_bar` | the cursor is still on the newest decidable bar |
+| `synthetic_data` | provenance records synthetic bars and `allow_synthetic` is off |
+| `provenance_unavailable` | the provenance sidecar exists but cannot be parsed |
+| `cursor_corrupt` | the persisted scheduler cursor is unreadable or names an invalid policy (scheduler-level, `scope: null`) |
 
-Reasons are recorded once per `(scope, reason)` transition, so a periodic scan
-does not flood the log. There is no legacy fallback: the module never imports or
-names the handwritten strategy families, and a refused scope stays refused until
-its state changes.
+Per-scope reasons are recorded once per `(scope, reason)` transition, so a
+periodic scan does not flood the log. A corrupt cursor is refused once per
+process with `scope: null` until the cursor is repaired. There is no legacy
+fallback: the module never imports or names the handwritten strategy families,
+and a refused scope stays refused until its state changes.
 
 #### When a bar is "new"
 
@@ -1071,7 +1075,10 @@ rewound.
   `SchedulerPolicyMismatch` when its configured policy differs from the recorded
   one; changing policy is an explicit operator action (a fresh ledger/cursor, or
   a new scheduling path), never a side effect of a restart. A legacy cursor
-  without the field ran `strict` and is read that way.
+  without the field ran `strict` and is read that way. A missing cursor is a
+  first run and uses the configured policy; a cursor that is present but is not
+  a JSON object, or names an invalid policy, is refused with `cursor_corrupt`
+  and never falls back to the configured policy.
 - **One local process.** The cursor and the queue are SQLite files owned by one
   writer at a time, like every other trigger source.
 
@@ -1627,9 +1634,11 @@ gate the next advance; exploratory/manual/no-champion scopes, an invalid scope,
 a missing archive and an unreadable ledger are audited refusals with no job and
 no legacy fallback; the payload carries the configured `gap_policy` (default
 `strict`), the cursor persists it and refuses a restart under another policy,
-an invalid policy and an unknown cursor policy are rejected, a known synthetic
-store is refused without the opt-in, and a real scheduler→handler run with
-`session_aware` records the gap while `strict` still refuses the same slice; the
+a malformed cursor and an invalid stored policy are audited as `cursor_corrupt`
+without adopting the configured policy, malformed provenance is refused, a
+known synthetic store is refused without the opt-in, and a real
+scheduler→handler run with `session_aware` records the gap while `strict` still
+refuses the same slice; the
 warm-up window is respected; and the `--schedule-paper` CLI flag (including
 `--paper-gap-policy`) enqueues the job without ever reading a feed.
 

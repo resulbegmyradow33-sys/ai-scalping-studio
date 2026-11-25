@@ -53,6 +53,7 @@ from scalping.orchestrator.paper_scheduler import (
     KIND_PAPER_ADVANCE,
     MAX_ADVANCE_BARS,
     REASON_AWAITING_BAR,
+    REASON_CURSOR_CORRUPT,
     REASON_INVALID_SCOPE,
     REASON_LEDGER_UNAVAILABLE,
     REASON_NO_ARCHIVE,
@@ -523,8 +524,12 @@ def test_cursor_persists_the_policy_and_a_restart_keeps_it(tmp_path: Path) -> No
     assert len(jobs(first.store)) == 1
 
     changed = scheduler(tmp_path, gap_policy="strict")
-    with pytest.raises(SchedulerPolicyMismatch, match="gap_policy"):
+    with pytest.raises(SchedulerPolicyMismatch) as mismatch:
         changed.scan()
+    message = str(mismatch.value)
+    assert "recorded gap_policy 'session_aware'" in message
+    assert "configured 'strict'" in message
+    assert "pre-policy" not in message
 
 
 def test_legacy_cursor_without_a_policy_is_read_as_strict(tmp_path: Path) -> None:
@@ -533,8 +538,11 @@ def test_legacy_cursor_without_a_policy_is_read_as_strict(tmp_path: Path) -> Non
     batch = scheduler(tmp_path)
     batch.store.set_state(batch.cursor_key, json.dumps({"version": 1, "offset": 0}))
 
-    with pytest.raises(SchedulerPolicyMismatch, match="pre-policy"):
+    with pytest.raises(SchedulerPolicyMismatch) as mismatch:
         scheduler(tmp_path, gap_policy="session_aware").scan()
+    message = str(mismatch.value)
+    assert "predates the gap_policy field" in message
+    assert "recorded gap_policy" not in message
 
     outcome = scan_once(Orchestrator(batch.store), [batch])
     assert len(outcome.queued) == 1
@@ -543,17 +551,26 @@ def test_legacy_cursor_without_a_policy_is_read_as_strict(tmp_path: Path) -> Non
     assert upgraded["gap_policy"] == "strict"
 
 
-def test_cursor_with_an_unknown_policy_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "document",
+    ["{not json", "[]", "123", json.dumps({"gap_policy": "ignore"})],
+)
+def test_corrupt_cursor_is_refused_not_reinterpreted(tmp_path: Path, document: str) -> None:
     write_bars(tmp_path / "data")
     seed_archive(archive_path(tmp_path))
-    batch = scheduler(tmp_path)
-    batch.store.set_state(
-        batch.cursor_key,
-        json.dumps({"version": 2, "offset": 0, "gap_policy": "ignore"}),
-    )
+    session_aware = scheduler(tmp_path, gap_policy="session_aware")
+    scan_once(Orchestrator(session_aware.store), [session_aware])
+    assert len(jobs(session_aware.store)) == 1
+    session_aware.store.set_state(session_aware.cursor_key, document)
 
-    with pytest.raises(SchedulerPolicyMismatch, match="invalid gap_policy"):
-        batch.scan()
+    strict = scheduler(tmp_path, gap_policy="strict")
+    outcome = scan_once(Orchestrator(strict.store), [strict])
+
+    assert outcome.queued == () and outcome.duplicates == ()
+    assert len(jobs(strict.store)) == 1, "a corrupt cursor must not emit a new job"
+    refusals = event_details(strict.store, EVENT_REFUSED)
+    assert refusals[-1]["reason"] == REASON_CURSOR_CORRUPT
+    assert refusals[-1]["scope"] is None
 
 
 def test_known_synthetic_store_is_refused_unless_allowed(tmp_path: Path) -> None:
@@ -583,18 +600,29 @@ def test_known_synthetic_store_is_refused_unless_allowed(tmp_path: Path) -> None
     assert outcome.queued[0].payload["gap_policy"] == "strict"
 
 
-def test_unreadable_provenance_is_refused_not_guessed(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "sidecar_text",
+    [
+        "not json",
+        "{}",
+        '{"synthetic": true}',
+        '{"symbol": "XAUUSD"}',
+        "[]",
+    ],
+)
+def test_unreadable_provenance_is_refused_not_guessed(tmp_path: Path, sidecar_text: str) -> None:
     data_root = tmp_path / "data"
     write_bars(data_root)
     sidecar = data_root / "_meta" / SYMBOL / f"{TIMEFRAME}.json"
     sidecar.parent.mkdir(parents=True)
-    sidecar.write_text("not json", encoding="utf-8")
+    sidecar.write_text(sidecar_text, encoding="utf-8")
     seed_archive(archive_path(tmp_path))
     batch = scheduler(tmp_path)
 
     outcome = scan_once(Orchestrator(batch.store), [batch])
 
     assert outcome.queued == ()
+    assert len(jobs(batch.store)) == 0
     assert event_details(batch.store, EVENT_REFUSED)[-1]["reason"] == (
         REASON_PROVENANCE_UNAVAILABLE
     )

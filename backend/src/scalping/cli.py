@@ -1337,7 +1337,10 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         HandlerContext,
         register_default_handlers,
     )
-    from scalping.orchestrator.paper_scheduler import PaperAdvanceScheduler
+    from scalping.orchestrator.paper_scheduler import (
+        DEFAULT_GAP_POLICY,
+        PaperAdvanceScheduler,
+    )
     from scalping.orchestrator.paper_triggers import (
         KIND_PAPER_OUTCOMES,
         PaperOutcomeTriggerSource,
@@ -1361,7 +1364,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         raise CliError(
             "--allow-synthetic requires --schedule-paper or at least one --watch-paper-ledger"
         )
-    if args.paper_gap_policy != "strict" and not args.schedule_paper:
+    paper_gap_policy = args.paper_gap_policy or DEFAULT_GAP_POLICY
+    if args.paper_gap_policy is not None and not args.schedule_paper:
         raise CliError("--paper-gap-policy requires --schedule-paper")
     research_kinds = tuple(
         sorted(
@@ -1417,7 +1421,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                     data_root=context.data_root,
                     archive_path=context.discovery_archive_path,
                     ledger_path=context.paper_ledger_path,
-                    gap_policy=args.paper_gap_policy,
+                    gap_policy=paper_gap_policy,
                     allow_synthetic=args.allow_synthetic,
                 )
             )
@@ -2126,7 +2130,7 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument(
         "--paper-gap-policy",
         choices=("strict", "session_aware", "skip_with_report"),
-        default="strict",
+        default=None,
         help=(
             "gap policy the --schedule-paper jobs request (default strict);"
             " session_aware skips and records a missing instant inside the open"
