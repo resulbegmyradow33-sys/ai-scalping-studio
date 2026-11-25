@@ -418,19 +418,19 @@ Change one control at a time. A reason is required for `pause`,
 
 ```bash
 # Stop claiming jobs; trigger scanning can continue.
-curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \
   -H 'Content-Type: application/json' -d '{"action":"pause","reason":"maintenance"}'
 
 # Hard stop: the daemon claims no jobs.
-curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \
   -H 'Content-Type: application/json' -d '{"action":"safe_mode_on","reason":"operator stop"}'
 
 # Resume claiming after checking the queue and evidence.
-curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \
   -H 'Content-Type: application/json' -d '{"action":"resume"}'
 
 # Block dataset/discovery/paper research jobs while leaving ingestion possible.
-curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \\
+curl -s -X POST http://127.0.0.1:8000/api/orchestrator/control \
   -H 'Content-Type: application/json' -d '{"action":"disable_research"}'
 ```
 
