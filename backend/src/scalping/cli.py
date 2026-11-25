@@ -1197,10 +1197,16 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         HandlerContext,
         register_default_handlers,
     )
+    from scalping.orchestrator.paper_triggers import (
+        KIND_PAPER_OUTCOMES,
+        PaperOutcomeTriggerSource,
+        register_paper_outcome_handler,
+    )
     from scalping.orchestrator.store import JobStore
 
-    if args.no_scan and (args.watch_dir or args.watch_data_dir):
-        raise CliError("--no-scan cannot be combined with a watch directory")
+    paper_ledgers = tuple(args.watch_paper_ledger or ())
+    if args.no_scan and (args.watch_dir or args.watch_data_dir or paper_ledgers):
+        raise CliError("--no-scan cannot be combined with a watch source")
     if args.watch_dir and args.watch_data_dir:
         raise CliError("--watch-dir and --watch-data-dir cannot be combined")
     if args.watch_dir and args.watch_kind == KIND_DATASET_BUILD:
@@ -1208,6 +1214,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             "--watch-kind dataset.build cannot infer symbol/timeframe from a bare file;"
             " use --watch-data-dir"
         )
+    if args.allow_synthetic and not paper_ledgers:
+        raise CliError("--allow-synthetic requires at least one --watch-paper-ledger")
     research_kinds = tuple(
         sorted(
             {
@@ -1215,6 +1223,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 KIND_DISCOVERY_RUN,
                 KIND_PAPER_ADVANCE,
                 KIND_PAPER_ANALYSE,
+                KIND_PAPER_OUTCOMES,
             }
         )
     )
@@ -1229,7 +1238,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     )
     store = JobStore(Path(args.db))
     try:
-        triggers: tuple[TriggerSource, ...] = ()
+        sources: list[TriggerSource] = []
         if args.watch_dir:
             try:
                 source = FileTriggerSource(
@@ -1239,13 +1248,25 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 )
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
-            triggers = (_WatchSource(source, args.watch_kind),)
+            sources.append(_WatchSource(source, args.watch_kind))
         elif args.watch_data_dir:
             try:
                 data_source = DataFileTriggerSource(Path(args.watch_data_dir), store=store)
             except NotADirectoryError as exc:
                 raise CliError(str(exc)) from exc
-            triggers = (data_source,)
+            sources.append(data_source)
+        # One source per explicit ledger path, in the order given. There is no
+        # implicit default: <archive-root>/paper.sqlite is never bound unless
+        # the operator passes it, and the read-only HTTP API cannot bind one.
+        sources.extend(
+            PaperOutcomeTriggerSource(
+                Path(path),
+                store=store,
+                allow_synthetic=args.allow_synthetic,
+            )
+            for path in paper_ledgers
+        )
+        triggers = tuple(sources)
         registry = Orchestrator(store)
         register_default_handlers(
             registry,
@@ -1255,6 +1276,10 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                 archive_root=Path(args.archive_root),
             ),
         )
+        if paper_ledgers:
+            # Proposal-only: it records the outcome and recommends the next
+            # research cycle; it never enqueues discovery or runs a search.
+            register_paper_outcome_handler(registry, allow_synthetic=args.allow_synthetic)
         daemon = OrchestratorDaemon(store, registry, config, triggers=triggers)
         if args.once:
             result = daemon.tick()
@@ -1854,6 +1879,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "watch a market-data root for new Parquet/CSV and enqueue one"
             " dataset.build per <symbol>/<timeframe>; incompatible with --watch-dir"
+        ),
+    )
+    run.add_argument(
+        "--watch-paper-ledger",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "watch a paper ledger for matured outcomes and enqueue one"
+            " paper.outcomes proposal per new batch; repeat for several ledgers"
+        ),
+    )
+    run.add_argument(
+        "--allow-synthetic",
+        action="store_true",
+        help=(
+            "let --watch-paper-ledger treat batches recorded as synthetic as"
+            " proposals; default refuses them as market evidence"
         ),
     )
     run.add_argument(
