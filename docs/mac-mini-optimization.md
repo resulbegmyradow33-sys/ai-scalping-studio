@@ -231,3 +231,22 @@ without the real store, and it produces comparable local numbers when given the
 same machine and inputs. Acceptance still requires the P6 end-to-end run on real
 XAUUSD data, measured on the target Mac mini, with code/test/training/
 validation/paper evidence reported separately.
+
+
+### Unified table
+
+Run the three suites, then render one table:
+
+```bash
+uv run python -m scripts.benchmark_ml --out ../runs/bench-ml.json
+uv run python -m scripts.benchmark_nn --out ../runs/bench-nn.json
+uv run python -m scripts.benchmark_ppo --out ../runs/bench-ppo.json
+uv run python -m scripts.benchmark_table \
+  --ml-report ../runs/bench-ml.json --nn-report ../runs/bench-nn.json \
+  --ppo-report ../runs/bench-ppo.json --out ../runs/bench-table.md
+```
+
+The renderer does not invent rows: a missing report is skipped and a failed
+model row keeps its error. Throughput units differ by source (`win/s` for NN,
+`steps/s` for PPO) and are labelled in the cell.
+
