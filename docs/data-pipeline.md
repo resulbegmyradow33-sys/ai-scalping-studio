@@ -277,6 +277,28 @@ are **not implemented**. The matrix has candle anatomy (`body_atr`,
 state; neither counts consecutive candles. Adding such a column needs a stated,
 falsifiable research question rather than a rename.
 
+## Tick layer
+
+The bar store is not the only raw layer. `scalping.data.ticks.TickStore` keeps
+ticks queryable without aggregating them to M1 first:
+
+```text
+<root>/<symbol>/<year:04d>/<month:02d>.parquet
+```
+
+Columns: `ts` (UTC), `bid`, `ask`, `bid_volume`, `ask_volume`, `provider`.
+
+- `write(symbol, frame)` merges by the full tick identity and reports newly
+  added rows; an identical re-import adds nothing.
+- `read(symbol, start, end, limit=...)` is inclusive and sorted; `limit` returns
+  the **oldest** rows in the range.
+- `coverage(symbol)` reports first/last tick and the row count.
+- Writes are atomic; extra columns are dropped and a naive `ts` is treated as
+  UTC. Structural validation stays in `validate_ticks`, so unknown data can be
+  stored and inspected.
+- The bar features do not read this store; it exists for research that needs
+  spreads, signed volume or event windows without a lossy M1 round-trip.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.
