@@ -16,6 +16,7 @@ oldest rows in the range (use it for previews, not for sampling the middle).
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -54,11 +55,19 @@ _TICK_DTYPES: dict[str, DataType | DataTypeClass] = {
 TICK_SCHEMA: Final[pl.Schema] = pl.Schema(_TICK_DTYPES)
 
 _REQUIRED: Final[tuple[str, ...]] = ("ts", "bid", "ask", "bid_volume", "ask_volume")
+_SAFE_NAME: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _IDENTITY: Final[tuple[str, ...]] = ("ts", "bid", "ask", "bid_volume", "ask_volume", "provider")
 
 
 def _empty() -> pl.DataFrame:
     return pl.DataFrame(schema=TICK_SCHEMA)
+
+
+def _check_symbol(symbol: str) -> str:
+    """Reject a symbol that could escape ``<root>/<symbol>``."""
+    if not isinstance(symbol, str) or _SAFE_NAME.fullmatch(symbol) is None:
+        raise ValueError(f"invalid symbol {symbol!r}; expected one safe path component")
+    return symbol
 
 
 def conform_ticks(df: pl.DataFrame) -> pl.DataFrame:
@@ -127,8 +136,7 @@ class TickStore:
 
     def write(self, symbol: str, df: pl.DataFrame) -> int:
         """Merge ticks into the store; return newly added rows."""
-        if not symbol:
-            raise ValueError("symbol must be non-empty")
+        symbol = _check_symbol(symbol)
         frame = conform_ticks(df)
         if frame.is_empty():
             return 0
@@ -163,8 +171,7 @@ class TickStore:
         limit: int | None = None,
     ) -> pl.DataFrame:
         """Read ``[start, end]`` (inclusive, UTC), sorted; ``limit`` keeps oldest."""
-        if not symbol:
-            raise ValueError("symbol must be non-empty")
+        symbol = _check_symbol(symbol)
         if limit is not None and limit < 1:
             raise ValueError("limit must be >= 1 or None")
         start = self._utc(start)
@@ -184,6 +191,7 @@ class TickStore:
         return frame.head(limit) if limit is not None else frame
 
     def coverage(self, symbol: str) -> TickCoverage:
+        symbol = _check_symbol(symbol)
         frame = self.read(symbol)
         if frame.is_empty():
             return TickCoverage(None, None, 0)

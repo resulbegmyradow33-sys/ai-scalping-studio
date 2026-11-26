@@ -100,3 +100,16 @@ def test_conform_ticks_fills_provider_and_utc() -> None:
 
     with pytest.raises(ValueError, match="missing tick columns"):
         conform_ticks(raw.drop("ask"))
+
+
+def test_symbol_must_be_a_single_safe_component(tmp_path) -> None:
+    store = TickStore(tmp_path)
+    frame = ticks(datetime(2026, 1, 5, 10, 0, tzinfo=UTC), 1)
+
+    for bad in ("../escape", "a/b", "..", ".", "", "x" * 65):
+        with pytest.raises(ValueError, match="invalid symbol"):
+            store.write(bad, frame)
+        with pytest.raises(ValueError, match="invalid symbol"):
+            store.read(bad)
+        with pytest.raises(ValueError, match="invalid symbol"):
+            store.coverage(bad)
