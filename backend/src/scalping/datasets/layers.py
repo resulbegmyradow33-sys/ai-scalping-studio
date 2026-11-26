@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -37,6 +38,8 @@ from scalping.datasets.builder import SPLIT_NAMES, build_dataset
 from scalping.features.build import build_features
 
 __all__ = ["LAYER_NAMES", "LayerFile", "LayerManifest", "build_layers"]
+
+_SAFE_NAME: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 LAYER_NAMES: Final[tuple[str, ...]] = (
     "raw",
@@ -92,6 +95,13 @@ class LayerManifest:
         }
 
 
+def _safe_component(value: str, name: str) -> str:
+    """Reject a symbol/timeframe that could escape the layer root."""
+    if not isinstance(value, str) or _SAFE_NAME.fullmatch(value) is None:
+        raise ValueError(f"invalid {name} {value!r}; expected one safe path component")
+    return value
+
+
 def _digest(path: Path) -> str:
     hasher = hashlib.blake2b(digest_size=16)
     with path.open("rb") as handle:
@@ -144,6 +154,8 @@ def build_layers(
     purge_bars: int = 0,
 ) -> LayerManifest:
     """Materialise all six layers; raise instead of fabricating a clean slice."""
+    symbol = _safe_component(symbol, "symbol")
+    timeframe = _safe_component(timeframe, "timeframe")
     store = ParquetStore(store_root)
     frame = store.read(symbol, timeframe)
     if frame.is_empty():

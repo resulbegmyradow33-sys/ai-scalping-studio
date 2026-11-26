@@ -86,3 +86,15 @@ def test_invalid_slice_fails_before_any_layer_is_written(tmp_path) -> None:
 def test_empty_store_and_missing_symbol_are_rejected(tmp_path) -> None:
     with pytest.raises(ValueError, match="no XAUUSD M1 bars"):
         build_layers(tmp_path / "empty", tmp_path / "layers", "XAUUSD", "M1")
+
+
+def test_symbol_and_timeframe_must_be_safe_components(tmp_path) -> None:
+    store_root = tmp_path / "store"
+    seed_store(store_root)
+    out = tmp_path / "layers"
+
+    for bad in ("../escape", "a/b", "..", ""):
+        with pytest.raises(ValueError, match="invalid symbol"):
+            build_layers(store_root, out, bad, "M1")
+        with pytest.raises(ValueError, match="invalid timeframe"):
+            build_layers(store_root, out, "XAUUSD", bad)
