@@ -35,6 +35,8 @@ process, not an operating-system service.
 | `backend/tests/test_data_triggers.py` | Market-data layout inference, dedupe across restart and crash, refusals, caps, CLI |
 | `backend/tests/test_paper_outcome_triggers.py` | Matured-outcome eligibility, cursor/pending ack, provenance, proposal-only handler |
 | `backend/tests/test_paper_outcome_cli.py` | `--watch-paper-ledger` wiring, repeatable flags, synthetic opt-in, restart dedupe, no implicit/HTTP source |
+| `backend/tests/test_proposal_bridge.py` | Approved-only triggers, payload/gate contract, dedupe, limits, proposal-only handler |
+| `backend/tests/test_proposal_cli.py` | `--watch-proposals` / `--proposal-template` wiring, DB validation before queue creation, scan-only enqueue, restart dedupe, flag gates |
 | `backend/tests/test_paper_scheduler.py` | Evidence-only advances, one job per decision bar, restart and crash dedupe, ledger cursor, warm-up, gap-policy contract, CLI |
 | `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
@@ -199,6 +201,12 @@ uv run scalping.cli orchestrator run --forever \
   --watch-paper-ledger runs/paper-a.sqlite \
   --watch-paper-ledger runs/paper-b.sqlite
 
+# enqueue discovery.run for owner-approved proposals, using the required
+# explicit search policy in a JSON file (see the flag table below)
+uv run scalping.cli orchestrator run --forever \
+  --watch-proposals runs/knowledge/proposals.sqlite3 \
+  --proposal-template runs/proposal-template.json
+
 # tests/dev only: no measured guard, status says unmeasured
 uv run scalping.cli orchestrator run --once --profile none
 ```
@@ -216,7 +224,9 @@ only when `--watch-paper-ledger` names it.
 | `--schedule-paper` | no | off | Bind one `PaperAdvanceScheduler`; each evidence champion with a new decidable stored bar enqueues `paper.advance` | `--no-scan` |
 | `--watch-paper-ledger PATH` | yes | none | Bind one `PaperOutcomeTriggerSource` per path and register the proposal-only `paper.outcomes` handler | `--no-scan` |
 | `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
-| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper` |
+| `--watch-proposals PATH` | yes | none | Bind one `ProposalQueueTriggerSource` per existing proposal DB; only approved proposals become `discovery.run` jobs | `--no-scan`; requires `--proposal-template` |
+| `--proposal-template PATH` | no | none | Path to a UTF-8 JSON object holding the required `DiscoveryTemplate` policy (`max_trials`, `seed`, `gate`, `stress`); inline JSON is not accepted | requires at least one `--watch-proposals`; `--no-scan` |
+| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper`, either proposal flag |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
 and the queue is filled by another process. `--watch-kind` defaults to
@@ -224,11 +234,23 @@ and the queue is filled by another process. `--watch-kind` defaults to
 `document_path`. A raw file payload cannot satisfy `dataset.build` (it needs
 `symbol` and `timeframe`), so `--watch-kind dataset.build` is a CLI error and
 points at `--watch-data-dir`. `--watch-dir` and `--watch-data-dir` are mutually
-exclusive; `--schedule-paper` and paper-ledger sources may be combined with
-either of them, and the resulting sources are scanned in the order the flags
-appear (the single directory watcher first, then the paper scheduler, then the
-ledger paths). `--no-scan` is a CLI error with any watch flag or
-`--schedule-paper`.
+exclusive; `--schedule-paper`, paper-ledger sources and proposal sources may be
+combined with either of them. Sources are always scanned in fixed category
+order — directory watcher, paper scheduler, paper ledgers, proposal databases —
+and repeatable flags keep their flag order inside a category. `--no-scan` is a
+CLI error with any watch flag, `--schedule-paper` or either proposal flag.
+
+`--proposal-template` takes **one clear form: a path to a JSON file**, never an
+inline JSON string. An example object:
+
+```json
+{"max_trials": 25, "seed": 7, "gate": {"min_trades": 10, "max_drawdown": 0.25},
+ "stress": [1.5, 2.0], "population": 8, "generations": 3, "patience": 2, "horizon": 2}
+```
+
+The gate and stress policy are required by `DiscoveryTemplate.from_mapping`:
+an empty gate is exploratory policy that must be written down, not a default
+the CLI invents. A missing file, malformed JSON or invalid field is a `CliError`.
 
 `--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
 store error). A job-level handler failure is a recorded job outcome and still
@@ -1392,6 +1414,49 @@ the handler could not enqueue even by mistake.
 - **No holdout access.** `proposal_handlers.py` imports no discovery or holdout
   module and refuses a holdout-looking hint before a job exists.
 
+### Daemon and CLI wiring
+
+`orchestrator run --watch-proposals PATH --proposal-template PATH.json` is the
+production wiring. The paths are explicit: there is no default proposal DB,
+and the read-only HTTP surface cannot bind one or supply a template. The two
+flags depend on each other and both conflict with `--no-scan`.
+
+Before the `JobStore` is opened, each proposal path is checked in order: it must
+exist, be a regular file, be readable, be openable through a read-only SQLite
+probe (`file:<path>?mode=ro`) and already contain a `proposals` table in
+`sqlite_master`. A typo, a directory, an empty file or a database without that
+table is a `CliError` and leaves the orchestrator DB uncreated. No schema is
+created by the probe. Only after all paths pass does the CLI open the queue and
+one `ProposalStore` per path; every store is closed in `finally`. The template
+file is read with `json.loads` and validated by
+`DiscoveryTemplate.from_mapping`, with `OSError`/`ValueError`/`TypeError`
+reported as `CliError`.
+
+One source is appended per path, after the directory watcher, paper scheduler
+and paper ledgers, in flag order. Each scan emits only `discovery.run` jobs with
+the template's gate, stress and seed in the payload. The CLI does not approve,
+promote, convert or execute anything: **a human approval is still required**
+before a proposal is visible to the source, and **scanning is not execution** —
+the queued job is claimed and run later by the daemon and its registered
+handler, under the resource guard and persisted research controls. Passing
+`--max-jobs-per-tick 0` scans and enqueues without claiming any job, which is
+how the tests prove that a scan writes no discovery archive.
+
+`discovery.run` is in the CLI's `research_kinds`, so `disable research` refuses
+its claim while scanning and enqueueing continue, as for every other source.
+
+Limits of this wiring:
+
+- Naming N proposal DBs means N sequential reads per tick. The same DB named
+  twice is two reads; the cursor and job key still make it one job.
+- Removing the flags stops new proposals but leaves the cursors in the job
+  store; it does not cancel jobs already queued.
+- Validation checks the shape, not the semantics, of the database. An existing
+  `proposals` table with an unexpected schema may still fail when the source
+  reads it; the failure is recorded by the scan, not hidden by a rewrite.
+- A queued job is not evidence. It still runs the ordinary `discovery.run`
+  handler, which records `no_trade`/`no_change`/`rejected` and cannot promote.
+
 ### Honest limits
 
 - **One scan reads at most 1 000 approved proposals and emits at most
@@ -1419,6 +1484,7 @@ uv run pytest tests/test_orchestrator_store.py tests/test_orchestrator_core.py \
   tests/test_orchestrator_cancel.py tests/test_orchestrator_handlers.py \
   tests/test_orchestrator_resources.py tests/test_orchestrator_daemon.py \
   tests/test_paper_scheduler.py tests/test_paper_outcome_cli.py \
+  tests/test_proposal_bridge.py tests/test_proposal_cli.py \
   tests/test_orchestrator_integration.py -q
 uv run pytest
 ```

@@ -421,7 +421,10 @@ holdout spend, champion, paper run.
 - [ ] PARTIAL: file triggers (size+mtime+sha256, durable cursor) and the
       matured paper-outcome trigger (#122, proposal only) exist. #153 adds the
       approved-proposal → `discovery.run` queue bridge; this is not automatic
-      hypothesis approval or promotion.
+      hypothesis approval or promotion. The bridge is now bound to
+      `orchestrator run` through explicit `--watch-proposals` /
+      `--proposal-template` flags with pre-queue DB validation. Scanning only
+      enqueues: human approval, execution and promotion remain outside the CLI.
 - [ ] PARTIAL: ingestion/index and dataset/discovery handlers are registered
       (#115); data triggers can enqueue dataset builds, and approved proposals
       can enqueue discovery. Automatic data-quality approval and a full

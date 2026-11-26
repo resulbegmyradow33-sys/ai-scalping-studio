@@ -17,8 +17,10 @@ import argparse
 import copy
 import json
 import math
+import os
 import signal
 import socket
+import sqlite3
 import sys
 import threading
 from collections.abc import Callable, Sequence
@@ -1323,8 +1325,58 @@ class _WatchSource:
         self._source.seen(triggers)
 
 
+def _validate_proposal_database(path_text: str) -> Path:
+    """Check an explicit proposal database before any store can create one.
+
+    A typo or an empty file must not become a schema: the read-only probe only
+    accepts an existing regular file whose ``sqlite_master`` already names the
+    ``proposals`` table. The probe connection is always closed, and no write or
+    schema migration happens here.
+    """
+    path = Path(path_text)
+    if not path.exists():
+        raise CliError(f"proposal database does not exist: {path}")
+    if not path.is_file():
+        raise CliError(f"proposal database is not a regular file: {path}")
+    if not os.access(path, os.R_OK):
+        raise CliError(f"proposal database is not readable: {path}")
+    probe: sqlite3.Connection | None = None
+    try:
+        probe = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
+        found = probe.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proposals' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error as exc:
+        raise CliError(f"proposal database is not a readable SQLite file: {path}: {exc}") from exc
+    finally:
+        if probe is not None:
+            probe.close()
+    if found is None:
+        raise CliError(f"proposal database has no proposals table: {path}")
+    return path
+
+
+def _load_proposal_template(path_text: str) -> Any:
+    """Read one explicit JSON file into a validated ``DiscoveryTemplate``.
+
+    An inline JSON string is deliberately not accepted: the flag takes one
+    clear form, a path to a UTF-8 JSON object. Gate, stress, seed and trial
+    budget are required by the template loader, so a malformed policy is a CLI
+    error rather than a silently defaulted search.
+    """
+    from scalping.orchestrator.proposal_handlers import DiscoveryTemplate
+
+    path = Path(path_text)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        return DiscoveryTemplate.from_mapping(document)
+    except (OSError, ValueError, TypeError) as exc:
+        raise CliError(f"invalid proposal template {path}: {exc}") from exc
+
+
 def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     """Run one tick (``--once``) or a supervised loop (``--forever``)."""
+    from scalping.knowledge import ProposalStore
     from scalping.orchestrator.core import Orchestrator
     from scalping.orchestrator.daemon import DaemonConfig, OrchestratorDaemon
     from scalping.orchestrator.data_triggers import DataFileTriggerSource
@@ -1343,11 +1395,18 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         PaperOutcomeTriggerSource,
         register_paper_outcome_handler,
     )
+    from scalping.orchestrator.proposal_handlers import ProposalQueueTriggerSource
     from scalping.orchestrator.store import JobStore
 
     paper_ledgers = tuple(args.watch_paper_ledger or ())
+    proposal_paths = tuple(args.watch_proposals or ())
     if args.no_scan and (
-        args.watch_dir or args.watch_data_dir or paper_ledgers or args.schedule_paper
+        args.watch_dir
+        or args.watch_data_dir
+        or paper_ledgers
+        or proposal_paths
+        or args.schedule_paper
+        or args.proposal_template
     ):
         raise CliError("--no-scan cannot be combined with a watch source")
     if args.watch_dir and args.watch_data_dir:
@@ -1359,6 +1418,14 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         )
     if args.allow_synthetic and not paper_ledgers:
         raise CliError("--allow-synthetic requires at least one --watch-paper-ledger")
+    if proposal_paths and not args.proposal_template:
+        raise CliError("--watch-proposals requires --proposal-template")
+    if args.proposal_template and not proposal_paths:
+        raise CliError("--proposal-template requires at least one --watch-proposals path")
+    # Validate before opening the job store: a typo must not create a queue DB,
+    # and ProposalStore (which migrates schemas) must not touch a bad file.
+    validated_proposals = tuple(_validate_proposal_database(path) for path in proposal_paths)
+    template = _load_proposal_template(args.proposal_template) if args.proposal_template else None
     research_kinds = tuple(
         sorted(
             {
@@ -1380,6 +1447,7 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         research_kinds=research_kinds,
     )
     store = JobStore(Path(args.db))
+    proposal_stores: list[ProposalStore] = []
     try:
         sources: list[TriggerSource] = []
         if args.watch_dir:
@@ -1426,6 +1494,22 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             )
             for path in paper_ledgers
         )
+        # One source per explicit proposal DB, after the other sources. It only
+        # reads the approved queue and emits discovery.run jobs; approval,
+        # promotion and execution stay with the owner and the daemon/handlers.
+        for path in validated_proposals:
+            if template is None:  # unreachable: the flag pair is checked above
+                raise CliError("--watch-proposals requires --proposal-template")
+            proposals = ProposalStore(path)
+            proposal_stores.append(proposals)
+            sources.append(
+                ProposalQueueTriggerSource(
+                    proposals,
+                    store=store,
+                    template=template,
+                    name=f"proposals:{path.resolve()}",
+                )
+            )
         triggers = tuple(sources)
         registry = Orchestrator(store)
         register_default_handlers(registry, context)
@@ -1442,6 +1526,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             return
         _run_daemon_forever(daemon)
     finally:
+        for proposals in proposal_stores:
+            proposals.close()
         store.close()
 
 
@@ -2133,6 +2219,25 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "let --watch-paper-ledger treat batches recorded as synthetic as"
             " proposals; default refuses them as market evidence"
+        ),
+    )
+    run.add_argument(
+        "--watch-proposals",
+        action="append",
+        default=None,
+        metavar="PATH",
+        help=(
+            "watch an existing proposal database and enqueue one discovery.run"
+            " job per approved experiment; repeat for several databases"
+        ),
+    )
+    run.add_argument(
+        "--proposal-template",
+        default=None,
+        metavar="PATH",
+        help=(
+            "path to a JSON file holding the required DiscoveryTemplate policy"
+            " (gate, stress, seed, max_trials); required with --watch-proposals"
         ),
     )
     run.add_argument(
