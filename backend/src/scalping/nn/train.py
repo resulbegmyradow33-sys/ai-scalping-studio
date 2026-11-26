@@ -168,16 +168,10 @@ class TrainResult:
 
 
 def select_device(request: DeviceRequest) -> torch.device:
-    """Resolve ``auto`` to MPS when available, otherwise CPU."""
-    if request == "cpu":
-        return torch.device("cpu")
-    if request == "mps":
-        if not torch.backends.mps.is_available():
-            raise TrainError("MPS was requested but is not available on this machine")
-        return torch.device("mps")
-    if torch.backends.mps.is_available():
-        return torch.device("mps")
-    return torch.device("cpu")
+    """Resolve the device through the MPS self-test and CPU fallback."""
+    from scalping.nn.device import choose_device
+
+    return choose_device(request).device
 
 
 def _device_label(device: torch.device) -> str:

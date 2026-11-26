@@ -26,6 +26,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--hidden", type=int, default=64)
     parser.add_argument("--device", choices=("auto", "cpu", "mps"), default="cpu")
+    parser.add_argument(
+        "--compare-devices",
+        action="store_true",
+        help="also run on MPS when the self-test passes",
+    )
     parser.add_argument("--out", default=None, help="optional JSON report path")
     return parser
 
@@ -39,16 +44,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         if unknown:
             raise SystemExit(f"unknown models: {unknown}; choose from {MODEL_NAMES}")
         names = requested  # type: ignore[assignment]
-    rows = benchmark_models(
-        names,
-        n_features=args.n_features,
-        window=args.window,
-        batch=args.batch,
-        repeats=args.repeats,
-        warmup=args.warmup,
-        hidden=args.hidden,
-        device=args.device,
-    )
+    devices: list[str] = [args.device]
+    if args.compare_devices:
+        from scalping.nn.device import mps_self_test
+
+        if mps_self_test()[0]:
+            devices = ["cpu", "mps"]
+    rows = []
+    for device in devices:
+        rows.extend(
+            benchmark_models(
+                names,
+                n_features=args.n_features,
+                window=args.window,
+                batch=args.batch,
+                repeats=args.repeats,
+                warmup=args.warmup,
+                hidden=args.hidden,
+                device=device,
+            )
+        )
     payload = {"rows": [row.to_dict() for row in rows]}
     if args.out is not None:
         out = Path(args.out)
