@@ -21,6 +21,8 @@ Guarantees:
 from __future__ import annotations
 
 import os
+import resource
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass
@@ -107,6 +109,8 @@ class TrainConfig:
     seed: int = 0
     checkpoint_every: int = 1
     max_minutes: float | None = None
+    torch_threads: int = 1
+    max_rss_mb: int | None = None
 
     def __post_init__(self) -> None:
         if self.model not in MODEL_NAMES:
@@ -137,6 +141,12 @@ class TrainConfig:
             raise TrainError("checkpoint_every must be >= 1")
         if self.max_minutes is not None and self.max_minutes <= 0:
             raise TrainError("max_minutes must be positive when set")
+        if isinstance(self.torch_threads, bool) or not isinstance(self.torch_threads, int):
+            raise TrainError("torch_threads must be an int")
+        if self.torch_threads < 1:
+            raise TrainError("torch_threads must be >= 1")
+        if self.max_rss_mb is not None and self.max_rss_mb < 1:
+            raise TrainError("max_rss_mb must be >= 1 when set")
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +192,12 @@ def select_device(request: DeviceRequest) -> torch.device:
 
 def _device_label(device: torch.device) -> str:
     return str(device)
+
+
+def _process_rss_mb() -> float:
+    """Process high-water RSS in MiB (bytes on macOS, KiB on Linux)."""
+    usage = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return usage / (1024.0 * 1024.0) if sys.platform == "darwin" else usage / 1024.0
 
 
 # Public alias used by the CLI/API later; keeps the underscore name private.
@@ -271,6 +287,7 @@ def train_classifier(
         x_train, y_train, x_val, y_val, classes = _validate_split(data, cfg)
         device = select_device(cfg.device)
         torch.manual_seed(cfg.seed)
+        torch.set_num_threads(cfg.torch_threads)
         model = build_model(
             cfg.model,
             n_features=data.feature_count,
@@ -316,6 +333,9 @@ def train_classifier(
         for epoch in range(start_epoch, cfg.epochs):
             if control.cancelled():
                 stopped = "cancelled"
+                break
+            if cfg.max_rss_mb is not None and _process_rss_mb() > cfg.max_rss_mb:
+                stopped = "memory_limit"
                 break
             if deadline is not None and time.monotonic() >= deadline:
                 stopped = "time_limit"

@@ -305,10 +305,10 @@ holdout spend, champion, paper run.
 - [ ] PARTIAL: measured orchestrator guard (RSS/load/disk, #112) exists; a
       general RAM budget manager for every job kind and PPO does not.
 - [ ] MPS benchmark and fallback policy.
-- [ ] Torch thread pinning and memory profiling.
+- [ ] PARTIAL: trainer pins torch threads and enforces/report RSS; op-level torch profiling is open.
 - [ ] Chunked dataset loading.
 - [ ] Benchmark table: LightGBM, GRU, TCN, small Transformer, PPO.
-- [ ] Cancellation/resume under memory pressure.
+- [x] Cancellation/resume under memory pressure (memory-limit stop keeps the checkpoint resumable).
 - [x] `docs/mac-mini-optimization.md` exists; its measurements are partial
       (`docs/evidence/bench-2026-11-24.json`, `m2_acceptance=false`).
 
