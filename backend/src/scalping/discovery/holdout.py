@@ -2203,6 +2203,7 @@ def _copy_with_locked_oos(
         locked_oos=section,
         source=evidence.source,
         synthetic=evidence.synthetic,
+        provenance_verified=evidence.provenance_verified,
     )
 
 

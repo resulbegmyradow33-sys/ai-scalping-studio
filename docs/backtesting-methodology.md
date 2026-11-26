@@ -191,7 +191,7 @@ correctly, never that the candidate has an edge.
 
 | Section | Fields |
 |---|---|
-| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget`, `source`, `synthetic` |
+| identity | `spec_hash`, `spec_version`, `complexity`, `dataset_id`, `dataset_checksum`, `symbol`, `timeframe`, `code_version`, `settings_digest`, `seed`, `trial_count`, `search_budget`, `source`, `synthetic`, `provenance_verified` |
 | policy | folds, purge/embargo request, `min_trades_per_fold`, cost multipliers, regime minimum, bootstrap samples and confidence, observation window |
 | splits | half-open `DatasetBundle` row offsets for train, validation and test start/end, so a policy can tell a selection fold from the locked holdout |
 | folds | half-open train/test row ranges and their first/last ISO UTC timestamps, effective purge/embargo, trades, net profit, profit factor, win rate, expectancy in R, max drawdown, per-regime rows, per-stress rows |
@@ -215,6 +215,31 @@ contradicts the manifest fails with `provenance_mismatch`. A missing manifest
 field stays `None` (unknown) and is never defaulted to `False`; see
 [`provenance-audit-2026-11-24.md`](provenance-audit-2026-11-24.md).
 
+`discovery evidence` reads the store sidecar itself; a caller no longer has to
+remember to pass provenance. `persist_evidence_run` calls
+`data.provenance.load_provenance(store_root, symbol, timeframe)` and verifies the
+declaration against the bars it actually read before accepting it:
+
+| Sidecar state | `source`/`synthetic` in the bundle | `provenance_verified` | `discovery evidence` output |
+|---|---|---|---|
+| absent | `None` / `None` (unknown) | `None` | no warning |
+| present and matching: same symbol/timeframe, row count, first/last timestamp and content checksum | copied verbatim | `True` | no warning |
+| present but stale, corrupt or for another slice | `None` / `None` (unknown) | `False` | `warnings: ["ignoring store provenance: ..."]` |
+| caller-supplied without a sidecar | copied verbatim | `False` | `warnings: ["provenance was supplied by the caller ..."]` |
+
+A mismatched sidecar is discarded, not repaired: a store that gained or changed
+bars after the last `save_provenance` no longer has a trustworthy claim, so the
+dataset stays unknown until provenance is re-saved. `source`/`synthetic`
+parameters on `persist_evidence_run` are a fallback for a store with no sidecar;
+they cannot override a sidecar. `provenance_verified=True` requires both
+provenance values to be known. When the flag is unknown it is omitted from the
+bundle JSON; a reader treats absence as `None`.
+
+`provenance_verified` is provenance evidence, not a promotion gate.
+`PROMOTION_V1` still reads only `synthetic`, so its semantics and digest are
+unchanged. A later policy may require `provenance_verified is True`; until then
+an unverified bundle can pass only by declaring `synthetic: false` explicitly.
+
 ### Provenance gate
 
 Promotion is fail-closed on provenance, not merely informative about it:
@@ -231,7 +256,9 @@ and an attached locked-OOS section must repeat the bundle's provenance. The
 holdout ledger seals `source`/`synthetic` with the dataset identity, so the
 spend cannot silently switch tapes.
 
-The schema version is stored and must equal the module's current version.
+The schema version is stored and must equal the module's current version. Version
+5 added `provenance_verified` alongside `source`/`synthetic`; a version-4 bundle
+is refused with `schema_mismatch` and must be rebuilt.
 
 ### Determinism contract
 

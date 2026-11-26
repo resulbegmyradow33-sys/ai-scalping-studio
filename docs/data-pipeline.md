@@ -420,6 +420,20 @@ Fields: `dataset_id`, `symbol`, `timeframe`, `source`, `synthetic`, `rows`,
 The checksum covers timestamps, OHLC, spread and volume. A changed frame gets a
 new checksum; the old sidecar is replaced only by an explicit write.
 
+`ParquetStore.write` never rewrites the sidecar, so a store that gained or
+changed bars can carry a stale claim. Consumers that turn a store into an
+experiment must therefore verify before trusting it: `discovery evidence`
+(`persist_evidence_run`) loads the sidecar and accepts `source`/`synthetic` only
+when the declared symbol, timeframe, row count, first/last timestamp and content
+checksum all match the bars it read. On any mismatch the provenance stays
+unknown (`source: null, synthetic: null`), the bundle records
+`provenance_verified: false`, and the CLI result carries a `warnings` entry
+naming the mismatch. A missing sidecar is also unknown, not real, and the flag
+is omitted from the bundle; re-save provenance after an import that changed the
+frame. Promotion reads `synthetic` only; `provenance_verified` is recorded for a
+future policy and is not a gate today. The full contract is in
+[`backtesting-methodology.md`](backtesting-methodology.md#candidate-evidence-bundle-discovery).
+
 API status includes it:
 
 ```bash

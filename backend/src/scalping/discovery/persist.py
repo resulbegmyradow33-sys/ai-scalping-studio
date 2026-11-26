@@ -58,14 +58,22 @@ import re
 import shutil
 import tempfile
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
 import numpy as np
+import polars as pl
 
 from scalping.config import Settings
+from scalping.data.provenance import (
+    DatasetProvenance,
+    load_provenance,
+)
+from scalping.data.provenance import (
+    checksum as provenance_checksum,
+)
 from scalping.data.store import ParquetStore
 from scalping.datasets.artifact import (
     ARTIFACT_FILE,
@@ -96,8 +104,10 @@ from scalping.strategy.dsl.nodes import DslValidationError, StrategySpec
 __all__ = [
     "PersistError",
     "PersistedRun",
+    "StoreProvenance",
     "load_dataset_artifact",
     "load_evidence_bundle",
+    "load_store_provenance",
     "load_strategy_spec",
     "persist_evidence_run",
     "save_dataset_artifact",
@@ -140,6 +150,8 @@ class PersistedRun:
     bundle_path: Path
     spec_path: Path
     evidence: CandidateEvidence
+    provenance_verified: bool | None = None
+    warnings: tuple[str, ...] = ()
 
     @property
     def checksum(self) -> str:
@@ -159,6 +171,8 @@ class PersistedRun:
             "schema_version": self.evidence.schema_version,
             "source": self.evidence.source,
             "synthetic": self.evidence.synthetic,
+            "provenance_verified": self.provenance_verified,
+            "warnings": list(self.warnings),
             "folds": len(self.evidence.folds),
             "validation_end_row": self.evidence.splits.validation_end_row,
             "test_start_row": self.evidence.splits.test_start_row,
@@ -574,6 +588,110 @@ def load_evidence_bundle(path: str | Path) -> CandidateEvidence:
     return evidence
 
 
+# --- store provenance ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StoreProvenance:
+    """What the store sidecar proved about the bars an evidence run read.
+
+    ``verified`` is ``True`` only after the sidecar's symbol, timeframe, row
+    count, first/last timestamp and content checksum matched the frame.
+    ``False`` means a sidecar exists but was not about this slice (the values
+    are discarded) and ``None`` means no sidecar was available. ``source`` and
+    ``synthetic`` stay ``None`` unless verification succeeded; a declarative
+    sidecar is never copied blindly.
+    """
+
+    source: str | None = None
+    synthetic: bool | None = None
+    verified: bool | None = None
+    warnings: tuple[str, ...] = ()
+
+
+def _same_instant(declared: str | None, actual: object) -> bool:
+    """Compare an ISO sidecar timestamp with a frame timestamp as instants."""
+    if actual is None:
+        return declared is None
+    if declared is None or not isinstance(actual, datetime):
+        return False
+    try:
+        parsed = datetime.fromisoformat(declared)
+    except ValueError:
+        return False
+    if parsed.tzinfo is None and actual.tzinfo is not None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if actual.tzinfo is None and parsed.tzinfo is not None:
+        actual = actual.replace(tzinfo=UTC)
+    return parsed == actual
+
+
+def _sidecar_mismatch(
+    declared: DatasetProvenance,
+    bars: pl.DataFrame,
+    symbol: str,
+    timeframe: str,
+) -> str | None:
+    """Why ``declared`` is not the provenance of ``bars``, or ``None``."""
+    if (declared.symbol, declared.timeframe) != (symbol, timeframe):
+        return (
+            f"the sidecar describes {declared.symbol} {declared.timeframe}, "
+            f"not {symbol} {timeframe}"
+        )
+    rows = int(bars.height)
+    if declared.rows != rows:
+        return f"the sidecar records {declared.rows} rows but the store has {rows}"
+    first = bars["ts"].min() if rows else None
+    last = bars["ts"].max() if rows else None
+    if not _same_instant(declared.first_ts, first) or not _same_instant(declared.last_ts, last):
+        return (
+            "the sidecar timestamp span does not match the stored bars "
+            f"({declared.first_ts!r}..{declared.last_ts!r})"
+        )
+    computed = provenance_checksum(bars)
+    if declared.checksum != computed:
+        return (
+            f"the sidecar checksum {declared.checksum!r} does not hash the stored bars "
+            f"({computed!r})"
+        )
+    return None
+
+
+def load_store_provenance(
+    store_root: str | Path,
+    symbol: str,
+    timeframe: str,
+    bars: pl.DataFrame,
+) -> StoreProvenance:
+    """Verify the sidecar against ``bars`` and return usable provenance.
+
+    A missing sidecar is unknown, not real. An unreadable sidecar, or one whose
+    row span, timestamps or checksum do not describe this frame, is recorded as
+    a warning and contributes no ``source``/``synthetic`` value: a dataset must
+    never inherit an identity that belongs to another slice.
+    """
+    try:
+        declared = load_provenance(store_root, symbol, timeframe)
+    except (OSError, ValueError, TypeError, KeyError) as exc:
+        return StoreProvenance(
+            verified=False,
+            warnings=(f"the store provenance sidecar is unreadable: {exc}",),
+        )
+    if declared is None:
+        return StoreProvenance()
+    problem = _sidecar_mismatch(declared, bars, symbol, timeframe)
+    if problem is not None:
+        return StoreProvenance(
+            verified=False,
+            warnings=(f"ignoring store provenance: {problem}",),
+        )
+    return StoreProvenance(
+        source=declared.source,
+        synthetic=declared.synthetic,
+        verified=True,
+    )
+
+
 # --- end-to-end convenience ---------------------------------------------------
 
 
@@ -607,9 +725,15 @@ def persist_evidence_run(
     version and the spec's structural cost; a supplied config must agree on
     symbol and timeframe.
 
-    ``source``/``synthetic`` are the store provenance, usually read from the
-    sidecar by the caller. They are written into the dataset manifest and the
-    evidence identity; omitted values stay unknown instead of becoming real.
+    ``source``/``synthetic`` are a fallback for a caller that knows the data and
+    has no sidecar; they are **not** a way to override one. The store sidecar is
+    the authority: when it verifies against the bars it is used, when it exists
+    but does not match the frame its claim is discarded (provenance stays
+    unknown, ``provenance_verified`` is ``False`` and ``PersistedRun.warnings``
+    records why) and only a complete absence of a sidecar lets these parameters
+    through, still marked unverified. Values are written into the dataset
+    manifest and the evidence identity; omitted values stay unknown instead of
+    becoming real.
 
     The evidence stops at the dataset's validation end; the artifact keeps the
     test rows because the dataset checksum covers them, but no fold, metric or
@@ -633,6 +757,40 @@ def persist_evidence_run(
         raise PersistError(
             "bars_missing", f"no {symbol} {timeframe} bars under {store_root}; ingest bars first"
         )
+    store_provenance = load_store_provenance(store_root, symbol, timeframe, bars)
+    if store_provenance.verified:
+        if source is not None and source != store_provenance.source:
+            raise PersistError(
+                "provenance_mismatch",
+                (
+                    f"source={source!r} contradicts the verified store sidecar "
+                    f"{store_provenance.source!r}"
+                ),
+            )
+        if synthetic is not None and synthetic != store_provenance.synthetic:
+            raise PersistError(
+                "provenance_mismatch",
+                (
+                    f"synthetic={synthetic!r} contradicts the verified store sidecar "
+                    f"{store_provenance.synthetic!r}"
+                ),
+            )
+        run_source = store_provenance.source
+        run_synthetic = store_provenance.synthetic
+        run_verified: bool | None = True
+    elif store_provenance.verified is False:
+        run_source = None
+        run_synthetic = None
+        run_verified = False
+    else:
+        run_source = source
+        run_synthetic = synthetic
+        run_verified = None if source is None and synthetic is None else False
+    run_warnings = list(store_provenance.warnings)
+    if store_provenance.verified is None and run_verified is False:
+        run_warnings.append(
+            "provenance was supplied by the caller without a store sidecar and is unverified"
+        )
     cache = FeatureCache(Path(store_root) / FEATURE_CACHE_DIRNAME) if use_cache else None
     features = cached_build_features(
         cache,
@@ -654,8 +812,8 @@ def persist_evidence_run(
             validation_fraction=validation_fraction,
             purge_bars=dataset_purge_bars,
             embargo_bars=dataset_embargo_bars,
-            source=source,
-            synthetic=synthetic,
+            source=run_source,
+            synthetic=run_synthetic,
         )
     except ValueError as exc:
         raise PersistError(
@@ -669,9 +827,12 @@ def persist_evidence_run(
             symbol=symbol,
             timeframe=timeframe,
             complexity=complexity,
-            source=source,
-            synthetic=synthetic,
+            source=run_source,
+            synthetic=run_synthetic,
+            provenance_verified=run_verified,
         )
+    else:
+        config = replace(config, provenance_verified=run_verified)
 
     artifact_dir = save_dataset_artifact(store_root, bundle, features)
     try:
@@ -696,4 +857,6 @@ def persist_evidence_run(
         bundle_path=bundle_path,
         spec_path=spec_sidecar_path(bundle_path),
         evidence=evidence,
+        provenance_verified=run_verified,
+        warnings=tuple(run_warnings),
     )
