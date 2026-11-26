@@ -231,3 +231,25 @@ without the real store, and it produces comparable local numbers when given the
 same machine and inputs. Acceptance still requires the P6 end-to-end run on real
 XAUUSD data, measured on the target Mac mini, with code/test/training/
 validation/paper evidence reported separately.
+
+## Device self-test and fallback
+
+`scalping.nn.device.choose_device` runs a tiny matmul on MPS before committing
+to it, because `torch.backends.mps.is_available()` can be true while the first
+kernel fails:
+
+- `auto` → MPS when the self-test passes, otherwise CPU with
+  `fallback_reason` (`mps_unavailable`, `mps_wrong_result` or
+  `mps_error:<Type>`);
+- explicit `mps` → `TrainError` when the self-test fails; a benchmark or report
+  must not silently run on CPU;
+- the trainer's `select_device` uses the same policy.
+
+Benchmark both devices when MPS works:
+
+```bash
+uv run python -m scripts.benchmark_nn --compare-devices \
+  --models gru,tcn,transformer --window 60 --repeats 5
+```
+
+Each row carries `device`; RSS remains process-wide.
