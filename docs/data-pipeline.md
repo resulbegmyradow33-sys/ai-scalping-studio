@@ -277,6 +277,19 @@ are **not implemented**. The matrix has candle anatomy (`body_atr`,
 state; neither counts consecutive candles. Adding such a column needs a stated,
 falsifiable research question rather than a rename.
 
+### Optional sequence features
+
+`scalping.features.sequences.sequence_features(df)` builds causal research
+columns without touching the stable 59-column matrix:
+
+- `log_ret_1`, `log_ret_3`, `log_ret_5` — log closes, zero-filled at the start;
+- `up_streak`, `down_streak` — consecutive up/down closed bars, reset on a
+  flat/opposite bar.
+
+Every row uses only closes at or before it; a mutation test pins the prefix.
+The default matrix stays unchanged, so datasets and models keep their existing
+column contract until a deliberate versioned migration.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.

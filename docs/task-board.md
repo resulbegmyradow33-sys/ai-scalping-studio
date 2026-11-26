@@ -113,9 +113,9 @@ holdout spend, champion, paper run.
 - [x] Persisted array format for large datasets (memmap/parquet).
 - [x] Feature ablation runner (#188): reproducible feature-group ablation with
       a recorded run manifest.
-- [ ] PARTIAL: `log_ret_3` is a documented read-only alias for the log-return
-      column and the naming is pinned by tests (#133); consecutive-candle
-      features do not exist.
+- [ ] PARTIAL: `log_ret_1/3/5` and up/down streak features exist in the
+      optional `features/sequences.py` (causal, tested); they are not wired into
+      the stable 59-column default matrix yet.
 - [ ] Cumulative volume delta and order-flow features from real ticks.
 
 ## Phase 4 — Market regime engine
