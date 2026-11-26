@@ -118,7 +118,9 @@ __all__ = [
 #: Layout version of :meth:`CandidateEvidence.to_dict`; bump on a breaking shape.
 #: Version 4 adds the ``source``/``synthetic`` provenance identity, so a bundle
 #: that cannot say whether its data is real is no longer schema-compatible.
-EVIDENCE_SCHEMA_VERSION: Final[int] = 4
+#: Version 5 adds ``provenance_verified``: whether the store sidecar was checked
+#: against the bars the dataset was cut from, or only declared.
+EVIDENCE_SCHEMA_VERSION: Final[int] = 5
 
 #: A promotion policy needs at least three folds to say anything about stability.
 MIN_EVIDENCE_FOLDS: Final[int] = 3
@@ -167,6 +169,12 @@ class EvidenceConfig:
     value is used, and a value that contradicts the manifest fails with
     ``provenance_mismatch``. Omitting them never turns an unknown dataset into a
     real one.
+
+    ``provenance_verified`` records whether the store sidecar was checked
+    against the bars the dataset was cut from (``True``), was present but did
+    not match (``False``) or could not be checked (``None``). It is set by
+    :func:`~scalping.discovery.persist.persist_evidence_run`, not inferred
+    here; ``True`` requires both provenance values to be known.
     """
 
     code_version: str
@@ -187,6 +195,7 @@ class EvidenceConfig:
     window: int = 60
     source: str | None = None
     synthetic: bool | None = None
+    provenance_verified: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("code_version", "symbol", "timeframe"):
@@ -200,6 +209,11 @@ class EvidenceConfig:
         if self.synthetic is not None and not isinstance(self.synthetic, bool):
             raise TypeError(
                 f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
+            )
+        if self.provenance_verified is not None and not isinstance(self.provenance_verified, bool):
+            raise TypeError(
+                "provenance_verified must be a bool or None, "
+                f"got {type(self.provenance_verified).__name__}"
             )
         for name, minimum in (
             ("folds", 1),
@@ -528,6 +542,13 @@ class CandidateEvidence:
     manifest. They are part of the identity and the checksum because "same
     numbers on a synthetic tape" is not the same experiment as "same numbers on
     real bars". ``None`` means unknown and is never rewritten to ``False``.
+
+    ``provenance_verified`` says how far that provenance was checked: ``True``
+    when the store sidecar's rows, first/last timestamp and content checksum
+    matched the bars the dataset was cut from, ``False`` when a sidecar was
+    present but could not be matched (the values are then unknown) and ``None``
+    when no sidecar was available. A production policy may later require
+    ``True``; promotion does not read this field yet.
     """
 
     spec_hash: str
@@ -552,6 +573,7 @@ class CandidateEvidence:
     locked_oos: LockedOOSEvidence | None = None
     source: str | None = None
     synthetic: bool | None = None
+    provenance_verified: bool | None = None
 
     def __post_init__(self) -> None:
         if self.source is not None and (
@@ -562,10 +584,25 @@ class CandidateEvidence:
             raise TypeError(
                 f"synthetic must be a bool or None, got {type(self.synthetic).__name__}"
             )
+        if self.provenance_verified is not None and not isinstance(self.provenance_verified, bool):
+            raise TypeError(
+                "provenance_verified must be a bool or None, "
+                f"got {type(self.provenance_verified).__name__}"
+            )
+        if self.provenance_verified and (self.source is None or self.synthetic is None):
+            raise ValueError("provenance_verified requires both source and synthetic to be known")
 
     def to_dict(self) -> dict[str, Any]:
-        """JSON-safe nested payload; the checksum is computed over this minus stamps."""
-        return asdict(self)
+        """JSON-safe nested payload; the checksum is computed over this minus stamps.
+
+        ``provenance_verified`` is omitted when unknown so a bundle that predates
+        the check has the same identity shape as before; a reader treats absence
+        as ``None``.
+        """
+        payload = asdict(self)
+        if payload.get("provenance_verified") is None:
+            payload.pop("provenance_verified", None)
+        return payload
 
 
 # --- small helpers ------------------------------------------------------------
@@ -1284,6 +1321,7 @@ def evidence_from_dict(payload: Mapping[str, Any]) -> CandidateEvidence:
             locked_oos=locked,
             source=_optional_text(payload, "source"),
             synthetic=_optional_flag(payload, "synthetic"),
+            provenance_verified=_optional_flag(payload, "provenance_verified"),
         )
     except EvidenceError:
         raise
@@ -1605,6 +1643,11 @@ def build_evidence(
     )
     provenance_source = _resolve_provenance(config.source, manifest.source, "source")
     provenance_synthetic = _resolve_provenance(config.synthetic, manifest.synthetic, "synthetic")
+    if config.provenance_verified and (provenance_source is None or provenance_synthetic is None):
+        raise EvidenceError(
+            "provenance_mismatch",
+            "provenance_verified requires both source and synthetic to be known",
+        )
     stamp = (datetime.now(UTC) if created_at is None else created_at).isoformat(timespec="seconds")
     bundle_evidence = CandidateEvidence(
         spec_hash=spec_hash,
@@ -1627,6 +1670,7 @@ def build_evidence(
         created_at=stamp,
         source=provenance_source,
         synthetic=provenance_synthetic,
+        provenance_verified=config.provenance_verified,
     )
     bundle_evidence = replace(
         bundle_evidence, checksum=_checksum_payload(bundle_evidence.to_dict())

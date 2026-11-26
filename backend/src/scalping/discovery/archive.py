@@ -21,6 +21,14 @@ this candidate evaluated on the scope's dataset?" without a second table, and it
 is a naming convention, not a guarantee: a dataset id that omits the timeframe
 will not qualify.
 
+Dataset ids are compared through :func:`scalping.discovery.ids.canonical_dataset_id`,
+which removes one leading ``validation:`` marker. A search records
+``validation:<manifest id>`` and evidence records ``<manifest id>``; both name
+the same build, so trial lookup (``has_trial``, ``trial_stats``,
+``accepted_trial`` and evidence promotion) treats them as equal while storing
+and returning the original spelling. Other prefixes stay distinct.
+
+
 Two promotion paths exist and they are not equivalent. ``promote_evidence`` is
 the production path: it requires a named/versioned promotion-policy decision with
 an evidence checksum, stores no metric and records the policy identity in the
@@ -71,6 +79,7 @@ from scalping.discovery.evidence import (
 from scalping.discovery.evidence import (
     evidence_checksum as _evidence_checksum,
 )
+from scalping.discovery.ids import canonical_dataset_id
 from scalping.discovery.protocols import Candidate, TrialResult, canonical_digest, canonical_json
 
 __all__ = [
@@ -805,6 +814,60 @@ def _latest_accepted(
     return None
 
 
+def _canonical_archived_dataset_id(value: object) -> str | None:
+    """Canonical id of a stored trial row, or ``None`` when the row is malformed.
+
+    Archive rows predate this helper and a raw connection can write anything, so
+    a blank or prefix-only ``dataset_id`` is a recorded defect, not a reason to
+    crash a promotion precheck or an exposure read. Such a row never matches a
+    requested dataset; the caller's own id is validated separately.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return canonical_dataset_id(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _accepted_trial_row(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    dataset_id: str,
+    code_version: str,
+) -> sqlite3.Row | None:
+    """Newest accepted trial naming the same dataset build as ``dataset_id``.
+
+    Trial ids and evidence ids may spell the same build differently
+    (``validation:<id>`` vs ``<id>``); :func:`canonical_dataset_id` decides
+    equality. The stored row is returned untouched so callers can compare the
+    recorded checksum and settings digest exactly. A malformed stored id is
+    skipped rather than crashing the lookup.
+    """
+    wanted = canonical_dataset_id(dataset_id)
+    rows = conn.execute(
+        """
+        SELECT * FROM trials
+        WHERE candidate_id = ? AND code_version = ? AND accepted = 1
+        ORDER BY id DESC
+        """,
+        (candidate_id, code_version),
+    ).fetchall()
+    for row in rows:
+        if _canonical_archived_dataset_id(row["dataset_id"]) == wanted:
+            return row
+    return None
+
+
+def _trial_row_exists(conn: sqlite3.Connection, candidate_id: str, dataset_id: str) -> bool:
+    """Whether this candidate has any trial on the same dataset build."""
+    wanted = canonical_dataset_id(dataset_id)
+    rows = conn.execute(
+        "SELECT dataset_id FROM trials WHERE candidate_id = ?", (candidate_id,)
+    ).fetchall()
+    return any(_canonical_archived_dataset_id(row["dataset_id"]) == wanted for row in rows)
+
+
 def _metric_value(
     conn: sqlite3.Connection, candidate_id: str, tokens: frozenset[str], metric: str
 ) -> float | None:
@@ -1358,11 +1421,11 @@ class DiscoveryArchive:
         spec_hash = _require_text(spec_hash, "spec_hash")
         if self.candidate(spec_hash) is None:
             raise UnknownCandidateError(f"unknown candidate {spec_hash!r}")
+        wanted = None
+        if dataset_id is not None:
+            wanted = canonical_dataset_id(_require_text(dataset_id, "dataset_id"))
         clauses: list[str] = []
         parameters: list[str] = []
-        if dataset_id is not None:
-            clauses.append("dataset_id = ?")
-            parameters.append(_require_text(dataset_id, "dataset_id"))
         if code_version is not None:
             clauses.append("code_version = ?")
             parameters.append(_require_text(code_version, "code_version"))
@@ -1371,6 +1434,10 @@ class DiscoveryArchive:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY id"
         rows = self._connection().execute(query, parameters).fetchall()
+        if wanted is not None:
+            rows = [
+                row for row in rows if _canonical_archived_dataset_id(row["dataset_id"]) == wanted
+            ]
 
         total_attempts = len(rows)
         accepted = sum(1 for row in rows if int(row[3]) == 1)
@@ -1398,37 +1465,45 @@ class DiscoveryArchive:
     ) -> bool:
         """Whether this candidate was already evaluated on this dataset.
 
+        Dataset ids are compared canonically, so a trial recorded under
+        ``validation:<id>`` is the same experiment as evidence carrying ``<id>``.
         With ``code_version`` the question is narrower: has this exact code been
         run on this candidate and dataset? A fixed evaluator bug is a new
         experiment, and the search should be allowed to pay for it, while an
         unchanged code version would only reproduce the same rows.
         """
         candidate_id = _require_text(candidate_id, "candidate_id")
+        wanted = canonical_dataset_id(_require_text(dataset_id, "dataset_id"))
+        clauses = ["candidate_id = ?"]
+        parameters: list[str] = [candidate_id]
+        if code_version is not None:
+            clauses.append("code_version = ?")
+            parameters.append(_require_text(code_version, "code_version"))
+        rows = (
+            self._connection()
+            .execute(
+                "SELECT dataset_id FROM trials WHERE " + " AND ".join(clauses),
+                parameters,
+            )
+            .fetchall()
+        )
+        return any(_canonical_archived_dataset_id(row["dataset_id"]) == wanted for row in rows)
+
+    def accepted_trial(
+        self, candidate_id: str, dataset_id: str, *, code_version: str
+    ) -> TrialRecord | None:
+        """Newest accepted trial on the same dataset build, if one exists.
+
+        The promotion precheck and the archive's own evidence promotion use this
+        lookup so both answer the same question: "was this candidate accepted on
+        this build under this code?". ``validation:<id>`` and ``<id>`` name the
+        same build; the returned record keeps its stored spelling.
+        """
+        candidate_id = _require_text(candidate_id, "candidate_id")
         dataset_id = _require_text(dataset_id, "dataset_id")
-        if code_version is None:
-            row = (
-                self._connection()
-                .execute(
-                    "SELECT 1 FROM trials WHERE candidate_id = ? AND dataset_id = ? LIMIT 1",
-                    (candidate_id, dataset_id),
-                )
-                .fetchone()
-            )
-        else:
-            version = _require_text(code_version, "code_version")
-            row = (
-                self._connection()
-                .execute(
-                    """
-                    SELECT 1 FROM trials
-                    WHERE candidate_id = ? AND dataset_id = ? AND code_version = ?
-                    LIMIT 1
-                    """,
-                    (candidate_id, dataset_id, version),
-                )
-                .fetchone()
-            )
-        return row is not None
+        code_version = _require_text(code_version, "code_version")
+        row = _accepted_trial_row(self._connection(), candidate_id, dataset_id, code_version)
+        return None if row is None else _trial_from_row(row)
 
     def best(
         self,
@@ -1803,9 +1878,11 @@ class DiscoveryArchive:
         * the evidence payload must rebuild with ``evidence_from_dict``, re-derive
           its checksum and pass ``verify_evidence``, so an arbitrary JSON blob is
           not accepted;
-        * the candidate must have an **accepted** trial on ``dataset_id`` whose
-          ``dataset_checksum`` and ``settings_digest`` match the bundle
-          (``no_accepted_trial`` / ``stale_trial_evidence``);
+        * the candidate must have an **accepted** trial on the same dataset build
+          as ``dataset_id`` whose ``dataset_checksum`` and ``settings_digest``
+          match the bundle (``no_accepted_trial`` / ``stale_trial_evidence``).
+          ``validation:<id>`` and ``<id>`` spell the same build; the stored
+          trial id is not rewritten;
         * the evidence payload is stored content-addressed by its checksum and
           the champion row points at that exact row;
         * if a champion exists, ``champion_candidate_id`` must name it, so a
@@ -1911,9 +1988,7 @@ class DiscoveryArchive:
             expected_identity=expected_identity,
         )
         if not decision.accepted:
-            raise ArchiveError(
-                "promotion_rejected: " + "; ".join(decision.codes)
-            )
+            raise ArchiveError("promotion_rejected: " + "; ".join(decision.codes))
         if decision.evidence_checksum != evidence_checksum:
             raise ArchiveError("promotion decision does not match the evidence checksum")
         tokens = _scope_tokens(scope)
@@ -1931,15 +2006,7 @@ class DiscoveryArchive:
                 if candidate_row is None:
                     raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
 
-                accepted = tx.execute(
-                    """
-                    SELECT dataset_checksum, settings_digest FROM trials
-                    WHERE candidate_id = ? AND dataset_id = ? AND code_version = ?
-                      AND accepted = 1
-                    ORDER BY id DESC LIMIT 1
-                    """,
-                    (candidate_id, dataset_id, code_version),
-                ).fetchone()
+                accepted = _accepted_trial_row(tx, candidate_id, dataset_id, code_version)
                 if accepted is None:
                     raise ArchiveError(
                         f"no_accepted_trial: candidate {candidate_id!r} has no accepted trial "
@@ -2171,11 +2238,8 @@ class DiscoveryArchive:
                 ).fetchone()
                 if candidate_row is None:
                     raise UnknownCandidateError(f"unknown candidate {candidate_id!r}")
-                trial = tx.execute(
-                    "SELECT 1 FROM trials WHERE candidate_id = ? AND dataset_id = ? LIMIT 1",
-                    (candidate_id, dataset_id),
-                ).fetchone()
-                if trial is None:
+                trial = _trial_row_exists(tx, candidate_id, dataset_id)
+                if not trial:
                     raise ArchiveError(
                         f"no_trial: candidate {candidate_id!r} has no trial on {dataset_id!r}"
                     )

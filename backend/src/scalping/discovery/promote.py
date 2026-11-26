@@ -58,6 +58,7 @@ from scalping.discovery.holdout import (
     attach_holdout,
     evaluate_holdout,
 )
+from scalping.discovery.ids import canonical_dataset_id
 from scalping.discovery.persist import (
     PersistError,
     load_dataset_artifact,
@@ -356,30 +357,26 @@ def _structural_precheck(
 
     This repeats the archive's own acceptance query so an attempt that would
     fail with ``no_accepted_trial`` or ``stale_trial_evidence`` never claims the
-    one-shot evaluation slot.
+    one-shot evaluation slot. Dataset ids are compared canonically, so a search
+    trial under ``validation:<manifest id>`` satisfies evidence that stores the
+    manifest id; the checksum and settings digest are still compared exactly.
     """
     row = archive.connection.execute(
         "SELECT 1 FROM candidates WHERE candidate_id = ?", (candidate_id,)
     ).fetchone()
     if row is None:
         raise _Stop(("unknown_candidate",), f"unknown candidate {candidate_id!r}")
-    accepted = archive.connection.execute(
-        """
-        SELECT dataset_checksum, settings_digest FROM trials
-        WHERE candidate_id = ? AND dataset_id = ? AND code_version = ?
-          AND accepted = 1
-        ORDER BY id DESC LIMIT 1
-        """,
-        (candidate_id, evidence.dataset_id, evidence.code_version),
-    ).fetchone()
+    accepted = archive.accepted_trial(
+        candidate_id, evidence.dataset_id, code_version=evidence.code_version
+    )
     if accepted is None:
         raise _Stop(
             ("no_accepted_trial",),
             f"candidate {candidate_id!r} has no accepted trial on {evidence.dataset_id!r} "
             f"under code version {evidence.code_version!r}",
         )
-    checksum = accepted["dataset_checksum"]
-    digest = accepted["settings_digest"]
+    checksum = accepted.dataset_checksum
+    digest = accepted.settings_digest
     if (
         checksum is None
         or digest is None
@@ -431,7 +428,7 @@ def _holdout_data(
         manifest = _manifest(loaded.manifest)
     except ReproduceError as exc:
         raise _Stop(("dataset_manifest_invalid", exc.code), _short_error(exc)) from exc
-    if manifest.dataset_id != evidence.dataset_id:
+    if canonical_dataset_id(manifest.dataset_id) != canonical_dataset_id(evidence.dataset_id):
         raise _Stop(
             ("dataset_mismatch",),
             f"artifact is dataset {manifest.dataset_id!r}, evidence names {evidence.dataset_id!r}",

@@ -253,6 +253,9 @@ def seed_archive(
     *,
     candidate: StrategySpec | None = None,
     code_version: str = CODE,
+    dataset_id: str | None = None,
+    dataset_checksum: str | None = None,
+    settings_digest: str = SETTINGS_HASH,
 ) -> None:
     """Register the candidate and one accepted trial on the exact dataset."""
     spec = context.spec if candidate is None else candidate
@@ -267,11 +270,13 @@ def seed_archive(
                 accepted=True,
                 rejections=(),
             ),
-            dataset_id=context.bundle.manifest.dataset_id,
+            dataset_id=context.bundle.manifest.dataset_id if dataset_id is None else dataset_id,
             code_version=code_version,
             seed=0,
-            dataset_checksum=context.bundle.manifest.checksum,
-            settings_digest=SETTINGS_HASH,
+            dataset_checksum=(
+                context.bundle.manifest.checksum if dataset_checksum is None else dataset_checksum
+            ),
+            settings_digest=settings_digest,
         )
     finally:
         archive.close()
@@ -423,6 +428,84 @@ def _evaluate_entries(ledger_path: Path) -> int:
     with sqlite3.connect(ledger_path) as conn:
         row = conn.execute("SELECT COUNT(*) FROM access_log WHERE action = 'evaluate'").fetchone()
     return int(row[0])
+
+
+def test_search_validation_prefix_promotes_manifest_evidence(tmp_path: Path) -> None:
+    """The real round trip: a search trial under ``validation:``, evidence without it."""
+    context = build_context(tmp_path)
+    manifest_id = context.bundle.manifest.dataset_id
+    prefixed_id = f"validation:{manifest_id}"
+    seed_archive(context, dataset_id=prefixed_id)
+
+    result = promote_evidence(
+        request(context, spend_holdout=True, approval_token="owner-prefix-token")
+    )
+
+    assert result.status == "accepted", result.to_dict()
+    assert result.codes == ()
+    assert result.dataset_id == manifest_id
+    assert result.champion is not None and result.champion["mode"] == "evidence"
+    ledger_path = context.archive_path.parent / "holdout.sqlite"
+    assert _evaluate_entries(ledger_path) == 1
+
+    with DiscoveryArchive(context.archive_path) as archive:
+        champion = archive.champion(SCOPE)
+        assert champion is not None
+        record = archive.evidence_record(champion.evidence_checksum)
+        assert record is not None
+        assert record.dataset_id == manifest_id
+        trial = archive.accepted_trial(context.candidate_id, manifest_id, code_version=CODE)
+        assert trial is not None
+        # The stored spelling is preserved for display and audit.
+        assert trial.dataset_id == prefixed_id
+
+
+def test_prefixed_trial_with_a_wrong_digest_still_refuses(tmp_path: Path) -> None:
+    context = build_context(tmp_path)
+    manifest_id = context.bundle.manifest.dataset_id
+    seed_archive(
+        context,
+        dataset_id=f"validation:{manifest_id}",
+        settings_digest="0" * 64,
+    )
+
+    result = promote_evidence(
+        request(context, spend_holdout=True, approval_token="owner-prefix-token")
+    )
+
+    assert result.status == "refused", result.to_dict()
+    assert result.codes == ("stale_trial_evidence",)
+    assert not (context.archive_path.parent / "holdout.sqlite").exists()
+    with DiscoveryArchive(context.archive_path) as archive:
+        assert archive.champion(SCOPE) is None
+
+
+@pytest.mark.parametrize("prefix", ["test:", "holdout:"])
+def test_test_and_holdout_prefixes_are_not_validation_evidence(tmp_path: Path, prefix: str) -> None:
+    context = build_context(tmp_path)
+    seed_archive(context, dataset_id=f"{prefix}{context.bundle.manifest.dataset_id}")
+
+    result = promote_evidence(
+        request(context, spend_holdout=True, approval_token="owner-prefix-token")
+    )
+
+    assert result.status == "refused", result.to_dict()
+    assert result.codes == ("no_accepted_trial",)
+    assert not (context.archive_path.parent / "holdout.sqlite").exists()
+
+
+def test_prefix_stripping_cannot_match_a_different_digest(tmp_path: Path) -> None:
+    context = build_context(tmp_path)
+    wrong_digest_id = f"validation:{SYMBOL}:{TIMEFRAME}:h1:000000000000"
+    seed_archive(context, dataset_id=wrong_digest_id)
+
+    result = promote_evidence(
+        request(context, spend_holdout=True, approval_token="owner-prefix-token")
+    )
+
+    assert result.status == "refused", result.to_dict()
+    assert result.codes == ("no_accepted_trial",)
+    assert not (context.archive_path.parent / "holdout.sqlite").exists()
 
 
 def test_holdout_is_spent_once_and_reuse_is_refused(tmp_path: Path) -> None:
