@@ -83,8 +83,7 @@ holdout spend, champion, paper run.
 - [x] Provenance sidecar with source, synthetic flag, coverage and checksum.
 - [x] API `/api/symbols`, `/api/data/validate`, provenance in data status.
 - [x] `data derive` CLI for higher timeframes.
-- [ ] PARTIAL: separate raw/cleaned/feature/training/validation/test layers.
-      The store + `_meta` + dataset manifests exist; a raw/clean split does not.
+- [x] Separate raw/cleaned/feature/training/validation/test layers (`build_layers`).
 - [ ] Real providers for EURUSD, GBPUSD, USDJPY, AUDUSD, NAS100, US30, USOIL,
       BTCUSD. **BLOCKED on free sources/licences** (issue #15).
 - [x] Statistical outlier detection and cross-source reconciliation.

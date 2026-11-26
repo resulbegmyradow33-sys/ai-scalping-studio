@@ -277,6 +277,28 @@ are **not implemented**. The matrix has candle anatomy (`body_atr`,
 state; neither counts consecutive candles. Adding such a column needs a stated,
 falsifiable research question rather than a rename.
 
+## Explicit layers
+
+`scalping.datasets.layers.build_layers(store_root, out_root, symbol, timeframe)`
+materialises the documented layers:
+
+```text
+raw/<symbol>/<tf>.parquet        exact stored bars
+cleaned/<symbol>/<tf>.parquet    validated bars, never repaired
+features/<symbol>/<tf>.parquet   causal features + y_direction/y_return/split
+training|validation|test/...     split views (purged rows excluded)
+layers.json                      files, row counts, checksums, dataset_id
+```
+
+- Structural validation runs **before** any file is written; a broken slice
+  raises and leaves no `cleaned`/manifest behind.
+- Raw and cleaned are identical for a clean slice; the manifest records the
+  checksums so "validated" is never confused with "modified".
+- The feature layer starts at `valid_from` and ends one horizon before the tail,
+  matching the dataset bundle; warm-up rows are not relabelled as data.
+- Writes are atomic; split files keep their `split` column so a consumer can
+  assert it never mixes splits.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.
