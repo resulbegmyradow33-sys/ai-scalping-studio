@@ -960,6 +960,17 @@ def _backtest_inputs(args: argparse.Namespace) -> tuple[Settings, FeatureFrame]:
     )
 
 
+def _rejections(args: argparse.Namespace):
+    """Build a rejection config from the CLI flags, or None when disabled."""
+    from scalping.env.rejections import RejectionConfig
+
+    gap = float(getattr(args, "max_gap_atr", 0.0) or 0.0)
+    zero = bool(getattr(args, "reject_zero_volume", False))
+    if gap <= 0.0 and not zero:
+        return None
+    return RejectionConfig(max_gap_atr=gap, reject_zero_volume=zero)
+
+
 def _cmd_backtest(args: argparse.Namespace) -> None:
     """Run a stored symbol through the simulator and write a JSON report."""
     if args.out is None:
@@ -974,6 +985,7 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         symbol=args.symbol,
         mask_actions=args.mask_actions,
         execution_delay=args.execution_delay,
+        rejections=_rejections(args),
     )
 
     out = Path(args.out)
@@ -1016,6 +1028,7 @@ def _cmd_backtest_montecarlo(args: argparse.Namespace) -> None:
         symbol=args.symbol,
         mask_actions=getattr(args, "mask_actions", False),
         execution_delay=getattr(args, "execution_delay", 0),
+        rejections=_rejections(args),
     )
     levels = _floats(args.confidence, flag="--confidence")
     try:
@@ -1659,6 +1672,17 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=(0, 1),
         default=0,
         help="1 queues BUY/SELL for the next bar's close (entry latency)",
+    )
+    backtest.add_argument(
+        "--max-gap-atr",
+        type=float,
+        default=0.0,
+        help="reject a delayed entry when the fill bar gaps more than N decision ATRs",
+    )
+    backtest.add_argument(
+        "--reject-zero-volume",
+        action="store_true",
+        help="reject entries on zero-volume bars",
     )
     backtest.set_defaults(handler=_cmd_backtest)
 

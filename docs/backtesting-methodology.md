@@ -56,6 +56,29 @@ it does not prove: that the policy is profitable, out-of-sample-valid or
 promotable. Those require the walk-forward, cost-stress and holdout evidence
 described below.
 
+## Execution delay and rejected orders
+
+The simulator fills a decision at the decision bar by default. Two deterministic
+execution assumptions can be enabled, both off by default:
+
+- **Entry latency** (`execution_delay=1`): BUY/SELL fills at the **next bar's
+  close**; gates are re-checked at the fill bar and the signal/arm is frozen at
+  the decision bar. CLOSE, SL/TP, timeout and kill exits stay immediate.
+- **Rejected orders** (`RejectionConfig`):
+  - `max_gap_atr` rejects a delayed entry when the fill close moved more than
+    `N × decision-bar ATR` (`info["blocked"] == "rejected_price_gap"`);
+  - `reject_zero_volume` rejects entries on zero-volume bars
+    (`"rejected_no_liquidity"`).
+
+Both are part of the run id when enabled. A rejection is **not** a partial fill:
+the project has no L2/queue data, so partial fills remain blocked rather than
+simulated from bar volume.
+
+```bash
+uv run python -m scalping.cli backtest --policy rule --execution-delay 1 \
+  --max-gap-atr 0.5 --reject-zero-volume --root ../data --out ../runs/bt.json
+```
+
 ## Monte Carlo trade-sequence analysis
 
 `scalping.backtest.montecarlo` answers one question: given the trades we

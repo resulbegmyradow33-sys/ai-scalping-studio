@@ -38,6 +38,7 @@ from scalping.backtest.metrics import Metrics, compute
 from scalping.config import Settings
 from scalping.data.registry import session_for
 from scalping.env.masks import masked_action
+from scalping.env.rejections import RejectionConfig
 from scalping.env.simulator import WINDOW, ArmSelector, Simulator
 from scalping.features.build import FeatureFrame
 from scalping.types import Trade
@@ -82,6 +83,7 @@ def run_id(
     session: str = "",
     mask_actions: bool = False,
     execution_delay: int = 0,
+    rejections: RejectionConfig | None = None,
 ) -> str:
     """First 12 hex chars of the run's sha256; identical inputs give identical ids.
 
@@ -100,6 +102,8 @@ def run_id(
     }
     if execution_delay:
         payload["execution_delay"] = int(execution_delay)
+    if rejections is not None:
+        payload["rejections"] = rejections.to_dict()
     return hashlib.sha256(_canonical(payload)).hexdigest()[:12]
 
 
@@ -155,6 +159,7 @@ def run_backtest(
     symbol: str | None = None,
     mask_actions: bool = False,
     execution_delay: int = 0,
+    rejections: RejectionConfig | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
 
@@ -174,6 +179,8 @@ def run_backtest(
     flag is part of the run id. ``execution_delay=1`` queues BUY/SELL decisions
     for the next bar's close (entry latency only); CLOSE stays immediate and
     protective exits are never delayed. A non-zero delay is part of the run id.
+    ``rejections`` adds deterministic broker rejects at the fill bar (price gap
+    after a delay, zero traded volume); it is part of the run id when set.
     """
     if not callable(policy):
         raise TypeError(f"policy must be callable, got {type(policy).__name__}")
@@ -194,6 +201,7 @@ def run_backtest(
         flow_obs=flow_obs,
         session=session,
         execution_delay=execution_delay,
+        rejections=rejections,
     )
     obs = sim.reset(_SEED)
 
@@ -222,6 +230,7 @@ def run_backtest(
         session=session_label,
         mask_actions=mask_actions,
         execution_delay=execution_delay,
+        rejections=rejections,
     )
     return BacktestResult(
         run_id=run_id(
@@ -232,6 +241,7 @@ def run_backtest(
             session=session_label,
             mask_actions=mask_actions,
             execution_delay=execution_delay,
+            rejections=rejections,
         ),
         metrics=compute(
             trades,

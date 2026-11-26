@@ -80,6 +80,7 @@ import polars as pl
 from scalping.config import Settings
 from scalping.data.registry import SessionSpec
 from scalping.env.broker import PaperBroker
+from scalping.env.rejections import RejectionConfig
 from scalping.env.risk import RiskEngine
 from scalping.features.build import FeatureFrame
 from scalping.strategy.signals import ALL_STRATEGIES
@@ -209,6 +210,8 @@ class _PendingEntry(NamedTuple):
     decision_bar: int
     strategy: str
     arm: int
+    decision_close: float
+    decision_atr: float
 
 
 class Simulator:
@@ -268,6 +271,7 @@ class Simulator:
         flow_obs: bool = False,
         session: SessionSpec | None = None,
         execution_delay: int = 0,
+        rejections: RejectionConfig | None = None,
     ) -> None:
         if isinstance(execution_delay, bool) or not isinstance(execution_delay, int):
             raise TypeError(f"execution_delay must be an int, got {type(execution_delay).__name__}")
@@ -275,6 +279,7 @@ class Simulator:
             raise ValueError(f"execution_delay must be 0 or 1, got {execution_delay!r}")
         self.features = features
         self.execution_delay = execution_delay
+        self.rejections = rejections
         self._pending_entry: _PendingEntry | None = None
         self.session_spec = session
         self.settings = settings
@@ -531,6 +536,8 @@ class Simulator:
         bar = self._bar(self._i)
         if self.session_spec is not None and not self.session_spec.is_open(bar.ts):
             return "session_closed"
+        if self.rejections is not None and self.rejections.reject_zero_volume and bar.volume <= 0:
+            return "rejected_no_liquidity"
         account = self._projected_account(bar)
         allowed, reason = self.risk.allow_new_extended(account, bar.ts)
         if not allowed:
@@ -619,6 +626,8 @@ class Simulator:
         decision_bar = self._i
         decision_strategy = self.strategy
         decision_arm = self._arm
+        decision_close = float(self.features.ohlc[self._i, 3])
+        decision_atr = self._atr(self._i)
 
         bar = self._bar(self._i)
         self.broker.atr = self._atr(self._i)
@@ -730,6 +739,8 @@ class Simulator:
                     decision_bar=decision_bar,
                     strategy=decision_strategy,
                     arm=decision_arm,
+                    decision_close=decision_close,
+                    decision_atr=decision_atr,
                 )
             elif self._pending_entry is not None and not self._done:
                 pass  # a pending entry queued earlier stays; it was not filled
@@ -824,6 +835,16 @@ class Simulator:
         self._pending_entry = None
         if pending is None:
             return None, None, None
+        if self.rejections is not None:
+            if self.rejections.reject_zero_volume and bar.volume <= 0:
+                return None, None, "rejected_no_liquidity"
+            if (
+                self.rejections.max_gap_atr > 0.0
+                and pending.decision_atr > 0.0
+                and abs(bar.close - pending.decision_close)
+                > self.rejections.max_gap_atr * pending.decision_atr
+            ):
+                return None, None, "rejected_price_gap"
         return self._apply(
             pending.action,
             bar,
