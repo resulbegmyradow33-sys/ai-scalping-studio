@@ -122,6 +122,7 @@ def stored_bundle(
     settings: Settings | None = None,
     source: str | None = None,
     synthetic: bool | None = None,
+    provenance_verified: bool | None = None,
 ) -> SimpleNamespace:
     """Write one complete, reproducible experiment under ``tmp_path``."""
     store_root = tmp_path / "data"
@@ -145,7 +146,11 @@ def stored_bundle(
     evidence = build_evidence(
         bundle,
         long_spec(),
-        config(source=source, synthetic=synthetic),
+        config(
+            source=source,
+            synthetic=synthetic,
+            provenance_verified=provenance_verified,
+        ),
         features=features,
         settings=settings,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
@@ -215,6 +220,94 @@ def test_unknown_provenance_round_trips_as_unknown(tmp_path: Path) -> None:
 
     assert isinstance(result, CandidateEvidence)
     assert (result.source, result.synthetic) == (None, None)
+
+
+def test_verified_provenance_flag_round_trips(tmp_path: Path) -> None:
+    stored = stored_bundle(
+        tmp_path,
+        source="test:real",
+        synthetic=False,
+        provenance_verified=True,
+    )
+    assert stored.evidence.provenance_verified is True
+
+    result = reproduce(stored, spec=long_spec())
+
+    assert isinstance(result, CandidateEvidence)
+    assert result.provenance_verified is True
+    assert (result.source, result.synthetic) == ("test:real", False)
+    assert result.checksum == stored.evidence.checksum
+
+
+def test_unverified_provenance_flag_round_trips(tmp_path: Path) -> None:
+    stored = stored_bundle(
+        tmp_path,
+        source="test:real",
+        synthetic=False,
+        provenance_verified=False,
+    )
+
+    result = reproduce(stored, spec=long_spec())
+
+    assert isinstance(result, CandidateEvidence)
+    assert result.provenance_verified is False
+    assert result.checksum == stored.evidence.checksum
+
+
+def test_an_absent_provenance_flag_stays_none(tmp_path: Path) -> None:
+    stored = stored_bundle(tmp_path)
+    payload = json.loads(stored.path.read_text(encoding="utf-8"))
+    assert "provenance_verified" not in payload
+
+    result = reproduce(stored, spec=long_spec())
+
+    assert isinstance(result, CandidateEvidence)
+    assert result.provenance_verified is None
+    assert result.checksum == stored.evidence.checksum
+
+
+def test_a_tampered_provenance_flag_breaks_the_checksum(tmp_path: Path) -> None:
+    stored = stored_bundle(
+        tmp_path,
+        source="test:real",
+        synthetic=False,
+        provenance_verified=True,
+    )
+    payload = json.loads(stored.path.read_text(encoding="utf-8"))
+    payload["provenance_verified"] = False
+    stored.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(EvidenceError) as exc:
+        reproduce(stored, spec=long_spec())
+
+    assert exc.value.code == "checksum_mismatch"
+
+
+def test_a_verified_flag_with_unknown_provenance_is_refused(tmp_path: Path) -> None:
+    """The dataclass rule is a typed payload error, not a traceback."""
+    stored = stored_bundle(tmp_path)
+    payload = json.loads(stored.path.read_text(encoding="utf-8"))
+    payload["provenance_verified"] = True
+    stored.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(EvidenceError) as exc:
+        reproduce(stored, spec=long_spec())
+
+    assert exc.value.code == "invalid_payload"
+    assert "provenance_verified" in str(exc.value)
+
+
+def test_a_non_boolean_provenance_flag_is_refused(tmp_path: Path) -> None:
+    stored = stored_bundle(tmp_path)
+    payload = json.loads(stored.path.read_text(encoding="utf-8"))
+    payload["provenance_verified"] = "yes"
+    stored.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(EvidenceError) as exc:
+        reproduce(stored, spec=long_spec())
+
+    assert exc.value.code == "invalid_payload"
+    assert "provenance_verified" in str(exc.value)
 
 
 def test_a_manifest_whose_provenance_contradicts_the_bundle_is_refused(

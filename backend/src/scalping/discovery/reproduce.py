@@ -542,7 +542,10 @@ def evidence_from_dict(payload: object) -> CandidateEvidence:
                 data.get("provenance_verified"), "provenance_verified"
             )
         }
-        evidence = replace(evidence, **provenance)
+        try:
+            evidence = replace(evidence, **provenance)
+        except (TypeError, ValueError) as exc:
+            raise EvidenceError("invalid_payload", f"provenance_verified: {exc}") from exc
     return evidence
 
 

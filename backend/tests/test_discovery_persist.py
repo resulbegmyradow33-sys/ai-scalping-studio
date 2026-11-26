@@ -31,7 +31,6 @@ from scalping.data.store import ParquetStore
 from scalping.datasets.artifact import ARTIFACT_FILE, save_dataset_arrays
 from scalping.datasets.builder import build_dataset
 from scalping.discovery import persist as persist_module
-from scalping.discovery import reproduce as reproduce_module
 from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidenceConfig,
@@ -459,10 +458,6 @@ def test_evidence_rejects_a_stale_sidecar_and_records_a_warning(tmp_path: Path) 
     assert "checksum" in result.warnings[0]
 
 
-@pytest.mark.skipif(
-    "provenance_verified" not in reproduce_module._EVIDENCE_KEYS,
-    reason="reproduce.py round-trip is owned by the F2 change; enable with the field",
-)
 def test_reproduce_keeps_verified_provenance(tmp_path: Path) -> None:
     context = stored_context(tmp_path)
     save_provenance(
@@ -491,6 +486,86 @@ def test_reproduce_keeps_verified_provenance(tmp_path: Path) -> None:
     assert rebuilt.source == persisted.evidence.source == "csv:round-trip"
     assert rebuilt.synthetic is persisted.evidence.synthetic is False
     assert rebuilt.provenance_verified is True
+    assert rebuilt.checksum == persisted.checksum
+
+
+def test_verified_provenance_bundle_loads_and_reproduces(tmp_path: Path) -> None:
+    """A real persisted bundle survives both the strict loader and a rebuild."""
+    context = stored_context(tmp_path)
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="csv:load-reproduce",
+            synthetic=False,
+        ),
+    )
+    out = tmp_path / "candidate.evidence.json"
+    persisted = persist_evidence_run(
+        context["store_root"],
+        out,
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    loaded = load_evidence_bundle(out)
+    assert loaded.provenance_verified is True
+    assert loaded.checksum == persisted.checksum
+
+    rebuilt = reproduce_bundle(out, store_root=context["store_root"])
+
+    assert isinstance(rebuilt, CandidateEvidence)
+    assert rebuilt.provenance_verified is True
+    assert (rebuilt.source, rebuilt.synthetic) == ("csv:load-reproduce", False)
+    assert rebuilt.checksum == persisted.checksum
+
+
+def test_stale_sidecar_bundle_loads_and_reproduces_as_unknown(tmp_path: Path) -> None:
+    """A discarded sidecar stays unknown through load and reproduction."""
+    context = stored_context(tmp_path)
+    store = ParquetStore(context["store_root"])
+    save_provenance(
+        context["store_root"],
+        build_provenance(
+            context["frame"],
+            symbol=SYMBOL,
+            timeframe=TIMEFRAME,
+            source="csv:stale-reproduce",
+            synthetic=False,
+        ),
+    )
+    changed = context["frame"].clone()
+    closes = changed["close"].to_list()
+    closes[10] = closes[10] + 1.0
+    changed = changed.with_columns(pl.Series("close", closes))
+    store.write(SYMBOL, TIMEFRAME, changed)
+    out = tmp_path / "candidate.evidence.json"
+    persisted = persist_evidence_run(
+        context["store_root"],
+        out,
+        spec=long_spec(),
+        config=config(),
+        settings=context["settings"],
+        use_cache=False,
+    )
+
+    assert persisted.provenance_verified is False
+    assert persisted.warnings and "checksum" in persisted.warnings[0]
+
+    loaded = load_evidence_bundle(out)
+    assert (loaded.source, loaded.synthetic) == (None, None)
+    assert loaded.provenance_verified is False
+    assert loaded.checksum == persisted.checksum
+
+    rebuilt = reproduce_bundle(out, store_root=context["store_root"])
+
+    assert isinstance(rebuilt, CandidateEvidence)
+    assert (rebuilt.source, rebuilt.synthetic) == (None, None)
+    assert rebuilt.provenance_verified is False
     assert rebuilt.checksum == persisted.checksum
 
 

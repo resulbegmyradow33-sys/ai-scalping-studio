@@ -814,6 +814,22 @@ def _latest_accepted(
     return None
 
 
+def _canonical_archived_dataset_id(value: object) -> str | None:
+    """Canonical id of a stored trial row, or ``None`` when the row is malformed.
+
+    Archive rows predate this helper and a raw connection can write anything, so
+    a blank or prefix-only ``dataset_id`` is a recorded defect, not a reason to
+    crash a promotion precheck or an exposure read. Such a row never matches a
+    requested dataset; the caller's own id is validated separately.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        return canonical_dataset_id(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _accepted_trial_row(
     conn: sqlite3.Connection,
     candidate_id: str,
@@ -825,7 +841,8 @@ def _accepted_trial_row(
     Trial ids and evidence ids may spell the same build differently
     (``validation:<id>`` vs ``<id>``); :func:`canonical_dataset_id` decides
     equality. The stored row is returned untouched so callers can compare the
-    recorded checksum and settings digest exactly.
+    recorded checksum and settings digest exactly. A malformed stored id is
+    skipped rather than crashing the lookup.
     """
     wanted = canonical_dataset_id(dataset_id)
     rows = conn.execute(
@@ -837,7 +854,7 @@ def _accepted_trial_row(
         (candidate_id, code_version),
     ).fetchall()
     for row in rows:
-        if canonical_dataset_id(str(row["dataset_id"])) == wanted:
+        if _canonical_archived_dataset_id(row["dataset_id"]) == wanted:
             return row
     return None
 
@@ -848,7 +865,7 @@ def _trial_row_exists(conn: sqlite3.Connection, candidate_id: str, dataset_id: s
     rows = conn.execute(
         "SELECT dataset_id FROM trials WHERE candidate_id = ?", (candidate_id,)
     ).fetchall()
-    return any(canonical_dataset_id(str(row["dataset_id"])) == wanted for row in rows)
+    return any(_canonical_archived_dataset_id(row["dataset_id"]) == wanted for row in rows)
 
 
 def _metric_value(
@@ -1418,7 +1435,9 @@ class DiscoveryArchive:
         query += " ORDER BY id"
         rows = self._connection().execute(query, parameters).fetchall()
         if wanted is not None:
-            rows = [row for row in rows if canonical_dataset_id(str(row["dataset_id"])) == wanted]
+            rows = [
+                row for row in rows if _canonical_archived_dataset_id(row["dataset_id"]) == wanted
+            ]
 
         total_attempts = len(rows)
         accepted = sum(1 for row in rows if int(row[3]) == 1)
@@ -1468,7 +1487,7 @@ class DiscoveryArchive:
             )
             .fetchall()
         )
-        return any(canonical_dataset_id(str(row["dataset_id"])) == wanted for row in rows)
+        return any(_canonical_archived_dataset_id(row["dataset_id"]) == wanted for row in rows)
 
     def accepted_trial(
         self, candidate_id: str, dataset_id: str, *, code_version: str

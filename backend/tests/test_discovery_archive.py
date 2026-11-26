@@ -209,6 +209,40 @@ def test_trial_lookup_matches_the_manifest_spelling(tmp_path: Path) -> None:
         assert archive.accepted_trial(record.candidate_id, plain, code_version="other-code") is None
 
 
+@pytest.mark.parametrize("stored_id", ["", "   ", "validation:"])
+def test_malformed_archived_dataset_ids_are_ignored(tmp_path: Path, stored_id: str) -> None:
+    """A blank legacy row is a skipped defect, not a ValueError in a lookup."""
+    plain = "XAUUSD:M5:abcd1234"
+    with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
+        record = _add(archive, _root())
+        archive.connection.execute(
+            """
+            INSERT INTO trials (
+                candidate_id, dataset_id, code_version, seed,
+                metrics_json, accepted, rejections_json, created_at
+            ) VALUES (?, ?, ?, 0, '{}', 1, '[]', '2026-11-26T00:00:00+00:00')
+            """,
+            (record.candidate_id, stored_id, CODE_VERSION),
+        )
+
+        assert not archive.has_trial(record.candidate_id, plain)
+        stats = archive.trial_stats(record.candidate_id, dataset_id=plain)
+        assert stats.total_attempts == 0
+        assert archive.accepted_trial(record.candidate_id, plain, code_version=CODE_VERSION) is None
+
+        # A well-formed row after the defect is still found.
+        archive.record_trial(
+            record.candidate_id,
+            _trial(1.0),
+            dataset_id=plain,
+            code_version=CODE_VERSION,
+            seed=2,
+        )
+        assert archive.has_trial(record.candidate_id, plain)
+        accepted = archive.accepted_trial(record.candidate_id, plain, code_version=CODE_VERSION)
+        assert accepted is not None and accepted.dataset_id == plain
+
+
 def test_best_honours_minimum_trials_and_acceptance(tmp_path: Path) -> None:
     with DiscoveryArchive(tmp_path / "discovery.sqlite") as archive:
         once = _add(archive, ToyCandidate((1,)))
