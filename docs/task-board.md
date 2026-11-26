@@ -89,7 +89,7 @@ holdout spend, champion, paper run.
       BTCUSD. **BLOCKED on free sources/licences** (issue #15).
 - [x] Statistical outlier detection and cross-source reconciliation.
 - [ ] Tick table layer for querying ticks without pre-aggregation.
-- [ ] Data-quality report in the dashboard.
+- [x] Data-quality report in the dashboard (`DataQualityPanel` on `GET /api/data/quality`).
 - [x] Per-symbol sessions enforced in the simulator.
 - [x] Chunked CSV parse; frame still materialised (a 4 GB file still needs ~6 GB).
 
@@ -265,7 +265,7 @@ holdout spend, champion, paper run.
 - [ ] Ablation runner.
 - [ ] Regime-specific reports.
 - [ ] Execution delay and rejected-order assumptions.
-- [ ] Partial fills only where data supports them.
+- [ ] BLOCKED: no L2/queue depth data; bar volume is not a depth model, so partial fills are not simulated.
 - [x] `docs/risk-management.md`, `docs/backtesting-methodology.md`.
 - [x] Tests: kill switch, embargo, Monte Carlo determinism.
 
