@@ -231,3 +231,18 @@ without the real store, and it produces comparable local numbers when given the
 same machine and inputs. Acceptance still requires the P6 end-to-end run on real
 XAUUSD data, measured on the target Mac mini, with code/test/training/
 validation/paper evidence reported separately.
+
+
+### Classical ML benchmark
+
+```bash
+uv run python -m scripts.benchmark_ml \
+  --models logistic,random_forest,extra_trees,hist_gradient,lightgbm,xgboost \
+  --rows 4000 --features 20 --out ../runs/bench-ml.json
+```
+
+Rows report `fit_seconds`, `predict_ms`, holdout `accuracy`, shape and an
+`ok`/`error` state; an optional LightGBM/XGBoost failure (for example missing
+`libomp`) is recorded instead of vanishing. Numbers are local to this machine
+and seed. The NN side is covered by `scripts.benchmark_nn`; a single combined
+table including PPO is still open.
