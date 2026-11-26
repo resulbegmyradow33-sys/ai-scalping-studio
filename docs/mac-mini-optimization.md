@@ -231,3 +231,18 @@ without the real store, and it produces comparable local numbers when given the
 same machine and inputs. Acceptance still requires the P6 end-to-end run on real
 XAUUSD data, measured on the target Mac mini, with code/test/training/
 validation/paper evidence reported separately.
+
+
+### PPO benchmark
+
+```bash
+uv run python -m scripts.benchmark_ppo \
+  --timesteps 256 --n-steps 64 --predictions 50 --device cpu \
+  --out ../runs/bench-ppo.json
+```
+
+The row reports `train_seconds`, `steps_per_second`, median `predict_ms` and the
+device. It is a short training run on synthetic bars, not a policy-quality
+claim; use the same shape/seed for comparisons. `--device mps` fails when MPS
+is unavailable instead of silently benchmarking CPU.
+

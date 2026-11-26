@@ -307,7 +307,7 @@ holdout spend, champion, paper run.
 - [ ] MPS benchmark and fallback policy.
 - [ ] Torch thread pinning and memory profiling.
 - [ ] Chunked dataset loading.
-- [ ] Benchmark table: LightGBM, GRU, TCN, small Transformer, PPO.
+- [ ] PARTIAL: NN (`benchmark_nn`), classical ML (`benchmark_ml`) and PPO (`benchmark_ppo`) scripts exist; one unified table with all rows is open.
 - [ ] Cancellation/resume under memory pressure.
 - [x] `docs/mac-mini-optimization.md` exists; its measurements are partial
       (`docs/evidence/bench-2026-11-24.json`, `m2_acceptance=false`).
