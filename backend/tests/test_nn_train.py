@@ -227,3 +227,53 @@ def test_early_stopping_stops_when_validation_stalls(tmp_path, monkeypatch) -> N
 )
 def test_explicit_mps_is_selected_when_available() -> None:
     assert select_device("mps").type == "mps"
+
+
+def test_thread_count_is_pinned(tmp_path, monkeypatch) -> None:
+    calls: list[int] = []
+    monkeypatch.setattr(torch, "set_num_threads", lambda value: calls.append(int(value)))
+    config = TrainConfig(
+        model="mlp",
+        epochs=1,
+        batch_size=32,
+        learning_rate=5e-3,
+        hidden=16,
+        dropout=0.0,
+        device="cpu",
+        seed=1,
+        torch_threads=2,
+    )
+
+    train_classifier(dataset(), config, checkpoint=tmp_path / "threads.pt")
+
+    assert calls == [2]
+
+
+def test_memory_limit_stops_before_the_first_epoch(tmp_path) -> None:
+    config = TrainConfig(
+        model="mlp",
+        epochs=5,
+        batch_size=32,
+        learning_rate=5e-3,
+        hidden=16,
+        dropout=0.0,
+        device="cpu",
+        seed=1,
+        max_rss_mb=1,
+    )
+
+    result = train_classifier(dataset(), config, checkpoint=tmp_path / "memory.pt")
+
+    assert result.stopped == "memory_limit"
+    assert result.epochs_run == 0
+    assert result.history == ()
+    assert result.checkpoint.exists()
+
+
+def test_resource_config_is_validated() -> None:
+    with pytest.raises(TrainError, match="torch_threads"):
+        config(torch_threads=0)
+    with pytest.raises(TrainError, match="torch_threads"):
+        config(torch_threads=True)
+    with pytest.raises(TrainError, match="max_rss_mb"):
+        config(max_rss_mb=0)

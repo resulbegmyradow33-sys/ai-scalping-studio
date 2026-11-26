@@ -370,6 +370,8 @@ def _cmd_nn_train(args: argparse.Namespace) -> None:
         device=args.device,
         seed=args.seed,
         checkpoint_every=args.checkpoint_every,
+        torch_threads=args.torch_threads,
+        max_rss_mb=args.max_rss_mb,
     )
     result = train_classifier(data, config, checkpoint=checkpoint)
     payload = {
@@ -1720,6 +1722,13 @@ def _build_parser() -> argparse.ArgumentParser:
     nn_train.add_argument("--learning-rate", type=float, default=1e-3)
     nn_train.add_argument("--patience", type=int, default=5)
     nn_train.add_argument("--checkpoint-every", type=int, default=1)
+    nn_train.add_argument("--torch-threads", type=int, default=1)
+    nn_train.add_argument(
+        "--max-rss-mb",
+        type=int,
+        default=None,
+        help="stop before an epoch when process RSS exceeds this",
+    )
     nn_train.add_argument("--device", choices=("auto", "cpu", "mps"), default="auto")
     nn_train.add_argument("--seed", type=int, default=0)
     nn_train.add_argument("--train-fraction", type=float, default=0.70)

@@ -144,6 +144,8 @@ fits one model and writes a resumable checkpoint.
 | `device` | `auto` | MPS when available, else CPU |
 | `checkpoint_every` | 1 | epochs between atomic saves |
 | `max_minutes` | unset | optional wall-clock budget |
+| `torch_threads` | 1 | pinned before training |
+| `max_rss_mb` | unset | stop before an epoch above this process RSS |
 
 Resource and safety rules:
 
