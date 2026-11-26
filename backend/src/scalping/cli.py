@@ -1337,7 +1337,10 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         HandlerContext,
         register_default_handlers,
     )
-    from scalping.orchestrator.paper_scheduler import PaperAdvanceScheduler
+    from scalping.orchestrator.paper_scheduler import (
+        DEFAULT_GAP_POLICY,
+        PaperAdvanceScheduler,
+    )
     from scalping.orchestrator.paper_triggers import (
         KIND_PAPER_OUTCOMES,
         PaperOutcomeTriggerSource,
@@ -1357,8 +1360,13 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
             "--watch-kind dataset.build cannot infer symbol/timeframe from a bare file;"
             " use --watch-data-dir"
         )
-    if args.allow_synthetic and not paper_ledgers:
-        raise CliError("--allow-synthetic requires at least one --watch-paper-ledger")
+    if args.allow_synthetic and not (paper_ledgers or args.schedule_paper):
+        raise CliError(
+            "--allow-synthetic requires --schedule-paper or at least one --watch-paper-ledger"
+        )
+    paper_gap_policy = args.paper_gap_policy or DEFAULT_GAP_POLICY
+    if args.paper_gap_policy is not None and not args.schedule_paper:
+        raise CliError("--paper-gap-policy requires --schedule-paper")
     research_kinds = tuple(
         sorted(
             {
@@ -1413,6 +1421,8 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
                     data_root=context.data_root,
                     archive_path=context.discovery_archive_path,
                     ledger_path=context.paper_ledger_path,
+                    gap_policy=paper_gap_policy,
+                    allow_synthetic=args.allow_synthetic,
                 )
             )
         # One source per explicit ledger path, in the order given. There is no
@@ -2118,6 +2128,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     run.add_argument(
+        "--paper-gap-policy",
+        choices=("strict", "session_aware", "skip_with_report"),
+        default=None,
+        help=(
+            "gap policy the --schedule-paper jobs request (default strict);"
+            " session_aware skips and records a missing instant inside the open"
+            " session, skip_with_report skips every gap"
+        ),
+    )
+    run.add_argument(
         "--watch-paper-ledger",
         action="append",
         default=None,
@@ -2131,8 +2151,8 @@ def _build_parser() -> argparse.ArgumentParser:
         "--allow-synthetic",
         action="store_true",
         help=(
-            "let --watch-paper-ledger treat batches recorded as synthetic as"
-            " proposals; default refuses them as market evidence"
+            "let --watch-paper-ledger proposals and --schedule-paper advance jobs"
+            " use data recorded as synthetic; default refuses it as market evidence"
         ),
     )
     run.add_argument(
