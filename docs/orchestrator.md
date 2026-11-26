@@ -193,6 +193,10 @@ uv run scalping.cli orchestrator run --forever --watch-paper-ledger runs/paper.s
 # stored bar; the scheduler reads bars and the ledger, never a live feed
 uv run scalping.cli orchestrator run --forever --schedule-paper
 
+# real H1 feed with known missing bars: opt in explicitly and audit every gap
+uv run scalping.cli orchestrator run --forever --schedule-paper \
+  --paper-gap-policy session_aware
+
 # repeat the flag for several ledgers; a batch recorded as synthetic stays
 # refused unless --allow-synthetic is given explicitly
 uv run scalping.cli orchestrator run --forever \
@@ -214,8 +218,9 @@ only when `--watch-paper-ledger` names it.
 | `--watch-dir DIR` | no | none | Bind one `FileTriggerSource`; each new/changed file enqueues `--watch-kind` | `--watch-data-dir`, `--no-scan` |
 | `--watch-data-dir DIR` | no | none | Bind one `DataFileTriggerSource`; new files enqueue `dataset.build` for the layout's `<symbol>/<timeframe>` | `--watch-dir`, `--no-scan` |
 | `--schedule-paper` | no | off | Bind one `PaperAdvanceScheduler`; each evidence champion with a new decidable stored bar enqueues `paper.advance` | `--no-scan` |
+| `--paper-gap-policy POLICY` | no | `strict` | Gap policy every scheduled `paper.advance` requests: `strict`, `session_aware` or `skip_with_report` | requires `--schedule-paper` for non-default values |
 | `--watch-paper-ledger PATH` | yes | none | Bind one `PaperOutcomeTriggerSource` per path and register the proposal-only `paper.outcomes` handler | `--no-scan` |
-| `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
+| `--allow-synthetic` | no | off | Forward the explicit opt-in to the ledger source, the outcome handler and the paper scheduler; without it a `synthetic: true` batch or store is refused | requires `--schedule-paper` or at least one `--watch-paper-ledger` |
 | `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper` |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
@@ -702,7 +707,7 @@ register_default_handlers(orchestrator, context)
 | `knowledge.ingest` | document → index → drafts | `document_path` (required), `market_scope`, `timeframe_scope`, `max_hypotheses` | `doc_id`, `checksum`, `status`, `sections`, `drafts`, `skipped`, `scanned_sentences`, `duplicate`, `stored_path`, `index` |
 | `dataset.build` | stored bars → cached features → manifest | `symbol`, `timeframe` (required), `horizon`, `train_fraction`, `validation_fraction`, `purge_bars`, `embargo_bars`, `notes` | Manifest document plus `bars_rows`, `purged_rows`, `manifest_path` |
 | `discovery.run` | bounded search → recorded decision | `symbol`, `timeframe`, `max_trials`, `seed`, `gate` (all required), `stress`, `population`, `generations`, `patience`, `horizon` | `decision`, `reason`, `promoted: false`, `trials`, `accepted`, `best_candidate_id`, `dataset_id`, `decision_id`, `stop_reason`, `seed`, `code_version`, `archive` |
-| `paper.advance` | champion → continuous DSL paper advance | `symbol`, `timeframe`, `bars` (required) | `action: "advanced"` or `"no_trade"`, `mode: "continuous"`, `spec_hash`, `session_id`, `bars_advanced`, `bars_processed`, `last_bar_ts`, trade counts, ledger path |
+| `paper.advance` | champion → continuous DSL paper advance | `symbol`, `timeframe`, `bars` (required), `gap_policy` (optional, default `strict`) | `action: "advanced"` or `"no_trade"`, `mode: "continuous"`, `spec_hash`, `session_id`, `gap_policy`, `gaps_skipped`, `missing_bars`, `gaps_recorded`, `bars_advanced`, `bars_processed`, `last_bar_ts`, trade counts, ledger path |
 | `paper.analyse` | ledger → closed-trade summary | `symbol`, `timeframe`, `max_sessions` (all optional) | Counts, P&L, R, win rate, `open_positions_excluded`, per-session attribution |
 
 ### Payload contract
@@ -728,6 +733,14 @@ the work that actually ran in `bars_advanced` (alias `bars_this_call`) and the
 durable total in `bars_processed`. A caller that needs a smaller unit of work
 should enqueue after a smaller ingestion batch, not expect the handler to slice
 the stored range.
+
+`paper.advance` also accepts an optional `gap_policy`. Omitting it preserves
+`strict`; the only accepted values are `strict`, `session_aware` and
+`skip_with_report`, and an unknown value is a permanent invalid-payload failure.
+The policy is forwarded to `ContinuousPaperRunner`, becomes part of the session
+identity and is reported with `gaps_skipped`, `missing_bars` and
+`gaps_recorded`. The scheduler always sends it explicitly so the job record
+names the policy that was used.
 
 ### Failure classification
 
@@ -967,7 +980,7 @@ scheduler = PaperAdvanceScheduler(
 |---|---|
 | `kind` | `paper.advance` (the registered handler's kind) |
 | `dedupe_key` | `paper.advance:{scope}:{last_bar_ts}` |
-| payload | `symbol`, `timeframe`, `bars` — exactly the handler's contract |
+| payload | `symbol`, `timeframe`, `bars`, `gap_policy` — exactly the handler's contract |
 | `max_retries` | `1` by default |
 | cursor | `state["trigger.paper.advance:{archive}:{ledger}"]` |
 
@@ -993,11 +1006,15 @@ and no job:
 | `ledger_unavailable` | the ledger exists but cannot be read |
 | `warming_up` | fewer bars than the first decision index needs |
 | `awaiting_bar` | the cursor is still on the newest decidable bar |
+| `synthetic_data` | provenance records synthetic bars and `allow_synthetic` is off |
+| `provenance_unavailable` | the provenance sidecar exists but cannot be parsed |
+| `cursor_corrupt` | the persisted scheduler cursor is unreadable or names an invalid policy (scheduler-level, `scope: null`) |
 
-Reasons are recorded once per `(scope, reason)` transition, so a periodic scan
-does not flood the log. There is no legacy fallback: the module never imports or
-names the handwritten strategy families, and a refused scope stays refused until
-its state changes.
+Per-scope reasons are recorded once per `(scope, reason)` transition, so a
+periodic scan does not flood the log. A corrupt cursor is refused once per
+process with `scope: null` until the cursor is repaired. There is no legacy
+fallback: the module never imports or names the handwritten strategy families,
+and a refused scope stays refused until its state changes.
 
 #### When a bar is "new"
 
@@ -1051,12 +1068,59 @@ rewound.
   the ledger, never from wall time. Nothing is polled, slept on or fetched
   here; the daemon's poll decides when `scan()` runs, and a bar that is not yet
   stored cannot be seen.
-- **No gap bypass.** The payload has only `symbol`, `timeframe` and `bars`, so
-  the scheduler cannot choose a permissive gap policy or a larger budget. A
-  `paper.advance` job still runs the continuous runner's default `strict`
-  policy, and a missing instant is refused there, not silently skipped.
+- **Policy is chosen once, not per scan.** The payload carries `symbol`,
+  `timeframe`, `bars` and the scheduler's `gap_policy`. The policy is validated
+  at construction against the ledger's allow-list, written into every emitted
+  job and persisted in the cursor. A restart is refused with
+  `SchedulerPolicyMismatch` when its configured policy differs from the recorded
+  one; changing policy is an explicit operator action (a fresh ledger/cursor, or
+  a new scheduling path), never a side effect of a restart. A legacy cursor
+  without the field ran `strict` and is read that way. A missing cursor is a
+  first run and uses the configured policy; a cursor that is present but is not
+  a JSON object, or names an invalid policy, is refused with `cursor_corrupt`
+  and never falls back to the configured policy.
 - **One local process.** The cursor and the queue are SQLite files owned by one
   writer at a time, like every other trigger source.
+
+#### Gap policy for scheduled advances
+
+The scheduler passes a validated `gap_policy` in every payload; the runner's
+default is `strict` and stays the CLI default.
+
+| Policy | Missing instant inside the open session | Recorded in `paper_gaps` | When to use |
+|---|---|---|---|
+| `strict` (default) | refused (`BarGapError`); the job retries | no | gap-free stores, or while a hole is being repaired |
+| `session_aware` | skipped; the next stored bar decides | yes | a verified real feed that genuinely skipped a bar (for example XAUUSD H1 with known holes) |
+| `skip_with_report` | skipped even for a symbol with no session window | yes | a symbol absent from the registry, never as a shortcut for XAUUSD |
+
+The policy is part of the paper session identity (`extra.gap_policy`), so an
+existing session cannot be resumed under a different policy; the handler fails
+permanently with `session_conflict`. The scheduler cursor enforces the same
+rule for the scheduling path: a restart under another policy raises
+`SchedulerPolicyMismatch` before emitting anything.
+
+To change policy intentionally, stop the scheduler and delete its cursor
+document (`trigger.paper.advance:<archive>:<ledger>`) from the job store's
+`state` table before restarting; the job `dedupe_key` still prevents a second
+job for a bar that is already queued. The cursor reset does not rewrite an
+existing paper session: that session keeps its recorded policy and refuses a
+different one.
+
+**Real-data recommendation.** Keep `strict` as the default and repair the feed
+when possible. For a store with a known, verified feed gap — the real XAUUSD H1
+store has thousands of gaps longer than one hour — `session_aware` is the
+recommended scheduled policy: it skips only missing instants inside the
+registry's open session, appends each to `paper_gaps`, and reports
+`gaps_skipped`, `missing_bars` and `gaps_recorded` in the job result. Warnings:
+feature lookbacks and bar-to-signal alignment then span a longer wall-clock
+window across the gap, no OHLCV is invented, and a store/session-calendar
+mismatch is still refused. Use `skip_with_report` only for a symbol with no
+registry session window.
+
+Known synthetic bars are refused with `synthetic_data` unless
+`--allow-synthetic` is given explicitly; an absent provenance sidecar stays
+unknown and is not treated as synthetic. An unreadable sidecar is refused with
+`provenance_unavailable` rather than guessed.
 
 ### Matured paper outcomes (P5 slice 2)
 
@@ -1568,9 +1632,15 @@ evidence champion with a new decidable stored bar enqueues exactly one
 crash between `scan` and `seen`; the ledger cursor and the provisional tail
 gate the next advance; exploratory/manual/no-champion scopes, an invalid scope,
 a missing archive and an unreadable ledger are audited refusals with no job and
-no legacy fallback; the payload is exactly the handler's three fields so the
-gap policy cannot be bypassed; the warm-up window is respected; and the
-`--schedule-paper` CLI flag enqueues the job without ever reading a feed.
+no legacy fallback; the payload carries the configured `gap_policy` (default
+`strict`), the cursor persists it and refuses a restart under another policy,
+a malformed cursor and an invalid stored policy are audited as `cursor_corrupt`
+without adopting the configured policy, malformed provenance is refused, a
+known synthetic store is refused without the opt-in, and a real
+scheduler→handler run with `session_aware` records the gap while `strict` still
+refuses the same slice; the
+warm-up window is respected; and the `--schedule-paper` CLI flag (including
+`--paper-gap-policy`) enqueues the job without ever reading a feed.
 
 ### Integration coverage (Phase 18)
 
