@@ -6,17 +6,22 @@ The bridge source already exists; these tests pin the operator-facing seam:
   flag order, with one shared ``--proposal-template`` JSON file;
 * only owner-approved proposals are enqueued and the payload carries the
   template's gate, stress and seed;
-* a scan enqueues jobs but executes no discovery and writes no archive;
+* paths with ``?``, ``#``, ``%`` and spaces are probed correctly without
+  creating a sidecar or a truncated file;
+* a missing, non-file, unreadable, non-writable, empty, stub-schema or
+  incompatible-schema proposal database is refused before the orchestrator
+  database is created;
 * the cursor and the job dedupe key survive a CLI restart;
-* a missing, non-file, unreadable, empty or schema-less proposal database is
-  refused before the orchestrator database is created;
-* the two new flags are mutually dependent and conflict with ``--no-scan``;
-* a broken template is a CLI error, never a silently defaulted search policy.
+* ``--enqueue-only`` queues exactly one job and executes none;
+* the two watch flags are mutually dependent and conflict with ``--no-scan``;
+* a broken or unreadable template is a CLI error, never a silently defaulted
+  search policy.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -67,26 +72,27 @@ TEMPLATE: dict[str, Any] = {
 def _cli_args(
     tmp_path: Path,
     *extra: str,
-    max_jobs_per_tick: str = "0",
+    max_jobs_per_tick: str | None = "0",
+    db: Path | None = None,
 ) -> list[str]:
-    return [
+    args = [
         "orchestrator",
         "run",
         "--once",
         "--profile",
         "none",
         "--db",
-        str(tmp_path / "orchestrator.sqlite3"),
+        str(db or tmp_path / "orchestrator.sqlite3"),
         "--root",
         str(tmp_path / "data"),
         "--runs-root",
         str(tmp_path / "runs"),
         "--archive-root",
         str(tmp_path / "archive"),
-        "--max-jobs-per-tick",
-        max_jobs_per_tick,
-        *extra,
     ]
+    if max_jobs_per_tick is not None:
+        args.extend(["--max-jobs-per-tick", max_jobs_per_tick])
+    return [*args, *extra]
 
 
 def _template_file(
@@ -382,6 +388,186 @@ def test_cli_refuses_a_missing_or_invalid_template(
         assert cli.main(args) == 2, name
         assert _error(capsys), name
         assert not (tmp_path / "orchestrator.sqlite3").exists(), name
+
+
+def test_probe_encodes_special_characters_and_creates_nothing(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    weird = tmp_path / "weird?#% space"
+    weird.mkdir()
+    db, _, _ = _seed_proposals(weird, name="special")
+    before = set(weird.iterdir()) | set(tmp_path.iterdir())
+
+    assert cli._validate_proposal_database(str(db)) == db
+    after = set(weird.iterdir()) | set(tmp_path.iterdir())
+    assert after == before
+    # The old unencoded URI opened (and created) the path truncated at '?'.
+    assert not (tmp_path / "weird").exists()
+
+    template = _template_file(tmp_path)
+    assert cli.main(_cli_args(tmp_path, *_watch_args(db, template=template))) == 0
+    tick = _tick(capsys)
+    scan = tick["scan"]
+    assert scan is not None and scan["sources"] == [f"proposals:{db.resolve()}"]
+    assert len(scan["queued"]) == 1
+    assert not (tmp_path / "weird").exists()
+
+
+@pytest.mark.parametrize("case", ["stub", "no_sources", "future_version"])
+def test_cli_refuses_a_broken_proposal_schema_before_creating_the_queue(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    case: str,
+) -> None:
+    template = _template_file(tmp_path)
+    path = tmp_path / "proposals.sqlite3"
+    if case == "stub":
+        with sqlite3.connect(path) as connection:
+            connection.execute("CREATE TABLE proposals (id INTEGER PRIMARY KEY)")
+    else:
+        seeded = _seed_proposals(tmp_path, name="schema")[0]
+        seeded.rename(path)
+        with sqlite3.connect(path) as connection:
+            if case == "no_sources":
+                connection.execute("DROP TABLE proposal_sources")
+            else:
+                connection.execute("DELETE FROM schema_version")
+                connection.execute(
+                    "INSERT INTO schema_version (version, applied_at) VALUES (99, 'future')"
+                )
+    args = _cli_args(tmp_path, *_watch_args(path, template=template))
+
+    assert cli.main(args) == 2
+    message = _error(capsys)
+    assert message
+    assert not (tmp_path / "orchestrator.sqlite3").exists()
+
+
+def test_cli_refuses_a_non_writable_proposal_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, _, _ = _seed_proposals(tmp_path, name="readonly")
+    template = _template_file(tmp_path)
+    os.chmod(db, 0o444)
+    try:
+        if os.access(db, os.W_OK):
+            pytest.skip("elevated privileges can write a 0444 file")
+        assert cli.main(_cli_args(tmp_path, *_watch_args(db, template=template))) == 2
+        assert "writable" in _error(capsys)
+        assert not (tmp_path / "orchestrator.sqlite3").exists()
+    finally:
+        os.chmod(db, 0o644)
+
+
+def test_cli_refuses_a_wal_database_whose_directory_is_not_writable(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, _, _ = _seed_proposals(tmp_path, name="wal")
+    connection = sqlite3.connect(db)
+    try:
+        connection.execute("PRAGMA journal_mode=WAL")
+    finally:
+        connection.close()
+    template = _template_file(tmp_path)
+    queue = tmp_path / "queue"
+    queue.mkdir()
+    os.chmod(tmp_path, 0o555)
+    try:
+        if os.access(tmp_path, os.W_OK):
+            pytest.skip("elevated privileges can write to a 0555 directory")
+        assert (
+            cli.main(
+                _cli_args(
+                    tmp_path, *_watch_args(db, template=template), db=queue / "orchestrator.sqlite3"
+                )
+            )
+            == 2
+        )
+        assert "writable" in _error(capsys)
+        assert not (queue / "orchestrator.sqlite3").exists()
+    finally:
+        os.chmod(tmp_path, 0o755)
+
+
+def test_cli_enqueue_only_queues_without_claiming_with_the_default_budget(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, approved, _ = _seed_proposals(tmp_path, name="enqueue-only")
+    template = _template_file(tmp_path)
+    args = _cli_args(
+        tmp_path,
+        *_watch_args(db, template=template),
+        "--enqueue-only",
+        max_jobs_per_tick=None,
+    )
+
+    assert cli.main(args) == 0
+    tick = _tick(capsys)
+    assert tick["error"] is None and tick["outcomes"] == []
+    scan = tick["scan"]
+    assert scan is not None and len(scan["queued"]) == 1
+    assert approved[0] in scan["queued"][0]["dedupe_key"]
+    jobs = _jobs(tmp_path / "orchestrator.sqlite3")
+    assert len(jobs) == 1 and jobs[0].status == "queued" and jobs[0].attempts == 0
+    assert not (tmp_path / "runs" / "discovery").exists()
+
+
+def test_cli_enqueue_only_requires_once_and_conflicts_with_no_scan(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, _, _ = _seed_proposals(tmp_path, name="enqueue-gate")
+    template = _template_file(tmp_path)
+    forever = [
+        "orchestrator",
+        "run",
+        "--forever",
+        "--profile",
+        "none",
+        *_watch_args(db, template=template),
+        "--enqueue-only",
+    ]
+    no_scan = _cli_args(
+        tmp_path, *_watch_args(db, template=template), "--enqueue-only", "--no-scan"
+    )
+
+    assert cli.main(forever) == 2
+    assert "once" in _error(capsys)
+    assert cli.main(no_scan) == 2
+    assert "no-scan" in _error(capsys)
+    assert not (tmp_path / "orchestrator.sqlite3").exists()
+
+
+def test_cli_refuses_an_unreadable_template(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, _, _ = _seed_proposals(tmp_path, name="unreadable-template")
+    template = _template_file(tmp_path)
+    os.chmod(template, 0)
+    try:
+        if os.access(template, os.R_OK):
+            pytest.skip("elevated privileges can read a 0000 file")
+        assert cli.main(_cli_args(tmp_path, *_watch_args(db, template=template))) == 2
+        assert "template" in _error(capsys)
+        assert not (tmp_path / "orchestrator.sqlite3").exists()
+    finally:
+        os.chmod(template, 0o600)
+
+
+def test_cli_names_the_same_database_twice_and_creates_one_job(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    db, _, _ = _seed_proposals(tmp_path, name="twice")
+    template = _template_file(tmp_path)
+
+    assert cli.main(_cli_args(tmp_path, *_watch_args(db, db, template=template))) == 0
+    scan = _tick(capsys)["scan"]
+    assert scan is not None
+    assert len(scan["sources"]) == 2
+    assert len(scan["queued"]) == 1
+    # The second source shares the first source's cursor and is a quiet no-op;
+    # the duplicate is the same job, never a second one.
+    assert scan["duplicates"] == []
+    assert len(_jobs(tmp_path / "orchestrator.sqlite3")) == 1
 
 
 def _jobs(db: Path) -> list:

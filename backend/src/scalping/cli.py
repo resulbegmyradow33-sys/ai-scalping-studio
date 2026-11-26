@@ -29,6 +29,7 @@ from datetime import UTC, date, datetime, time
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, NoReturn
+from urllib.parse import quote
 
 import numpy as np
 import polars as pl
@@ -1325,13 +1326,103 @@ class _WatchSource:
         self._source.seen(triggers)
 
 
+#: Columns ``ProposalStore`` reads through ``SELECT *`` and ``_load``. A stub
+#: table with the right name but a different shape must be refused before the
+#: store decides to migrate it.
+_PROPOSAL_REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {
+        "approval_actor",
+        "approval_at",
+        "approval_reason",
+        "converted_candidate_hash",
+        "created_at",
+        "dataset_id",
+        "dsl_condition",
+        "dsl_expected_effect",
+        "dsl_observation",
+        "falsification_test",
+        "hypothesis_id",
+        "hypothesis_kind",
+        "kind_source",
+        "proposal_id",
+        "required_columns_json",
+        "required_groups_json",
+        "status",
+        "symbol",
+        "timeframe",
+        "updated_at",
+    }
+)
+
+#: Columns ``_load`` reads from ``proposal_sources``.
+_PROPOSAL_SOURCE_REQUIRED_COLUMNS: Final[frozenset[str]] = frozenset(
+    {"doc_id", "position", "proposal_id", "quote", "section_ordinal"}
+)
+
+
+def _check_proposal_schema(connection: sqlite3.Connection, path: Path) -> None:
+    """Refuse anything but the real, current proposal schema.
+
+    Read-only in intent: it only queries ``sqlite_master``, ``PRAGMA
+    table_info`` and ``schema_version``. Callers may pass either the immutable
+    preflight probe or an opened ``ProposalStore`` connection.
+    """
+    from scalping.knowledge import PROPOSAL_SCHEMA_VERSION
+
+    tables = {
+        str(row[0])
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    missing_tables = {"proposal_sources", "proposals", "schema_version"} - tables
+    if missing_tables:
+        raise CliError(f"proposal database is missing tables {sorted(missing_tables)}: {path}")
+    row = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()
+    version = None if row is None else row[0]
+    if (
+        isinstance(version, bool)
+        or not isinstance(version, int)
+        or not 1 <= version <= PROPOSAL_SCHEMA_VERSION
+    ):
+        raise CliError(
+            f"proposal database schema version {version!r} is not supported"
+            f" (1..{PROPOSAL_SCHEMA_VERSION}): {path}"
+        )
+    # Version 1 predates ``kind_source``; ProposalStore migrates it after this
+    # read-only check, so require only the columns that version actually had.
+    required_columns = (
+        _PROPOSAL_REQUIRED_COLUMNS if version >= 2 else _PROPOSAL_REQUIRED_COLUMNS - {"kind_source"}
+    )
+    columns = {str(row[1]) for row in connection.execute("PRAGMA table_info(proposals)")}
+    missing_columns = required_columns - columns
+    if missing_columns:
+        raise CliError(
+            f"proposal database proposals table is missing columns"
+            f" {sorted(missing_columns)}: {path}"
+        )
+    source_columns = {
+        str(row[1]) for row in connection.execute("PRAGMA table_info(proposal_sources)")
+    }
+    missing_source_columns = _PROPOSAL_SOURCE_REQUIRED_COLUMNS - source_columns
+    if missing_source_columns:
+        raise CliError(
+            f"proposal database proposal_sources table is missing columns"
+            f" {sorted(missing_source_columns)}: {path}"
+        )
+
+
 def _validate_proposal_database(path_text: str) -> Path:
     """Check an explicit proposal database before any store can create one.
 
-    A typo or an empty file must not become a schema: the read-only probe only
-    accepts an existing regular file whose ``sqlite_master`` already names the
-    ``proposals`` table. The probe connection is always closed, and no write or
-    schema migration happens here.
+    The probe is read-only and never migrates: the file must already carry the
+    real proposal schema (tables, columns and a supported ``schema_version``).
+    The URI is percent-encoded, so ``?``, ``#``, ``%`` and spaces in a path
+    cannot truncate it or drop ``mode=ro``. ``immutable=1`` keeps the probe
+    from creating or updating WAL sidecars while it validates.
+
+    The watched database is opened read-write by ``ProposalStore`` afterwards,
+    because WAL mode and its sidecars need write access. A file or directory
+    the orchestrator cannot write is refused here with a ``CliError`` instead
+    of failing later with a generic store error.
     """
     path = Path(path_text)
     if not path.exists():
@@ -1340,19 +1431,26 @@ def _validate_proposal_database(path_text: str) -> Path:
         raise CliError(f"proposal database is not a regular file: {path}")
     if not os.access(path, os.R_OK):
         raise CliError(f"proposal database is not readable: {path}")
+    if not os.access(path, os.W_OK):
+        raise CliError(
+            f"proposal database must be writable by the orchestrator"
+            f" (WAL journal and sidecars): {path}"
+        )
+    if not os.access(path.parent, os.W_OK):
+        raise CliError(
+            f"proposal database directory must be writable by the orchestrator"
+            f" (WAL sidecars): {path.parent}"
+        )
+    uri = f"file:{quote(str(path.resolve()), safe='/')}?mode=ro&immutable=1"
     probe: sqlite3.Connection | None = None
     try:
-        probe = sqlite3.connect(f"file:{path.resolve()}?mode=ro", uri=True)
-        found = probe.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'proposals' LIMIT 1"
-        ).fetchone()
+        probe = sqlite3.connect(uri, uri=True)
+        _check_proposal_schema(probe, path)
     except sqlite3.Error as exc:
         raise CliError(f"proposal database is not a readable SQLite file: {path}: {exc}") from exc
     finally:
         if probe is not None:
             probe.close()
-    if found is None:
-        raise CliError(f"proposal database has no proposals table: {path}")
     return path
 
 
@@ -1376,7 +1474,7 @@ def _load_proposal_template(path_text: str) -> Any:
 
 def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
     """Run one tick (``--once``) or a supervised loop (``--forever``)."""
-    from scalping.knowledge import ProposalStore
+    from scalping.knowledge import KnowledgeIndexError, ProposalStore
     from scalping.orchestrator.core import Orchestrator
     from scalping.orchestrator.daemon import DaemonConfig, OrchestratorDaemon
     from scalping.orchestrator.data_triggers import DataFileTriggerSource
@@ -1407,8 +1505,11 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         or proposal_paths
         or args.schedule_paper
         or args.proposal_template
+        or args.enqueue_only
     ):
         raise CliError("--no-scan cannot be combined with a watch source")
+    if args.enqueue_only and not args.once:
+        raise CliError("--enqueue-only requires --once; a forever run must be allowed to drain")
     if args.watch_dir and args.watch_data_dir:
         raise CliError("--watch-dir and --watch-data-dir cannot be combined")
     if args.watch_dir and args.watch_kind == KIND_DATASET_BUILD:
@@ -1422,8 +1523,9 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         raise CliError("--watch-proposals requires --proposal-template")
     if args.proposal_template and not proposal_paths:
         raise CliError("--proposal-template requires at least one --watch-proposals path")
-    # Validate before opening the job store: a typo must not create a queue DB,
-    # and ProposalStore (which migrates schemas) must not touch a bad file.
+    # Validate before opening any store: a typo or a stub schema must not create
+    # a queue DB, and ProposalStore (which enables WAL and migrates) must not
+    # touch a bad file before its real schema has been checked.
     validated_proposals = tuple(_validate_proposal_database(path) for path in proposal_paths)
     template = _load_proposal_template(args.proposal_template) if args.proposal_template else None
     research_kinds = tuple(
@@ -1441,13 +1543,33 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         poll_seconds=args.poll_seconds,
         guard_profile=args.profile,
         scan_triggers=not args.no_scan,
-        max_jobs_per_tick=args.max_jobs_per_tick,
+        # ``--enqueue-only`` forces zero claims for the single tick; without
+        # it ``orchestrator run`` is also the executor and drains up to
+        # ``--max-jobs-per-tick`` (default 10) after scanning.
+        max_jobs_per_tick=0 if args.enqueue_only else args.max_jobs_per_tick,
         stop_grace_seconds=args.stop_grace_seconds,
         heavy_kinds=tuple(sorted(HEAVY_HANDLER_KINDS)),
         research_kinds=research_kinds,
     )
-    store = JobStore(Path(args.db))
+    # Open every proposal store before the orchestrator DB. A store that fails
+    # to open (WAL write refusal, schema migration error, I/O error) becomes a
+    # CliError and leaves no queue DB behind.
     proposal_stores: list[ProposalStore] = []
+    try:
+        for path in validated_proposals:
+            try:
+                proposals = ProposalStore(path)
+                proposal_stores.append(proposals)
+                # Re-check on the store's own connection: the immutable probe
+                # may not see a schema change that lives only in a WAL file.
+                _check_proposal_schema(proposals.connection, path)
+            except (sqlite3.Error, KnowledgeIndexError, OSError) as exc:
+                raise CliError(f"cannot open proposal database {path}: {exc}") from exc
+        store = JobStore(Path(args.db))
+    except BaseException:
+        for proposals in proposal_stores:
+            proposals.close()
+        raise
     try:
         sources: list[TriggerSource] = []
         if args.watch_dir:
@@ -1497,11 +1619,9 @@ def _cmd_orchestrator_run(args: argparse.Namespace) -> None:
         # One source per explicit proposal DB, after the other sources. It only
         # reads the approved queue and emits discovery.run jobs; approval,
         # promotion and execution stay with the owner and the daemon/handlers.
-        for path in validated_proposals:
+        for proposals, path in zip(proposal_stores, validated_proposals, strict=True):
             if template is None:  # unreachable: the flag pair is checked above
                 raise CliError("--watch-proposals requires --proposal-template")
-            proposals = ProposalStore(path)
-            proposal_stores.append(proposals)
             sources.append(
                 ProposalQueueTriggerSource(
                     proposals,
@@ -2175,6 +2295,14 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--stop-grace-seconds", type=float, default=5.0)
     run.add_argument(
         "--no-scan", action="store_true", help="do not call trigger sources on this run"
+    )
+    run.add_argument(
+        "--enqueue-only",
+        action="store_true",
+        help=(
+            "scan and enqueue but claim zero jobs in this tick (requires --once);"
+            " without it 'orchestrator run' also drains the queue"
+        ),
     )
     run.add_argument(
         "--watch-dir",

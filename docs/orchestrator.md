@@ -36,7 +36,7 @@ process, not an operating-system service.
 | `backend/tests/test_paper_outcome_triggers.py` | Matured-outcome eligibility, cursor/pending ack, provenance, proposal-only handler |
 | `backend/tests/test_paper_outcome_cli.py` | `--watch-paper-ledger` wiring, repeatable flags, synthetic opt-in, restart dedupe, no implicit/HTTP source |
 | `backend/tests/test_proposal_bridge.py` | Approved-only triggers, payload/gate contract, dedupe, limits, proposal-only handler |
-| `backend/tests/test_proposal_cli.py` | `--watch-proposals` / `--proposal-template` wiring, DB validation before queue creation, scan-only enqueue, restart dedupe, flag gates |
+| `backend/tests/test_proposal_cli.py` | `--watch-proposals` / `--proposal-template` wiring, encoded URI and deep schema validation before queue creation, writability/WAL refusals, `--enqueue-only`, restart dedupe, flag gates |
 | `backend/tests/test_paper_scheduler.py` | Evidence-only advances, one job per decision bar, restart and crash dedupe, ledger cursor, warm-up, gap-policy contract, CLI |
 | `backend/tests/test_orchestrator_integration.py` | Real handlers, triggers and daemon on temp roots: chain, isolation, restart, boundaries |
 
@@ -207,6 +207,11 @@ uv run scalping.cli orchestrator run --forever \
   --watch-proposals runs/knowledge/proposals.sqlite3 \
   --proposal-template runs/proposal-template.json
 
+# one scan that only queues approved proposals and claims no job
+uv run scalping.cli orchestrator run --once --enqueue-only \
+  --watch-proposals runs/knowledge/proposals.sqlite3 \
+  --proposal-template runs/proposal-template.json
+
 # tests/dev only: no measured guard, status says unmeasured
 uv run scalping.cli orchestrator run --once --profile none
 ```
@@ -226,7 +231,8 @@ only when `--watch-paper-ledger` names it.
 | `--allow-synthetic` | no | off | Forward the explicit opt-in to both the ledger source and the handler; without it a `synthetic: true` batch is refused | requires at least one `--watch-paper-ledger` |
 | `--watch-proposals PATH` | yes | none | Bind one `ProposalQueueTriggerSource` per existing proposal DB; only approved proposals become `discovery.run` jobs | `--no-scan`; requires `--proposal-template` |
 | `--proposal-template PATH` | no | none | Path to a UTF-8 JSON object holding the required `DiscoveryTemplate` policy (`max_trials`, `seed`, `gate`, `stress`); inline JSON is not accepted | requires at least one `--watch-proposals`; `--no-scan` |
-| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper`, either proposal flag |
+| `--enqueue-only` | no | off | Scan and enqueue, then claim zero jobs in this tick; forces `--max-jobs-per-tick 0` and requires `--once` | `--forever`, `--no-scan` |
+| `--no-scan` | no | off | Do not call trigger sources; drain what is already queued | any watch flag, `--schedule-paper`, either proposal flag, `--enqueue-only` |
 
 There is no trigger by default: without a watch flag the daemon scans nothing
 and the queue is filled by another process. `--watch-kind` defaults to
@@ -251,6 +257,16 @@ inline JSON string. An example object:
 The gate and stress policy are required by `DiscoveryTemplate.from_mapping`:
 an empty gate is exploratory policy that must be written down, not a default
 the CLI invents. A missing file, malformed JSON or invalid field is a `CliError`.
+
+`orchestrator run` is both the scanner and an executor. After the scan it drains
+due jobs in the same tick, up to `--max-jobs-per-tick` (default 10), so a
+just-enqueued `discovery.run` can be claimed and run in that tick. Use
+`--enqueue-only` to scan and enqueue while claiming zero jobs; it forces the
+budget to 0 and is refused with `--forever`, because a forever process that
+never drains is not a supported mode. `--forever` scans and drains on every
+tick. The CLI never calls discovery directly; execution goes through the
+registered handler and the same resource guard and research controls as every
+other job.
 
 `--once` exits 2 with a JSON error when the tick itself failed (scan, recovery or
 store error). A job-level handler failure is a recorded job outcome and still
@@ -1421,13 +1437,32 @@ production wiring. The paths are explicit: there is no default proposal DB,
 and the read-only HTTP surface cannot bind one or supply a template. The two
 flags depend on each other and both conflict with `--no-scan`.
 
-Before the `JobStore` is opened, each proposal path is checked in order: it must
-exist, be a regular file, be readable, be openable through a read-only SQLite
-probe (`file:<path>?mode=ro`) and already contain a `proposals` table in
-`sqlite_master`. A typo, a directory, an empty file or a database without that
-table is a `CliError` and leaves the orchestrator DB uncreated. No schema is
-created by the probe. Only after all paths pass does the CLI open the queue and
-one `ProposalStore` per path; every store is closed in `finally`. The template
+Before any store is opened, each proposal path is checked in order: it must
+exist, be a regular file, be readable, **and be writable together with its
+directory**. A watched proposal DB is opened read-write by `ProposalStore`:
+opening enables WAL and may create or update `-wal`/`-shm` sidecars, so the
+daemon's user must own write access to both the file and its directory. A
+read-only copy is not a supported watch target and is refused with `CliError`.
+
+The preflight itself is read-only. It opens the database through a
+percent-encoded immutable URI,
+`file:<quote(path)>?mode=ro&immutable=1`, so `?`, `#`, `%` and spaces cannot
+truncate the path or drop `mode=ro`, and probing creates no sidecar. It then
+checks the real schema: `proposals` and `proposal_sources` exist with every
+column that schema version reads, and `schema_version` holds a version in
+`1..PROPOSAL_SCHEMA_VERSION`. A version 1 store is accepted for its own columns
+and migrated by `ProposalStore` after the read-only check. A typo, directory,
+empty file, stub table, missing column, future schema version or unreadable
+file is a `CliError` (exit 2) and leaves the orchestrator DB uncreated.
+
+Only after every path passes does the CLI open all `ProposalStore`s, in path
+order, re-check the schema on each store's own connection (the immutable probe
+cannot see a schema change that lives only in a WAL file), and only then open
+the `JobStore`. Because the probe reads the main database file, a store whose
+schema exists only in an uncheckpointed WAL is refused; let the owning process
+finish or recover it first. `sqlite3.Error`, `KnowledgeIndexError` and `OSError`
+at that stage become `CliError`; every opened store is closed before the error
+propagates. Every store and the queue are closed in `finally`. The template
 file is read with `json.loads` and validated by
 `DiscoveryTemplate.from_mapping`, with `OSError`/`ValueError`/`TypeError`
 reported as `CliError`.
@@ -1435,12 +1470,12 @@ reported as `CliError`.
 One source is appended per path, after the directory watcher, paper scheduler
 and paper ledgers, in flag order. Each scan emits only `discovery.run` jobs with
 the template's gate, stress and seed in the payload. The CLI does not approve,
-promote, convert or execute anything: **a human approval is still required**
-before a proposal is visible to the source, and **scanning is not execution** —
-the queued job is claimed and run later by the daemon and its registered
-handler, under the resource guard and persisted research controls. Passing
-`--max-jobs-per-tick 0` scans and enqueues without claiming any job, which is
-how the tests prove that a scan writes no discovery archive.
+promote or convert anything: **a human approval is still required** before a
+proposal is visible to the source. Scanning and execution are separate steps
+but can happen in one process: `orchestrator run` drains after scanning unless
+`--enqueue-only` (or `--max-jobs-per-tick 0`) is used, in which case the tick
+only queues. `--enqueue-only` is how the tests prove that a scan writes no
+discovery archive.
 
 `discovery.run` is in the CLI's `research_kinds`, so `disable research` refuses
 its claim while scanning and enqueueing continue, as for every other source.
@@ -1448,12 +1483,14 @@ its claim while scanning and enqueueing continue, as for every other source.
 Limits of this wiring:
 
 - Naming N proposal DBs means N sequential reads per tick. The same DB named
-  twice is two reads; the cursor and job key still make it one job.
+  twice is two reads; the shared cursor makes the second source a quiet no-op,
+  so the store still holds one job.
 - Removing the flags stops new proposals but leaves the cursors in the job
   store; it does not cancel jobs already queued.
-- Validation checks the shape, not the semantics, of the database. An existing
-  `proposals` table with an unexpected schema may still fail when the source
-  reads it; the failure is recorded by the scan, not hidden by a rewrite.
+- Validation checks the schema, not the data or the semantics of the records.
+  A valid schema with a corrupt row can still fail when the source reads it:
+  `--once` reports the tick error and exits 2, and the daemon records it in
+  `last_error`; a job-level handler failure is a recorded job outcome.
 - A queued job is not evidence. It still runs the ordinary `discovery.run`
   handler, which records `no_trade`/`no_change`/`rejected` and cannot promote.
 
