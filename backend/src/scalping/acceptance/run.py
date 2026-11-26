@@ -852,7 +852,7 @@ class _AcceptanceRun:
         if not archive_path.is_file():
             return self._skipped_stage(
                 "paper_advance",
-                "no_governed_champion",
+                "missing_archive",
                 f"no discovery archive at {archive_path}; the paper engine was not started",
                 decision=decision,
             )
@@ -876,6 +876,26 @@ class _AcceptanceRun:
                 "paper_advance", "champion_unavailable", str(exc), decision=decision
             )
 
+        # The decision authorizes one spec and the archive supplies another:
+        # trading the archive spec would attribute the session to a decision
+        # about a different candidate. Fail closed on any disagreement.
+        decision_hash = decision.candidate_spec_hash
+        if decision_hash != champion.spec_hash:
+            return self._skipped_stage(
+                "paper_advance",
+                "champion_decision_mismatch",
+                (
+                    f"governed decision names spec {decision_hash!r} but the archive champion "
+                    f"hashes to {champion.spec_hash!r}; the paper engine was not started"
+                ),
+                decision=decision,
+                extra={
+                    "decision_spec_hash": decision_hash,
+                    "champion_spec_hash": champion.spec_hash,
+                },
+            )
+
+        decision_source, decision_artifact, decision_digest = self._decision_binding(decision)
         session_id: str | None = None
         with PaperLedger(self.paper_ledger_path) as ledger:
             runner = AutonomousPaperRunner(
@@ -904,6 +924,12 @@ class _AcceptanceRun:
             {
                 "session_id": session_id,
                 "champion": champion.to_dict(),
+                "governing_decision": {
+                    "source": decision_source,
+                    "artifact": str(decision_artifact),
+                    "digest": decision_digest,
+                    "candidate_spec_hash": decision_hash,
+                },
                 "steps": run_result.steps,
                 "balance": run_result.balance,
                 "equity": run_result.equity,
@@ -927,7 +953,11 @@ class _AcceptanceRun:
                 "autonomous DSL paper runner advanced the governed evidence champion "
                 f"{champion.candidate_id[:12]} on the synthetic store (no real money)"
             ),
-            artifacts={"ledger": str(self.paper_ledger_path), "summary": str(path)},
+            artifacts={
+                "ledger": str(self.paper_ledger_path),
+                "summary": str(path),
+                "decision": str(decision_artifact),
+            },
             checksums={"ledger": _file_digest(self.paper_ledger_path)},
             counts={
                 "session_id": session_id,
@@ -937,6 +967,11 @@ class _AcceptanceRun:
                 "champion_mode": champion.mode,
                 "evidence_checksum": champion.evidence_checksum,
                 "policy_id": champion.policy_id,
+                "decision_source": decision_source,
+                "decision_artifact": decision_artifact.name,
+                "decision_digest": decision_digest,
+                "decision_spec_hash": decision_hash,
+                "champion_spec_hash": champion.spec_hash,
                 "bars_processed": summary.bars_processed,
                 "trades": summary.trades,
                 "status": summary.status,
@@ -975,6 +1010,19 @@ class _AcceptanceRun:
         )
 
     # ------------------------------------------------------------------ helpers
+    def _decision_binding(self, decision: PromotionDecision) -> tuple[str, Path, str]:
+        """Where a decision is recorded and how to identify it without wall time.
+
+        A production decision comes from the holdout stage and lives in
+        ``holdout.json``; the pre-holdout acceptance decision lives in
+        ``promotion.json``. Citing the wrong file would make a rejection look
+        like an acceptance to an auditor.
+        """
+        production = decision is self.production_decision
+        source = "production" if production else "promotion"
+        artifact = self.run_dir / ("holdout.json" if production else "promotion.json")
+        return source, artifact, _decision_digest(decision)
+
     def _skipped_stage(
         self,
         name: str,
@@ -990,13 +1038,18 @@ class _AcceptanceRun:
             "real_money": False,
             "reason_code": code,
         }
+        artifacts: dict[str, str] = {}
         if decision is not None:
+            source, artifact, digest = self._decision_binding(decision)
+            counts["decision_source"] = source
+            counts["decision_artifact"] = artifact.name
+            counts["decision_digest"] = digest
             counts["promotion_accepted"] = decision.accepted
             counts["rejections"] = list(decision.codes)
+            if artifact.exists():
+                artifacts["decision"] = str(artifact)
         if extra is not None:
             counts.update(extra)
-        path = self.run_dir / "promotion.json"
-        artifacts = {"decision": str(path)} if path.exists() else {}
         return AcceptanceStage(
             name=name,
             status="skipped",
