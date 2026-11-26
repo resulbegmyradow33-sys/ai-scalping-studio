@@ -466,10 +466,11 @@ def test_tampered_bundle_fails_its_checksum(tmp_path: Path) -> None:
     assert exc.value.code == "checksum_mismatch"
 
 
-def test_old_schema_is_refused_before_a_rebuild(tmp_path: Path) -> None:
+@pytest.mark.parametrize("schema_version", [1, 4])
+def test_old_schema_is_refused_before_a_rebuild(tmp_path: Path, schema_version: int) -> None:
     stored = stored_bundle(tmp_path)
     payload = json.loads(stored.path.read_text(encoding="utf-8"))
-    payload["schema_version"] = 1
+    payload["schema_version"] = schema_version
     stored.path.write_text(json.dumps(payload), encoding="utf-8")
 
     with pytest.raises(EvidenceError) as exc:

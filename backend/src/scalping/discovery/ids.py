@@ -22,7 +22,8 @@ Why only ``validation:``
 * The strip is single-pass, so ``validation:validation:X`` canonicalises to
   ``validation:X`` and cannot collide with ``X``.
 * Symbol, timeframe, horizon and digest remain part of the compared id; no
-  token splitting, case folding or normalisation happens here.
+  token splitting, case folding or interior normalisation happens here. Only
+  surrounding whitespace is stripped, so ``"  X  "`` and ``X`` compare equal.
 
 The function is intentionally strict: a missing, blank or prefix-only id is a
 programmer error, not an empty dataset.
