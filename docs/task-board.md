@@ -518,8 +518,10 @@ wins.
       rejection. **Still open.**
 - [x] Add a `paper.advance` trigger/scheduler so the daemon, not a human,
       creates advance jobs on new bars (#218, `--schedule-paper`). The scheduler
-      reads stored bars, never a live feed; a gap still reaches the strict
-      runner unchanged.
+      reads stored bars, never a live feed; the gap policy is validated at
+      startup, carried in every job and persisted in the cursor (default
+      `strict`; `--paper-gap-policy session_aware` is explicit) so a restart
+      cannot silently change it.
 - [x] Add the optional pinned offline PDF parser (#215): `pypdf` is an optional
       extra and each page is a section with a page reference. Extraction is
       merged.
