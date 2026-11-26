@@ -7,6 +7,11 @@ builder, promotion policy, an optional locked holdout when that module exists,
 the autonomous paper runner and the matured-outcome reader. Every stage records
 its own status, artifacts, checksums and counts.
 
+The paper stage is promotion-gated and never paper trades the discovery
+candidate: it runs only a governed evidence-mode champion read from the archive
+via :class:`~scalping.discovery.champion.ChampionProvider`. A rejection, an
+absent champion or an invalid champion is an explicit, auditable skip.
+
 It deliberately does not prove anything about the market. Synthetic bars are not
 XAUUSD, a three-fold evidence bundle is not a locked out-of-sample result, and a
 paper session over synthetic bars is not a forward paper-trading trial. The
@@ -44,6 +49,15 @@ from scalping.data.store import ParquetStore
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import validate_bars
 from scalping.datasets.builder import DatasetBundle, build_dataset, save_manifest
+from scalping.discovery.archive import DiscoveryArchive
+from scalping.discovery.champion import (
+    ChampionError,
+    ChampionProvider,
+    InvalidChampionSpec,
+    NoChampionError,
+    NoEvidenceChampion,
+    scope_for,
+)
 from scalping.discovery.evidence import (
     CandidateEvidence,
     EvidenceConfig,
@@ -401,6 +415,7 @@ class _AcceptanceRun:
         self.candidate_source: str | None = None
         self.identity: ExpectedIdentity | None = None
         self.pre_decision: PromotionDecision | None = None
+        self.production_decision: PromotionDecision | None = None
         self.acceptance_policy: PromotionPolicy | None = None
         self.paper_session_id: str | None = None
         self.paper_ledger_path = self.run_dir / "paper.sqlite"
@@ -774,6 +789,7 @@ class _AcceptanceRun:
             )
             attached = module.attach_holdout(self.evidence, result)
             production = evaluate_promotion(attached, PROMOTION_V1, expected_identity=self.identity)
+            self.production_decision = production
         finally:
             ledger.close()
         _checkpoint_sqlite(ledger_path)
@@ -806,13 +822,85 @@ class _AcceptanceRun:
         )
 
     def _stage_paper(self) -> AcceptanceStage:
-        if self.spec is None:
-            raise AcceptanceStageError("missing_spec", "paper advance needs a strategy spec")
+        # A discovery candidate is never a paper champion. The governing
+        # decision and the archive's evidence-mode champion are both required;
+        # either one missing or refusing is an auditable skip, not a fallback to
+        # ``self.spec`` (which may be the candidate promotion just rejected).
+        decision = (
+            self.production_decision if self.production_decision is not None else self.pre_decision
+        )
+        if decision is None:
+            return self._skipped_stage(
+                "paper_advance",
+                "missing_promotion_decision",
+                "no promotion decision was recorded; the paper engine was not started",
+            )
+        if not decision.accepted:
+            code = (
+                "production_promotion_rejected"
+                if decision is self.production_decision
+                else "promotion_rejected"
+            )
+            return self._skipped_stage(
+                "paper_advance",
+                code,
+                f"governed promotion did not accept ({decision.summary}); "
+                "the rejected candidate was not paper traded",
+                decision=decision,
+            )
+        archive_path = self.run_dir / "discovery.sqlite"
+        if not archive_path.is_file():
+            return self._skipped_stage(
+                "paper_advance",
+                "missing_archive",
+                f"no discovery archive at {archive_path}; the paper engine was not started",
+                decision=decision,
+            )
+        try:
+            with DiscoveryArchive(archive_path) as archive:
+                champion = ChampionProvider(
+                    archive, scope=scope_for(self.config.symbol, self.config.timeframe)
+                ).champion()
+        except NoEvidenceChampion as exc:
+            return self._skipped_stage(
+                "paper_advance", "no_evidence_champion", str(exc), decision=decision
+            )
+        except InvalidChampionSpec as exc:
+            return self._skipped_stage(
+                "paper_advance", "invalid_champion", str(exc), decision=decision
+            )
+        except NoChampionError as exc:
+            return self._skipped_stage("paper_advance", "no_champion", str(exc), decision=decision)
+        except ChampionError as exc:
+            return self._skipped_stage(
+                "paper_advance", "champion_unavailable", str(exc), decision=decision
+            )
+
+        # The decision authorizes one spec and the archive supplies another:
+        # trading the archive spec would attribute the session to a decision
+        # about a different candidate. Fail closed on any disagreement.
+        decision_hash = decision.candidate_spec_hash
+        if decision_hash != champion.spec_hash:
+            return self._skipped_stage(
+                "paper_advance",
+                "champion_decision_mismatch",
+                (
+                    f"governed decision names spec {decision_hash!r} but the archive champion "
+                    f"hashes to {champion.spec_hash!r}; the paper engine was not started"
+                ),
+                decision=decision,
+                extra={
+                    "decision_spec_hash": decision_hash,
+                    "champion_spec_hash": champion.spec_hash,
+                },
+            )
+
+        decision_source, decision_artifact, decision_digest = self._decision_binding(decision)
         session_id: str | None = None
         with PaperLedger(self.paper_ledger_path) as ledger:
             runner = AutonomousPaperRunner(
                 ledger,
-                self.spec,
+                champion.spec,
                 self.config.symbol,
                 self.config.timeframe,
                 self.settings,
@@ -835,6 +923,13 @@ class _AcceptanceRun:
             path,
             {
                 "session_id": session_id,
+                "champion": champion.to_dict(),
+                "governing_decision": {
+                    "source": decision_source,
+                    "artifact": str(decision_artifact),
+                    "digest": decision_digest,
+                    "candidate_spec_hash": decision_hash,
+                },
                 "steps": run_result.steps,
                 "balance": run_result.balance,
                 "equity": run_result.equity,
@@ -854,21 +949,46 @@ class _AcceptanceRun:
         return AcceptanceStage(
             name="paper_advance",
             status="passed",
-            detail="autonomous DSL paper runner advanced on the synthetic store (no real money)",
-            artifacts={"ledger": str(self.paper_ledger_path), "summary": str(path)},
+            detail=(
+                "autonomous DSL paper runner advanced the governed evidence champion "
+                f"{champion.candidate_id[:12]} on the synthetic store (no real money)"
+            ),
+            artifacts={
+                "ledger": str(self.paper_ledger_path),
+                "summary": str(path),
+                "decision": str(decision_artifact),
+            },
             checksums={"ledger": _file_digest(self.paper_ledger_path)},
             counts={
                 "session_id": session_id,
+                "spec_hash": champion.spec_hash,
+                "candidate_id": champion.candidate_id,
+                "promotion_id": champion.promotion_id,
+                "champion_mode": champion.mode,
+                "evidence_checksum": champion.evidence_checksum,
+                "policy_id": champion.policy_id,
+                "decision_source": decision_source,
+                "decision_artifact": decision_artifact.name,
+                "decision_digest": decision_digest,
+                "decision_spec_hash": decision_hash,
+                "champion_spec_hash": champion.spec_hash,
                 "bars_processed": summary.bars_processed,
                 "trades": summary.trades,
                 "status": summary.status,
                 "real_money": False,
+                "paper_traded": False,
+                "paper_engine_ran": True,
             },
         )
 
     def _stage_outcomes(self) -> AcceptanceStage:
         if self.paper_session_id is None:
-            raise AcceptanceStageError("missing_session", "outcomes need a paper session")
+            return self._skipped_stage(
+                "matured_outcomes",
+                "no_paper_session",
+                "the paper stage did not run; there is no attributed session to read",
+                extra={"closed_trades": 0, "open_trades": 0, "strategy_hash": None},
+            )
         with PaperLedger.open_reader(self.paper_ledger_path) as ledger:
             batch = matured_outcomes(ledger, self.paper_session_id)
         self.outcomes = batch
@@ -890,6 +1010,56 @@ class _AcceptanceRun:
         )
 
     # ------------------------------------------------------------------ helpers
+    def _decision_binding(self, decision: PromotionDecision) -> tuple[str, Path, str]:
+        """Where a decision is recorded and how to identify it without wall time.
+
+        A production decision comes from the holdout stage and lives in
+        ``holdout.json``; the pre-holdout acceptance decision lives in
+        ``promotion.json``. Citing the wrong file would make a rejection look
+        like an acceptance to an auditor.
+        """
+        production = decision is self.production_decision
+        source = "production" if production else "promotion"
+        artifact = self.run_dir / ("holdout.json" if production else "promotion.json")
+        return source, artifact, _decision_digest(decision)
+
+    def _skipped_stage(
+        self,
+        name: str,
+        code: str,
+        detail: str,
+        *,
+        decision: PromotionDecision | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> AcceptanceStage:
+        """An explicit, auditable stage skip; it is never a silent fallback."""
+        counts: dict[str, Any] = {
+            "paper_traded": False,
+            "real_money": False,
+            "reason_code": code,
+        }
+        artifacts: dict[str, str] = {}
+        if decision is not None:
+            source, artifact, digest = self._decision_binding(decision)
+            counts["decision_source"] = source
+            counts["decision_artifact"] = artifact.name
+            counts["decision_digest"] = digest
+            counts["promotion_accepted"] = decision.accepted
+            counts["rejections"] = list(decision.codes)
+            if artifact.exists():
+                artifacts["decision"] = str(artifact)
+        if extra is not None:
+            counts.update(extra)
+        return AcceptanceStage(
+            name=name,
+            status="skipped",
+            detail=detail,
+            artifacts=artifacts,
+            checksums={},
+            counts=counts,
+            error_code=code,
+        )
+
     def _require_dataset(self) -> tuple[DatasetBundle, FeatureFrame]:
         if self.bundle is None or self.features is None:
             raise AcceptanceStageError("missing_dataset", "this stage needs the built dataset")
@@ -929,12 +1099,13 @@ class _AcceptanceRun:
             "profitable": False,
         }
         claim_basis = {
-            "implemented": "the real store/dataset/discovery/evidence/promotion/paper/outcome "
-            "modules ran in this process",
+            "implemented": "the eligible real modules ran in this process; every skipped stage "
+            "is recorded with its reason",
             "tested": "backend/tests/test_acceptance.py exercises a passing run, a typed stage "
-            "failure and the CLI contract",
+            "failure, promotion-gated paper skips, governed champion selection and the CLI",
             "validated": "no independent chronological out-of-sample market evidence was produced",
-            "paper_traded": "the paper engine ran on synthetic bars, not a forward market trial",
+            "paper_traded": "the paper engine may run a governed champion on synthetic bars, "
+            "never a forward market trial; a rejected candidate is never paper traded",
             "profitable": "synthetic acceptance cannot establish profitability",
         }
         scope = {
@@ -959,6 +1130,14 @@ class _AcceptanceRun:
             (
                 "NO TRADE is a valid discovery and promotion outcome; a rejected decision is "
                 "reported, not hidden."
+            ),
+            (
+                "The optional synthetic holdout uses a separate mechanism ledger; it cannot "
+                "authorize a production promotion or a governed paper session."
+            ),
+            (
+                "Paper trading, when it runs, uses only an evidence-mode champion read from "
+                "the archive; a rejected discovery candidate is never paper traded."
             ),
         )
         return AcceptanceResult(
