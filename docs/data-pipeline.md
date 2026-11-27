@@ -48,6 +48,12 @@ need an M1 source; any `flow_*` column is reserved for the tick layer and needs
 names every missing input, so a manifest cannot quietly describe unsupported
 features.
 
+`/api/data/quality` returns the same inference as a `capabilities` object
+(`bar_volume`, `real_quotes`, `modeled_spread`, `spread`, `tick_flow`,
+`m1_source`), so a bid-only or zero-volume store is visible without inferring it
+from red counts. An empty/unconfigured slice returns `null` capabilities rather
+than all-false.
+
 `capabilities_from_frame(frame)` infers volume/quote availability from a raw
 provider frame. CSV exports without quotes are correctly reported as
 `real_quotes=False`, while the allowed spread model keeps `spread_*` usable.
