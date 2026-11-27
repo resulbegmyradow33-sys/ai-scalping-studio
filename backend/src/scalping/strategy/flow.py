@@ -17,10 +17,24 @@ def flow_series(flow_root: Path, symbol: str, timeframe: str, frame: pl.DataFram
     rule = _RULE.get(timeframe)
     if rule is None:
         raise ValueError(f"unsupported timeframe: {timeframe!r}")
+    if (
+        not symbol
+        or symbol.strip() != symbol
+        or "/" in symbol
+        or "\\" in symbol
+        or ".." in symbol
+    ):
+        raise ValueError(f"invalid flow symbol {symbol!r}")
     parts = sorted((Path(flow_root) / symbol / "M1").glob("*.parquet"))
     if not parts:
         raise ValueError(f"no flow partitions under {Path(flow_root) / symbol / 'M1'}")
-    flow = pl.concat([pl.read_parquet(p) for p in parts]).unique("ts").sort("ts")
+    pieces = [pl.read_parquet(part) for part in parts]
+    missing = sorted({"ts", "flow"} - set(pieces[0].columns))
+    if missing:
+        raise ValueError(f"flow partitions missing columns: {missing}")
+    # The bar store keeps the last duplicate on write; the flow side table must
+    # use the same rule instead of silently keeping the first row.
+    flow = pl.concat(pieces).unique(subset=["ts"], keep="last", maintain_order=True).sort("ts")
     if rule != "1m":
         flow = flow.group_by_dynamic("ts", every=rule, closed="left", label="left").agg(
             pl.col("flow").mean()
