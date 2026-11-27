@@ -141,6 +141,14 @@ rate and the delta versus the best member. Training N independent seeds and
 loading their run directories remains the open production step.
 
 
+`scalping.rl.seed_training.train_seed_runs(train, seeds)` owns the seed-list
+contract: one call per unique non-negative seed, in order, duplicate/bool seeds
+rejected before any training starts. The trainer is injected (`seed -> result`),
+so a script can wrap the PPO `train()` call while tests stay offline. It does
+not make the runs independent by itself; loading and evaluating them is still
+the caller's `evaluate_seed_ensemble` step.
+
+
 ## 6. Registry and artefacts
 
 `rl/registry.py` writes one directory per run:
