@@ -251,6 +251,7 @@ def evaluate_model(
     stress: tuple[float, ...] = (),
     regime_labels: pl.DataFrame | None = None,
     compute_regime: bool = True,
+    use_rejection_gate: bool = False,
     cancel_check: Callable[[], bool] | None = None,
 ) -> EvaluationResult:
     """Run the fitted classifier on one chronological split.
@@ -272,9 +273,21 @@ def evaluate_model(
     interruptible; a caller that needs a hard stop must wait for the current
     pass. ``InterruptedError`` means the evaluation stopped on request and no
     result should be published.
+
+    ``use_rejection_gate`` replaces the explicit ``threshold`` with the
+    validation-fitted threshold stored in ``result.rejection``. It refuses an
+    absent or unsatisfied gate, and a threshold below 0.5 (the policy's
+    directional floor) rather than silently clamping the fitted gate.
     """
     if split not in _SPLITS:
         raise ValueError(f"unknown split {split!r}; choose train/validation/test")
+    if use_rejection_gate:
+        gate = result.rejection
+        if gate is None or not gate.get("satisfied") or gate.get("threshold") is None:
+            raise ValueError(
+                "use_rejection_gate requires a satisfied rejection gate in the MLResult"
+            )
+        threshold = float(gate["threshold"])
     if not 0.5 <= threshold < 1.0 or not 0.5 <= exit_threshold <= 1.0:
         raise ValueError("thresholds must be in [0.5, 1)")
     if not 0.0 < window:

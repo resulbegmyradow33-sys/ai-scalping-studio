@@ -698,6 +698,7 @@ def _cmd_ml_evaluate(args: argparse.Namespace) -> None:
         stress=multipliers,
         regime_labels=regime_labels,
         compute_regime=args.regime,
+        use_rejection_gate=args.use_rejection_gate,
     )
     _print_json(
         {
@@ -1698,6 +1699,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     ml_evaluate.add_argument("--threshold", type=float, default=0.55)
     ml_evaluate.add_argument("--exit-threshold", type=float, default=0.55)
+    ml_evaluate.add_argument(
+        "--use-rejection-gate",
+        action="store_true",
+        help="use the satisfied threshold recorded by ml train",
+    )
     ml_evaluate.add_argument("--window", type=int, default=WINDOW)
     ml_evaluate.add_argument("--stress", default="", help="comma-separated cost multipliers")
     ml_evaluate.add_argument(
