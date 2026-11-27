@@ -1049,3 +1049,26 @@ def test_backtest_mask_actions_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out.is_file()
     assert "run_id" in json.loads(result.stdout)
+
+
+def test_data_validate_can_skip_outliers(tmp_path, monkeypatch, capsys):
+    _synth_two_days(tmp_path)
+    calls = []
+    original = cli.validate_bars
+
+    def spy(frame, **kwargs):
+        calls.append(kwargs)
+        return original(frame, **kwargs)
+
+    monkeypatch.setattr(cli, "validate_bars", spy)
+    args = SimpleNamespace(
+        symbol="XAUUSD",
+        timeframe="M1",
+        root=str(tmp_path),
+        include_outliers=False,
+    )
+
+    cli._cmd_data_validate(args)
+
+    assert calls[-1]["include_outliers"] is False
+    assert json.loads(capsys.readouterr().out)["ok"] is True
