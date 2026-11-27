@@ -277,6 +277,22 @@ are **not implemented**. The matrix has candle anatomy (`body_atr`,
 state; neither counts consecutive candles. Adding such a column needs a stated,
 falsifiable research question rather than a rename.
 
+### Flow and cumulative volume delta
+
+`scalping.data.flow.aggregate_flow(ticks, rule="1m")` turns a tick frame with
+`bid_volume`/`ask_volume` into a side table:
+
+| Column | Meaning |
+|---|---|
+| `buy_vol` / `sell_vol` | ask-side / bid-side volume sum in the bucket |
+| `flow` | `(buy - sell) / (buy + sell)`, `0` for an empty bucket |
+| `cvd` | cumulative `buy - sell` across the supplied frame |
+| `ticks` | tick count in the bucket |
+
+Buckets are left-closed and left-labelled. The table stays a **side channel**:
+adding flow to the stable bar schema would make every dataset depend on tick
+data that most sources do not have. The strategy layer joins it explicitly.
+
 ## Validation
 
 `scalping/data/validate.py` reports without repairing.
