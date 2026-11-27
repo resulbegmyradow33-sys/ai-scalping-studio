@@ -83,6 +83,7 @@ def run_id(
     session: str = "",
     mask_actions: bool = False,
     execution_delay: int = 0,
+    fill_price: str = "close",
     rejections: RejectionConfig | None = None,
 ) -> str:
     """First 12 hex chars of the run's sha256; identical inputs give identical ids.
@@ -102,6 +103,8 @@ def run_id(
     }
     if execution_delay:
         payload["execution_delay"] = int(execution_delay)
+    if fill_price != "close":
+        payload["fill_price"] = fill_price
     if rejections is not None:
         payload["rejections"] = rejections.to_dict()
     return hashlib.sha256(_canonical(payload)).hexdigest()[:12]
@@ -159,6 +162,7 @@ def run_backtest(
     symbol: str | None = None,
     mask_actions: bool = False,
     execution_delay: int = 0,
+    fill_price: str = "close",
     rejections: RejectionConfig | None = None,
 ) -> BacktestResult:
     """Run ``policy`` over ``features`` and return equity, trades and metrics.
@@ -177,8 +181,10 @@ def run_backtest(
     the simulator's mask forbids to HOLD before stepping, so an evaluation
     rollout records what the loop would execute instead of rejected orders; the
     flag is part of the run id. ``execution_delay=1`` queues BUY/SELL decisions
-    for the next bar's close (entry latency only); CLOSE stays immediate and
-    protective exits are never delayed. A non-zero delay is part of the run id.
+    for the next bar's close (entry latency); with ``fill_price="open"`` the
+    queue fills at the next bar's open and the fill bar's range is evaluated for
+    SL/TP. CLOSE is delayed too; protective exits are never delayed. A non-zero
+    delay or non-default fill price is part of the run id.
     ``rejections`` adds deterministic broker rejects at the fill bar (price gap
     after a delay, zero traded volume); it is part of the run id when set.
     """
@@ -201,6 +207,7 @@ def run_backtest(
         flow_obs=flow_obs,
         session=session,
         execution_delay=execution_delay,
+        fill_price=fill_price,
         rejections=rejections,
     )
     obs = sim.reset(_SEED)
@@ -230,6 +237,7 @@ def run_backtest(
         session=session_label,
         mask_actions=mask_actions,
         execution_delay=execution_delay,
+        fill_price=fill_price,
         rejections=rejections,
     )
     return BacktestResult(
@@ -241,6 +249,7 @@ def run_backtest(
             session=session_label,
             mask_actions=mask_actions,
             execution_delay=execution_delay,
+            fill_price=fill_price,
             rejections=rejections,
         ),
         metrics=compute(

@@ -63,7 +63,9 @@ execution assumptions can be enabled, both off by default:
 
 - **Entry latency** (`execution_delay=1`): BUY/SELL fills at the **next bar's
   close**; gates are re-checked at the fill bar and the signal/arm is frozen at
-  the decision bar. CLOSE is delayed too; SL/TP, timeout and kill exits stay immediate.
+  the decision bar. `fill_price="open"` fills at the next bar's open instead and
+  evaluates that bar's high/low for SL/TP immediately. CLOSE is delayed too;
+  timeout and kill exits stay immediate.
 - **Rejected orders** (`RejectionConfig`):
   - `max_gap_atr` rejects a delayed entry when the fill close moved more than
     `N × decision-bar ATR` (`info["blocked"] == "rejected_price_gap"`);

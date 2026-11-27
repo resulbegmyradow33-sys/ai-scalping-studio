@@ -29,8 +29,19 @@ def frame(n: int = 300, *, slope: float = 0.0, atr: float = 0.5) -> FeatureFrame
     )
 
 
-def sim(frame_: FeatureFrame, *, delay: int = 1, settings: Settings | None = None) -> Simulator:
-    instance = Simulator(frame_, settings or Settings(), execution_delay=delay)
+def sim(
+    frame_: FeatureFrame,
+    *,
+    delay: int = 1,
+    settings: Settings | None = None,
+    fill_price: str = "close",
+) -> Simulator:
+    instance = Simulator(
+        frame_,
+        settings or Settings(),
+        execution_delay=delay,
+        fill_price=fill_price,
+    )
     instance.reset(seed=1)
     return instance
 
@@ -194,3 +205,64 @@ def test_delay_range_is_validated(bad: int) -> None:
 def test_delay_rejects_bool() -> None:
     with pytest.raises(TypeError, match="execution_delay"):
         Simulator(frame(), Settings(), execution_delay=True)
+
+
+def open_frame(n: int = 300, *, atr: float = 5.0) -> FeatureFrame:
+    """Every bar opens two points below its close, with a wide enough low."""
+    base = frame(n, atr=atr)
+    ohlc = np.asarray(base.ohlc, dtype=np.float64).copy()
+    ohlc[:, 0] = ohlc[:, 3] - 2.0
+    ohlc[:, 2] = ohlc[:, 0] - 0.5
+    base.ohlc = ohlc
+    return base
+
+
+def test_next_open_fill_uses_the_open_quote() -> None:
+    instance = sim(open_frame(), fill_price="open")
+    decision_close = float(instance.features.ohlc[119, 3])
+    fill_open = float(instance.features.ohlc[120, 0])
+
+    instance.step(BUY)
+    filled = instance.step(HOLD).info["opened"]
+
+    assert filled is not None
+    expected = fill_open + 0.20 + 0.05 * 5.0
+    assert filled.entry_price == pytest.approx(expected)
+    assert filled.entry_price != pytest.approx(decision_close + 0.20 + 0.05 * 5.0)
+    assert filled.entry_ts == instance._ts(120)
+
+
+def test_next_open_fill_evaluates_the_fill_bar_stop() -> None:
+    frame_ = open_frame()
+    frame_.ohlc[120, 2] = 900.0  # open-to-low move crosses any long stop
+    instance = sim(frame_, fill_price="open")
+
+    instance.step(BUY)
+    result = instance.step(HOLD)
+
+    assert result.info["opened"] is not None
+    assert result.info["position"] is None
+    assert result.info["trade"] is not None
+    assert result.info["trade"].reason == "sl"
+
+
+def test_open_fill_requires_a_delay() -> None:
+    with pytest.raises(ValueError, match="requires execution_delay"):
+        Simulator(frame(), Settings(), execution_delay=0, fill_price="open")
+
+
+def test_fill_price_changes_the_run_identity() -> None:
+    policy = lambda obs: HOLD
+    close = run_backtest(
+        policy, frame(), Settings(), policy_name="hold", execution_delay=1
+    )
+    opened = run_backtest(
+        policy,
+        frame(),
+        Settings(),
+        policy_name="hold",
+        execution_delay=1,
+        fill_price="open",
+    )
+
+    assert close.run_id != opened.run_id

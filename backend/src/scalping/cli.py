@@ -985,6 +985,7 @@ def _cmd_backtest(args: argparse.Namespace) -> None:
         symbol=args.symbol,
         mask_actions=args.mask_actions,
         execution_delay=args.execution_delay,
+        fill_price=args.fill_price,
         rejections=_rejections(args),
     )
 
@@ -1671,7 +1672,13 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         choices=(0, 1),
         default=0,
-        help="1 queues BUY/SELL for the next bar's close (entry latency)",
+        help="1 queues BUY/SELL for the next bar (entry latency)",
+    )
+    backtest.add_argument(
+        "--fill-price",
+        choices=("close", "open"),
+        default="close",
+        help="delayed fill price: next close (default) or next open",
     )
     backtest.add_argument(
         "--max-gap-atr",

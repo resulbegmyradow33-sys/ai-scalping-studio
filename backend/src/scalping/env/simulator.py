@@ -271,14 +271,20 @@ class Simulator:
         flow_obs: bool = False,
         session: SessionSpec | None = None,
         execution_delay: int = 0,
+        fill_price: str = "close",
         rejections: RejectionConfig | None = None,
     ) -> None:
         if isinstance(execution_delay, bool) or not isinstance(execution_delay, int):
             raise TypeError(f"execution_delay must be an int, got {type(execution_delay).__name__}")
         if execution_delay not in (0, 1):
             raise ValueError(f"execution_delay must be 0 or 1, got {execution_delay!r}")
+        if fill_price not in ("close", "open"):
+            raise ValueError(f"fill_price must be 'close' or 'open', got {fill_price!r}")
+        if fill_price == "open" and execution_delay == 0:
+            raise ValueError("fill_price='open' requires execution_delay=1")
         self.features = features
         self.execution_delay = execution_delay
+        self.fill_price = fill_price
         self.rejections = rejections
         self._pending_entry: _PendingEntry | None = None
         self.session_spec = session
@@ -832,28 +838,49 @@ class Simulator:
         return self._strategy_signals is None or chosen < 0
 
     def _fill_pending(self, bar: Bar) -> tuple[Trade | None, Position | None, str | None]:
-        """Fill the queued BUY/SELL at this bar, if any."""
+        """Fill the queued BUY/SELL/CLOSE at this bar, if any.
+
+        With ``fill_price='open'`` the quote is this bar's open plus the same
+        spread; the entry bar's own high/low are then evaluated immediately, so
+        a stop that the open-to-close move touched is still booked on the fill
+        bar. The default ``'close'`` keeps the existing timing and does not
+        re-scan the fill bar.
+        """
         pending = self._pending_entry
         self._pending_entry = None
         if pending is None:
             return None, None, None
+        fill_bar = bar
+        if self.fill_price == "open":
+            fill_bar = replace(
+                bar,
+                close=bar.open,
+                bid_close=bar.open,
+                ask_close=bar.open + bar.spread,
+            )
         if self.rejections is not None and pending.action in (_BUY, _SELL):
-            if self.rejections.reject_zero_volume and bar.volume <= 0:
+            if self.rejections.reject_zero_volume and fill_bar.volume <= 0:
                 return None, None, "rejected_no_liquidity"
             if (
                 self.rejections.max_gap_atr > 0.0
                 and pending.decision_atr > 0.0
-                and abs(bar.close - pending.decision_close)
+                and abs(fill_bar.close - pending.decision_close)
                 > self.rejections.max_gap_atr * pending.decision_atr
             ):
                 return None, None, "rejected_price_gap"
-        return self._apply(
+        trade, opened, blocked = self._apply(
             pending.action,
-            bar,
+            fill_bar,
             strategy=pending.strategy,
             arm=pending.arm,
             signal_index=pending.decision_bar,
         )
+        if self.fill_price == "open" and opened is not None and self.broker.position is not None:
+            closed = self.broker.update(bar)
+            if closed is not None:
+                self._book(closed)
+                trade = closed
+        return trade, opened, blocked
 
     def _apply(
         self,
