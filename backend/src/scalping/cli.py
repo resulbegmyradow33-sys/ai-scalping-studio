@@ -322,7 +322,12 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    report = validate_bars(frame, symbol=args.symbol, timeframe=args.timeframe)
+    report = validate_bars(
+        frame,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        include_outliers=args.include_outliers,
+    )
     _print_json(report.to_dict())
     if not report.ok:
         raise _ExitCode(2)
@@ -1542,6 +1547,13 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
     validate.add_argument("--timeframe", default="M1")
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
+    validate.add_argument(
+        "--no-outliers",
+        action="store_false",
+        dest="include_outliers",
+        default=True,
+        help="skip the robust-z outlier pass for a large store",
+    )
     validate.set_defaults(handler=_cmd_data_validate)
 
     ml = commands.add_parser("ml", help="classical machine-learning experiments")
