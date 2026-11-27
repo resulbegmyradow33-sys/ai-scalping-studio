@@ -26,6 +26,22 @@ feature builder / labels / simulator
 The store is the only durable data layer. `runs/` is runtime state and is
 gitignored; data stores are local and gitignored too.
 
+### Data contract (current)
+
+- **Coverage:** XAUUSD is the only symbol with a usable historical store; the
+  other eight providers are blocked on free-data/licence decisions (#15).
+- **Depth:** bar OHLC and top-of-book quotes only. There is **no L2 order-book
+  data**, no order-book imbalance and no absorption/price-impact feature.
+  `tick_flow` is never inferred from bars.
+- **Bid-only files:** a null `ask_close`/`spread` is allowed, but it is a
+  `missing_quotes` warning and `real_quotes=false`; the spread model fills the
+  missing side. It is not a clean quote store.
+- **Provenance:** a slice used for search or promotion needs a sidecar
+  (source, synthetic flag, checksum, dataset id). A missing sidecar is a
+  warning, not an invented clean source.
+- **Scope:** real-money execution is out of scope and stays disabled; paper
+  execution is the only runtime path.
+
 ### Feature availability
 
 `scalping/features/availability.py` stops a dataset from claiming features its
