@@ -133,8 +133,13 @@ action = ensemble.act(observation)
 - Averaging keeps uncertainty proportional; a single confident member cannot be
   outvoted 2-to-1 by two unsure ones as easily as with hard voting.
 
-Training N seeds, loading their run directories and comparing the ensemble to
-each member on the simulator is the open evaluation slice.
+
+`scalping.rl.seed_eval.evaluate_seed_ensemble(policies, features, settings)`
+runs every member and the averaged ensemble over the same bars with the same
+simulator settings, reporting trades, net profit, expectancy, PF, drawdown, win
+rate and the delta versus the best member. Training N independent seeds and
+loading their run directories remains the open production step.
+
 
 ## 6. Registry and artefacts
 
