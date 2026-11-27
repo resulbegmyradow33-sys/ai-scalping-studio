@@ -146,7 +146,7 @@ holdout spend, champion, paper run.
 - [ ] Return/volatility/regime/trade-outcome tasks.
 - [x] Purged time-series CV with embargo.
 - [x] Reliability curve, ECE and guarded MCE.
-- [ ] Calibration thresholds / probability rejection gate.
+- [ ] PARTIAL: temperature calibration + precision-target rejection gate; wiring it into promotion is open.
 - [x] Feature importance and ablation (#184 importances, #188 ablation runner).
 - [x] Simulator/cost-stress trading evaluation for a saved classifier.
 - [x] Regime breakdown of the trading evaluation (as-of join, partition identity tested).
