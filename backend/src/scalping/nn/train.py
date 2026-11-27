@@ -267,6 +267,7 @@ def train_classifier(
     path = Path(checkpoint)
     if not _RUN_SLOT.acquire():
         raise TrainError("another training job is already running in this process")
+    rng_state = torch.random.get_rng_state()
     try:
         x_train, y_train, x_val, y_val, classes = _validate_split(data, cfg)
         device = select_device(cfg.device)
@@ -384,7 +385,7 @@ def train_classifier(
                 stopped = "early_stop"
                 break
 
-        if not path.exists():
+        if not path.exists() or stopped in {"cancelled", "time_limit"}:
             _atomic_save(
                 path,
                 {
@@ -417,6 +418,7 @@ def train_classifier(
             dataset_id=data.dataset_id,
         )
     finally:
+        torch.random.set_rng_state(rng_state)
         _RUN_SLOT.release()
 
 
