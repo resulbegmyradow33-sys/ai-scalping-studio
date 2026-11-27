@@ -134,6 +134,32 @@ headline `validation` and `test` blocks keep their raw numbers, and the
 `calibration` object is a separate diagnostic; a fitted temperature never
 substitutes for walk-forward, cost-stress or OOS evidence.
 
+## Precision-target rejection gate (optional)
+
+Calibration fixes the probability scale; it does not decide when a prediction
+is too weak to trade. `ml/rejection.py` selects a top-probability threshold on
+validation rows: the lowest threshold whose accepted rows reach
+`target_precision`, optionally with a `min_coverage` floor.
+
+```python
+from scalping.ml.rejection import select_precision_threshold
+
+choice = select_precision_threshold(
+    validation_probabilities, validation_labels,
+    target_precision=0.60, min_coverage=0.02,
+)
+```
+
+The sweep accepts whole tie groups, so rows sharing the boundary probability
+are never split. If no threshold satisfies both floors, the result has
+`satisfied=False` and `threshold=None`; the caller must keep rejecting rather
+than silently trade a gate that failed its own validation. `rejection_summary`
+reports precision and coverage for a fixed threshold, and `RejectionGate`
+bundles the threshold with its validation profile.
+
+This is a selection rule, not evidence: a threshold fitted on validation still
+needs an untouched window, cost stress and a live/paper check.
+
 ## Commands
 
 ```bash
