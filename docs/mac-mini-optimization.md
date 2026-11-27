@@ -231,3 +231,18 @@ without the real store, and it produces comparable local numbers when given the
 same machine and inputs. Acceptance still requires the P6 end-to-end run on real
 XAUUSD data, measured on the target Mac mini, with code/test/training/
 validation/paper evidence reported separately.
+
+
+### Operator profile
+
+```bash
+uv run python -m scripts.profile_nn --model gru --window 60 --batch 8 \
+  --steps 3 --device cpu --out ../runs/profile-gru.json
+```
+
+The JSON reports parameter count, the top operators by CPU time and by self CPU
+memory, and the profiler's table. It profiles a fixed random batch/seed for
+diagnosis; it is not an accuracy or trading result. `--device mps` profiles MPS
+activities when the backend works (no silent CPU fallback for an explicit
+request).
+
