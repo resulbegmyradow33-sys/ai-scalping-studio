@@ -204,7 +204,7 @@ class _BarPrep(NamedTuple):
 
 
 class _PendingEntry(NamedTuple):
-    """A BUY/SELL decided on one bar and filled on the next, when enabled."""
+    """A BUY/SELL/CLOSE decided on one bar and applied on the next."""
 
     action: int
     decision_bar: int
@@ -643,11 +643,10 @@ class Simulator:
 
         if self.execution_delay:
             trade, opened, blocked = self._fill_pending(bar)
-            if action == _CLOSE:
-                close_trade, close_opened, close_blocked = self._apply(_CLOSE, bar)
-                trade = close_trade if close_trade is not None else trade
-                opened = opened if opened is not None else close_opened
-                blocked = blocked if blocked is not None else close_blocked
+            if action == _CLOSE and self.broker.position is None:
+                # A close with nothing open is rejected now; queueing it would
+                # only turn into the same rejection one bar later.
+                _, _, blocked = self._apply(_CLOSE, bar)
         else:
             trade, opened, blocked = self._apply(action, bar)
 
@@ -733,7 +732,10 @@ class Simulator:
         self._reason = reason
         self._equity_value = equity
         if self.execution_delay:
-            if not self._done and action in (_BUY, _SELL):
+            if not self._done and (
+                action in (_BUY, _SELL)
+                or (action == _CLOSE and self.broker.position is not None)
+            ):
                 self._pending_entry = _PendingEntry(
                     action=action,
                     decision_bar=decision_bar,
@@ -835,7 +837,7 @@ class Simulator:
         self._pending_entry = None
         if pending is None:
             return None, None, None
-        if self.rejections is not None:
+        if self.rejections is not None and pending.action in (_BUY, _SELL):
             if self.rejections.reject_zero_volume and bar.volume <= 0:
                 return None, None, "rejected_no_liquidity"
             if (

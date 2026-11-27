@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from scalping.backtest.engine import data_hash, run_backtest, run_id
-from scalping.config import RiskConfig, Settings
+from scalping.config import Settings
 from scalping.env.simulator import Simulator
 from scalping.env.trading_env import TradingEnv
 from scalping.features.build import FeatureFrame
@@ -84,16 +84,29 @@ def test_fill_uses_the_execution_bar_price() -> None:
     assert filled.entry_price != pytest.approx(decision_close + 0.20 + 0.05 * 5.0)
 
 
-def test_close_stays_immediate_and_timeout_is_not_delayed() -> None:
-    settings = Settings(risk=RiskConfig(max_bars_in_trade=3))
-    instance = sim(frame(), settings=settings)
+def test_close_is_delayed_but_timeout_is_not() -> None:
+    instance = sim(frame())
     instance.step(BUY)
     instance.step(HOLD)  # fill at 120
 
-    closed = instance.step(CLOSE)
+    decision = instance.step(CLOSE)
+    assert decision.info["trade"] is None
+    assert decision.info["position"] is not None
+    assert instance.pending_action == CLOSE
 
-    assert closed.info["trade"] is not None
-    assert closed.info["trade"].reason == "manual"
+    filled = instance.step(HOLD)
+    assert filled.info["trade"] is not None
+    assert filled.info["trade"].reason == "manual"
+    assert filled.info["trade"].exit_ts == instance._ts(122)
+    assert instance.pending_action is None
+
+
+def test_close_while_flat_is_rejected_immediately() -> None:
+    instance = sim(frame())
+
+    result = instance.step(CLOSE)
+
+    assert result.info["blocked"] == "no_position"
     assert instance.pending_action is None
 
 

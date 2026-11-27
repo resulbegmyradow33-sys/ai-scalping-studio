@@ -199,9 +199,8 @@ branches; cite them as evidence, not as repository files.
 - [ ] DQN evaluation.
 - [ ] A2C baseline.
 - [ ] Seed ensembles / policy averaging.
-- [ ] PARTIAL: entry latency (`execution_delay=1`: BUY/SELL fill at the
-      next bar's close, CLOSE immediate, protective exits never delayed);
-      delayed closes and next-open fills are still open.
+- [ ] PARTIAL: execution latency (`execution_delay=1`: BUY/SELL and CLOSE fill at
+      the next bar's close; protective exits never delayed); next-open fills are open.
 - [ ] Reward ablation report.
 - [x] `docs/reinforcement-learning.md`.
 
@@ -262,7 +261,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Parameter sensitivity (one-axis spread/slippage/commission grid).
 - [ ] Ablation runner.
 - [ ] Regime-specific reports.
-- [x] Execution delay (entry latency) and rejected-order assumptions; next-open fills and delayed closes remain Phase 8 work.
+- [x] Execution delay (entries and closes) and rejected-order assumptions; next-open fills remain Phase 8 work.
 - [ ] Partial fills only where data supports them.
 - [x] `docs/risk-management.md`, `docs/backtesting-methodology.md`.
 - [x] Tests: kill switch, embargo, Monte Carlo determinism.
