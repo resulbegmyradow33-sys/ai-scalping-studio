@@ -26,6 +26,14 @@ feature builder / labels / simulator
 The store is the only durable data layer. `runs/` is runtime state and is
 gitignored; data stores are local and gitignored too.
 
+`ParquetStore.coverage()` and `/api/data/status` do not materialise the bar
+frame. Coverage reads each partition's Parquet row-group statistics (rows,
+first/last `ts`) and falls back to scanning only the `ts` column when a
+statistics block is missing. `/api/data/status` reads the provider list through
+`ParquetStore.providers()`, which scans only `provider`. `/api/data/validate`
+and `/api/data/quality` still read the full requested slice because they
+inspect every bar.
+
 ### Feature availability
 
 `scalping/features/availability.py` stops a dataset from claiming features its

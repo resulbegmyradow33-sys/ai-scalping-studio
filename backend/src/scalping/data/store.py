@@ -33,6 +33,77 @@ class Coverage:
     rows: int
 
 
+class _MetadataUnavailable(Exception):
+    """A partition has no usable statistics; the caller should scan it."""
+
+
+def _metadata_partition_coverage(path: Path) -> tuple[int, datetime | None, datetime | None]:
+    """Rows and ``ts`` bounds from Parquet row-group statistics only.
+
+    No column data is decoded. ``ts`` statistics are typed by pyarrow from the
+    logical timestamp type, so the bounds come back as datetimes. A missing
+    statistic or a non-timestamp value raises :class:`_MetadataUnavailable` and
+    the caller falls back to a projection scan.
+    """
+    try:
+        import pyarrow.parquet as pq  # type: ignore[import-untyped]
+    except ImportError as error:  # pragma: no cover - pyarrow is a dependency
+        raise _MetadataUnavailable("pyarrow is not available") from error
+    metadata = pq.ParquetFile(path).metadata
+    rows = int(metadata.num_rows)
+    if rows == 0:
+        return 0, None, None
+    column = next(
+        (index for index in range(metadata.num_columns) if metadata.schema.column(index).name == "ts"),
+        None,
+    )
+    if column is None:
+        raise _MetadataUnavailable("partition has no ts column")
+    first: datetime | None = None
+    last: datetime | None = None
+    for group in range(metadata.num_row_groups):
+        statistics = metadata.row_group(group).column(column).statistics
+        if statistics is None or not statistics.has_min_max:
+            raise _MetadataUnavailable("partition has no ts statistics")
+        low, high = statistics.min, statistics.max
+        if not isinstance(low, datetime) or not isinstance(high, datetime):
+            raise _MetadataUnavailable("ts statistics are not datetimes")
+        low, high = _as_utc(low), _as_utc(high)
+        if low is None or high is None:  # pragma: no cover - datetime input
+            raise _MetadataUnavailable("ts statistics are empty")
+        first = low if first is None or low < first else first
+        last = high if last is None or high > last else last
+    return rows, first, last
+
+
+def _scan_partition_coverage(path: Path) -> tuple[int, datetime | None, datetime | None]:
+    """Projection-scan fallback: read only ``ts``, never the full bar row."""
+    frame = (
+        pl.scan_parquet(path)
+        .select(
+            pl.len().alias("rows"),
+            pl.col("ts").min().alias("first_ts"),
+            pl.col("ts").max().alias("last_ts"),
+        )
+        .collect()
+    )
+    rows = int(frame["rows"][0])
+    first = frame["first_ts"][0]
+    last = frame["last_ts"][0]
+    if first is not None and not isinstance(first, datetime):
+        raise TypeError("ts column must hold datetimes")
+    if last is not None and not isinstance(last, datetime):
+        raise TypeError("ts column must hold datetimes")
+    return rows, _as_utc(first), _as_utc(last)
+
+
+def _partition_coverage(path: Path) -> tuple[int, datetime | None, datetime | None]:
+    try:
+        return _metadata_partition_coverage(path)
+    except _MetadataUnavailable:
+        return _scan_partition_coverage(path)
+
+
 def _as_utc(value: datetime | None) -> datetime | None:
     """Treat naive bounds as UTC so they compare with the stored ``ts`` column."""
     if value is None:
@@ -160,12 +231,32 @@ class ParquetStore:
         return frame.sort("ts")
 
     def coverage(self, symbol: str, timeframe: str = "M1") -> Coverage:
-        """First/last timestamp and row count across every partition."""
-        frame = self.read(symbol, timeframe)
-        if frame.is_empty():
-            return Coverage(first_ts=None, last_ts=None, rows=0)
-        first = frame.get_column("ts").min()
-        last = frame.get_column("ts").max()
-        if not isinstance(first, datetime) or not isinstance(last, datetime):
-            raise TypeError("ts column must hold datetimes")
-        return Coverage(first_ts=first, last_ts=last, rows=frame.height)
+        """First/last timestamp and row count across every partition.
+
+        Reads Parquet row-group statistics; a partition without them is scanned
+        for ``ts`` only. The full bar row is never materialised.
+        """
+        rows = 0
+        first: datetime | None = None
+        last: datetime | None = None
+        for path in self._partitions(symbol, timeframe, None, None):
+            part_rows, part_first, part_last = _partition_coverage(path)
+            rows += part_rows
+            if part_first is not None and (first is None or part_first < first):
+                first = part_first
+            if part_last is not None and (last is None or part_last > last):
+                last = part_last
+        return Coverage(first_ts=first, last_ts=last, rows=rows)
+
+    def providers(self, symbol: str, timeframe: str = "M1") -> list[str]:
+        """Sorted provider labels across the store, reading only ``provider``."""
+        paths = self._partitions(symbol, timeframe, None, None)
+        if not paths:
+            return []
+        frame = (
+            pl.scan_parquet(paths)
+            .select(pl.col("provider"))
+            .unique()
+            .collect()
+        )
+        return sorted(frame.get_column("provider").drop_nulls().to_list())

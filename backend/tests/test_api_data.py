@@ -108,3 +108,22 @@ def test_csv_import_is_confined_to_the_imports_directory(tmp_path) -> None:
     assert traversal.status_code == 422
     assert missing.status_code == 422
     assert "imports" in missing.json()["detail"]
+
+
+def test_status_does_not_materialise_the_bar_frame(tmp_path, monkeypatch) -> None:
+    from scalping.data.store import ParquetStore
+
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        assert client.post("/api/data/download", json=BODY).status_code == 200
+
+        def fail(*args, **kwargs):
+            raise AssertionError("status must not read the full frame")
+
+        monkeypatch.setattr(ParquetStore, "read", fail)
+        status = client.get("/api/data/status", params={"symbol": "XAUUSD"})
+
+    assert status.status_code == 200
+    body = status.json()
+    assert body["rows"] > 0
+    assert body["first_ts"] <= body["last_ts"]
+    assert body["providers"]

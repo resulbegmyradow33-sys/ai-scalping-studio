@@ -192,10 +192,9 @@ def _quality_status(
 def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> DataStatusResponse:
     _checked_ids(symbol, timeframe)
     store = request.app.state.store
-    frame = store.read(symbol, timeframe)
+    coverage = store.coverage(symbol, timeframe)
     provenance = load_provenance(store.root, symbol, timeframe)
-    rows = frame.height
-    if rows == 0:
+    if coverage.rows == 0:
         return DataStatusResponse(
             symbol=symbol,
             timeframe=timeframe,
@@ -205,13 +204,13 @@ def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> Da
             providers=[],
             provenance=None if provenance is None else provenance.to_dict(),
         )
-    first = frame.get_column("ts").min()
-    last = frame.get_column("ts").max()
-    providers = sorted(frame.get_column("provider").unique().to_list())
+    first = coverage.first_ts
+    last = coverage.last_ts
+    providers = store.providers(symbol, timeframe)
     return DataStatusResponse(
         symbol=symbol,
         timeframe=timeframe,
-        rows=rows,
+        rows=coverage.rows,
         first_ts=first.isoformat() if first is not None else None,
         last_ts=last.isoformat() if last is not None else None,
         providers=providers,
