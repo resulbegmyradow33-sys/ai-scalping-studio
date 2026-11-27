@@ -57,7 +57,15 @@ class OutlierConfig:
 
 @dataclass(frozen=True, slots=True)
 class ReconcileConfig:
-    """Absolute tolerances in price units and spread units."""
+    """Absolute tolerances in price units and spread units.
+
+    Both defaults are ``0.0`` on purpose: a comparison is exact unless the
+    caller states a tolerance. Two independent feeds usually need a small
+    non-zero price/spread tolerance, because otherwise every last-digit
+    difference is an error. Set them explicitly for a cross-provider check;
+    leaving them at zero keeps the default strict for tests and same-source
+    replays.
+    """
 
     price_tolerance: float = 0.0
     spread_tolerance: float = 0.0

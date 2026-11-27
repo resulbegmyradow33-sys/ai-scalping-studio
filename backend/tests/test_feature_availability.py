@@ -108,3 +108,34 @@ def test_group_columns_preserves_the_registry_order() -> None:
     assert "volume_ratio_20" in columns
     with pytest.raises(ValueError, match="unknown feature groups"):
         group_columns(("price", "magic"))
+
+
+def test_empty_frame_has_no_capabilities() -> None:
+    empty = synthetic_frame().head(0)
+
+    caps = capabilities_from_frame(empty)
+
+    assert caps.bar_volume is False
+    assert caps.real_quotes is False
+    assert caps.modeled_spread is False
+    assert caps.tick_flow is False
+    assert caps.m1_source is False
+    assert caps.spread is False
+
+
+def test_every_prefixed_feature_has_a_capability_requirement() -> None:
+    from scalping.features.availability import COLUMN_REQUIREMENTS, group_columns
+
+    rules = {
+        "volume_": "bar_volume",
+        "spread_": "spread",
+        "m5_": "m1_source",
+        "m15_": "m1_source",
+        "m30_": "m1_source",
+        "h4_": "m1_source",
+    }
+    for column in group_columns(None):
+        for prefix, capability in rules.items():
+            if column.startswith(prefix):
+                required = COLUMN_REQUIREMENTS.get(column, frozenset())
+                assert capability in required, f"{column} must require {capability}"

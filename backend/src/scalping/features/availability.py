@@ -146,6 +146,17 @@ def capabilities_from_frame(df: pl.DataFrame) -> Capabilities:
     can set it. Quotes count as real when every row carries a non-null
     ``ask_close``/``spread`` pair.
     """
+    if df.is_empty():
+        # No rows means no evidence for any capability. In particular an empty
+        # frame must not look like a complete quote file because null counts
+        # sum to zero.
+        return Capabilities(
+            bar_volume=False,
+            real_quotes=False,
+            modeled_spread=False,
+            tick_flow=False,
+            m1_source=False,
+        )
     required = ("bid_close", "ask_close", "spread")
     has_quotes = (
         all(name in df.columns for name in required)

@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import cache
 from typing import Final
 
 from scalping.types import ContractSpec
@@ -326,17 +327,15 @@ def parse_session(text: str) -> SessionSpec:
     )
 
 
-_SESSION_CACHE: dict[str, SessionSpec] = {}
+@cache
+def _parse_session_cached(raw: str) -> SessionSpec:
+    """Parse one raw session string once; the lru_cache is thread-safe."""
+    return parse_session(raw)
 
 
 def session_for(symbol: str) -> SessionSpec:
     """Weekly session for a registered symbol, parsed once and cached."""
-    raw = get_symbol(symbol).sessions
-    cached = _SESSION_CACHE.get(raw)
-    if cached is None:
-        cached = parse_session(raw)
-        _SESSION_CACHE[raw] = cached
-    return cached
+    return _parse_session_cached(get_symbol(symbol).sessions)
 
 
 def symbols() -> tuple[str, ...]:

@@ -220,12 +220,28 @@ def data_status(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> Da
 
 
 @router.get("/api/data/validate")
-def data_validate(request: Request, symbol: str, timeframe: str = TIMEFRAME) -> dict[str, Any]:
-    """Structural validation report; explicit because it reads the full slice."""
+def data_validate(
+    request: Request,
+    symbol: str,
+    timeframe: str = TIMEFRAME,
+    include_outliers: bool = Query(
+        default=True, description="run the robust-z outlier pass over the slice"
+    ),
+) -> dict[str, Any]:
+    """Structural validation report; explicit because it reads the full slice.
+
+    ``include_outliers=false`` skips only the robust-z pass, which needs a
+    sort/median over the whole slice; the structural checks still run.
+    """
     _checked_ids(symbol, timeframe)
     store = request.app.state.store
     frame = store.read(symbol, timeframe)
-    return validate_bars(frame, symbol=symbol, timeframe=timeframe).to_dict()
+    return validate_bars(
+        frame,
+        symbol=symbol,
+        timeframe=timeframe,
+        include_outliers=include_outliers,
+    ).to_dict()
 
 
 @router.get("/api/data/quality", response_model=DataQualityResponse)
