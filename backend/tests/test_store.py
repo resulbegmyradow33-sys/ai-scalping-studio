@@ -253,3 +253,70 @@ def test_derived_m30_store_matches_resample(tmp_path):
     assert stored["ts"].to_list() == expected["ts"].to_list()
     assert stored["volume"].to_list() == [30, 30, 30, 30]
     assert stored["close"].to_list() == expected["close"].to_list()
+
+
+def _month_bars(year: int, month: int, n: int = 3) -> pl.DataFrame:
+    ts = [datetime(year, month, 1, 0, minute, tzinfo=UTC) for minute in range(n)]
+    return pl.DataFrame(
+        {
+            "ts": ts,
+            "open": [1.0] * n,
+            "high": [2.0] * n,
+            "low": [0.5] * n,
+            "close": [1.5] * n,
+            "bid_close": [1.4] * n,
+            "ask_close": [1.6] * n,
+            "spread": [0.2] * n,
+            "volume": [1] * n,
+        }
+    )
+
+
+def test_coverage_matches_full_read_across_partitions(tmp_path):
+    s = ParquetStore(tmp_path)
+    for year, month in ((2025, 12), (2026, 1), (2026, 2)):
+        s.write("XAUUSD", "M1", _month_bars(year, month))
+
+    frame = s.read("XAUUSD", "M1")
+    cov = s.coverage("XAUUSD", "M1")
+
+    assert cov.rows == frame.height == 9
+    assert cov.first_ts == frame["ts"].min()
+    assert cov.last_ts == frame["ts"].max()
+
+
+def test_coverage_never_calls_read(tmp_path, monkeypatch):
+    s = ParquetStore(tmp_path)
+    s.write("XAUUSD", "M1", _month_bars(2026, 1))
+
+    def fail(*args, **kwargs):
+        raise AssertionError("coverage must not materialise the frame")
+
+    monkeypatch.setattr(ParquetStore, "read", fail)
+    cov = s.coverage("XAUUSD", "M1")
+
+    assert (cov.rows, cov.first_ts.minute, cov.last_ts.minute) == (3, 0, 2)
+
+
+def test_coverage_falls_back_when_statistics_are_missing(tmp_path, monkeypatch):
+    import scalping.data.store as store_module
+
+    s = ParquetStore(tmp_path)
+    s.write("XAUUSD", "M1", _month_bars(2026, 1))
+
+    def unavailable(path):
+        raise store_module._MetadataUnavailable("no statistics")
+
+    monkeypatch.setattr(store_module, "_metadata_partition_coverage", unavailable)
+    cov = s.coverage("XAUUSD", "M1")
+
+    assert (cov.rows, cov.first_ts.minute, cov.last_ts.minute) == (3, 0, 2)
+
+
+def test_providers_reads_only_the_provider_column(tmp_path):
+    s = ParquetStore(tmp_path)
+    s.write("XAUUSD", "M1", _month_bars(2026, 1).with_columns(pl.lit("csv").alias("provider")))
+    s.write("XAUUSD", "M1", _month_bars(2026, 2).with_columns(pl.lit("synthetic").alias("provider")))
+
+    assert s.providers("XAUUSD", "M1") == ["csv", "synthetic"]
+    assert s.providers("XAUUSD", "M5") == []
