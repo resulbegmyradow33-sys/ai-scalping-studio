@@ -108,3 +108,24 @@ def test_csv_import_is_confined_to_the_imports_directory(tmp_path) -> None:
     assert traversal.status_code == 422
     assert missing.status_code == 422
     assert "imports" in missing.json()["detail"]
+
+
+def test_validate_passes_the_outlier_opt_out(tmp_path, monkeypatch) -> None:
+    from scalping.api import routes
+
+    calls = []
+    original = routes.validate_bars
+
+    def spy(frame, **kwargs):
+        calls.append(kwargs)
+        return original(frame, **kwargs)
+
+    monkeypatch.setattr(routes, "validate_bars", spy)
+    with TestClient(create_app(data_root=tmp_path)) as client:
+        assert client.post("/api/data/download", json=BODY).status_code == 200
+        report = client.get(
+            "/api/data/validate", params={"symbol": "XAUUSD", "include_outliers": "false"}
+        )
+
+    assert report.status_code == 200
+    assert calls[-1]["include_outliers"] is False
