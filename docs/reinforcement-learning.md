@@ -44,6 +44,20 @@ The drawdown term charges **new depth only**, not every bar at depth, so
 `risk_ok` is a one-time credit on the same gate-approved step. A reward ablation
 report across these terms is still open.
 
+### Realized-reward ablation
+
+`scalping.rl.reward.reward_breakdown(policy, features, settings)` replays one
+trajectory and reconstructs the four reward terms from the public step output
+and the documented formula: equity delta, drawdown penalty, entry penalty and
+risk bonus. It checks that the reconstruction matches the returned clipped
+reward per step (maximum error is part of the report).
+
+It then reports counterfactual totals with one term removed (`no_equity`,
+`no_drawdown`, `no_entry`, `no_risk`) and `equity_only`. The trajectory is
+fixed: this measures how much of **this run's** reward came from each term, not
+what a differently rewarded policy would learn. Retraining variants remain
+open.
+
 ## 3. Training
 
 `rl/train.py` uses stable-baselines3 PPO:
