@@ -46,6 +46,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from math import isfinite
+from typing import NamedTuple
 
 import numpy as np
 import polars as pl
@@ -406,6 +407,80 @@ def _feature_stamps(features: FeatureFrame) -> list[datetime]:
     ]
 
 
+class _JoinedLabels(NamedTuple):
+    """Valid labels already paired with the feature row they refer to."""
+
+    row: np.ndarray
+    strategy: np.ndarray
+    arm: np.ndarray
+    exit_index: np.ndarray
+    reward: np.ndarray
+
+
+def _join_labels(
+    labels: pl.DataFrame, features: FeatureFrame, *, require_exit_inside: bool
+) -> _JoinedLabels:
+    """Join labels to feature rows on the UTC microsecond timestamp.
+
+    This replaces the former per-label dictionary probe. The stamp is reduced
+    to integer microseconds, so a naive value is read as UTC and an aware value
+    is converted, exactly like :func:`_utc`. Duplicate feature stamps keep the
+    **last** row, matching the old ``{stamp: index}`` map. A label whose stamp
+    is absent is dropped; when ``require_exit_inside`` is set, a label whose
+    exit bar is past the frame is dropped too (it cannot be observed there).
+
+    Rows are returned in label order. ``strategy``, ``bars`` and ``r_multiple``
+    are validated on the surviving rows only, matching the old loop that read
+    ``bars``/``r_multiple`` after resolving the timestamp.
+    """
+    required = {"ts", "strategy", "bars", "r_multiple"}
+    missing = sorted(required - set(labels.columns))
+    if missing:
+        raise ValueError(f"labels missing columns: {missing}")
+    height = int(features.X.shape[0])
+
+    stamps = np.ascontiguousarray(features.ts).astype("datetime64[us]").astype(np.int64)
+    frame = pl.DataFrame(
+        {
+            "ts_us": stamps,
+            "row": np.arange(stamps.shape[0], dtype=np.int64),
+        }
+    ).unique(subset="ts_us", keep="last", maintain_order=True)
+    work = (
+        labels.select(
+            pl.int_range(0, pl.len(), dtype=pl.Int64).alias("label_row"),
+            pl.col("ts").cast(pl.Datetime("us")).cast(pl.Int64).alias("ts_us"),
+            pl.col("strategy").cast(pl.String).alias("strategy"),
+            pl.col("bars").cast(pl.Int64).alias("bars"),
+            pl.col("r_multiple").cast(pl.Float64).alias("r_multiple"),
+        )
+        .join(frame, on="ts_us", how="inner", maintain_order="left")
+        .with_columns((pl.col("row") + pl.col("bars")).alias("exit_index"))
+    )
+    if work["bars"].null_count() or work["r_multiple"].null_count():
+        raise ValueError("labels have a null bars/r_multiple on a matched row")
+    if require_exit_inside:
+        work = work.filter(pl.col("exit_index") < height)
+
+    arms = {strategy.value: index for index, strategy in enumerate(ALL_STRATEGIES)}
+    unknown = sorted(set(work["strategy"].drop_nulls().to_list()) - set(arms))
+    if work["strategy"].null_count() or unknown:
+        raise ValueError(f"labels contain an unknown strategy: {unknown or [None]}")
+    work = work.with_columns(
+        pl.col("strategy").replace_strict(arms, return_dtype=pl.Int64).alias("arm")
+    )
+    if not work["label_row"].is_sorted():
+        work = work.sort("label_row")
+
+    return _JoinedLabels(
+        row=work["row"].to_numpy(),
+        strategy=work["strategy"].to_numpy(),
+        arm=work["arm"].to_numpy(),
+        exit_index=work["exit_index"].to_numpy(),
+        reward=work["r_multiple"].to_numpy(),
+    )
+
+
 def bandit_training_data(
     features: FeatureFrame, labels: pl.DataFrame
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -419,42 +494,15 @@ def bandit_training_data(
     matching :func:`context_matrix`. An empty result keeps the context width so
     ``fit_offline`` accepts it as a no-op batch.
     """
-    required = {"ts", "strategy", "bars", "r_multiple"}
-    missing = sorted(required - set(labels.columns))
-    if missing:
-        raise ValueError(f"labels missing columns: {missing}")
-
-    height = int(features.X.shape[0])
-    positions = {_utc(stamp): index for index, stamp in enumerate(_feature_stamps(features))}
-    arm_index = {strategy.value: index for index, strategy in enumerate(ALL_STRATEGIES)}
-
-    rows: list[int] = []
-    arms: list[int] = []
-    rewards: list[float] = []
-    for row in labels.iter_rows(named=True):
-        stamp = row["ts"]
-        if stamp is None:
-            continue
-        index = positions.get(_utc(stamp))
-        if index is None or index + int(row["bars"]) >= height:
-            continue
-        rows.append(index)
-        arms.append(arm_index[Strategy(row["strategy"]).value])
-        rewards.append(float(row["r_multiple"]))
-
-    context = context_matrix(features, labels=labels)
-    if not rows:
+    joined = _join_labels(labels, features, require_exit_inside=True)
+    if joined.row.size == 0:
         return (
             np.zeros((0, CONTEXT_DIM), dtype=np.float64),
             np.zeros(0, dtype=np.int64),
             np.zeros(0, dtype=np.float64),
         )
-    indices = np.asarray(rows, dtype=np.int64)
-    return (
-        context[indices],
-        np.asarray(arms, dtype=np.int64),
-        np.asarray(rewards, dtype=np.float64),
-    )
+    context = context_matrix(features, labels=labels)
+    return context[joined.row], joined.arm, joined.reward
 
 
 def _outcomes_from_table(
@@ -464,27 +512,18 @@ def _outcomes_from_table(
 
     Labels for a timestamp outside ``features`` are ignored (a caller may pass
     the labels of a wider frame), and so are labels whose exit bar lies past the
-    frame: neither can be observed inside it.
+    frame: neither can be observed inside it. The join is vectorised; only the
+    final tuple list is built in Python because ``_success_matrix`` consumes
+    that shape.
     """
-    required = {"ts", "strategy", "bars", "r_multiple"}
-    missing = sorted(required - set(table.columns))
-    if missing:
-        raise ValueError(f"labels missing columns: {missing}")
-    height = int(features.X.shape[0])
-    positions = {_utc(stamp): index for index, stamp in enumerate(_feature_stamps(features))}
-    outcomes: list[tuple[Strategy, int, float]] = []
-    for row in table.iter_rows(named=True):
-        stamp = row["ts"]
-        if stamp is None:
-            continue
-        index = positions.get(_utc(stamp))
-        if index is None:
-            continue
-        exit_index = index + int(row["bars"])
-        if exit_index >= height:
-            continue
-        outcomes.append((Strategy(row["strategy"]), exit_index, float(row["r_multiple"])))
-    return outcomes
+    joined = _join_labels(table, features, require_exit_inside=True)
+    by_value = {strategy.value: strategy for strategy in ALL_STRATEGIES}
+    return [
+        (by_value[str(strategy)], int(exit_index), float(reward))
+        for strategy, exit_index, reward in zip(
+            joined.strategy, joined.exit_index, joined.reward, strict=True
+        )
+    ]
 
 
 def _atr_z_score(features: FeatureFrame, index: dict[str, int]) -> np.ndarray:

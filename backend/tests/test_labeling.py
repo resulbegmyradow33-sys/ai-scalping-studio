@@ -406,3 +406,68 @@ def test_bandit_training_data_is_empty_when_no_label_is_inside_the_frame():
     X, arms, rewards = labeling.bandit_training_data(features, outside)
     assert X.shape == (0, CONTEXT_DIM)
     assert arms.shape == rewards.shape == (0,)
+
+
+def _mini_frame(stamps: list[datetime]) -> labeling.FeatureFrame:
+    height = len(stamps)
+    ts = np.asarray(
+        [np.datetime64(stamp.astimezone(UTC).replace(tzinfo=None), "us") for stamp in stamps]
+    )
+    return labeling.FeatureFrame(
+        X=np.zeros((height, 1), dtype=np.float32),
+        ts=ts,
+        ohlc=np.zeros((height, 4)),
+        spread=np.zeros(height),
+        atr=np.zeros(height),
+        valid_from=0,
+        columns=["x"],
+    )
+
+
+def test_label_join_uses_the_last_duplicate_feature_row_and_keeps_label_order():
+    t0 = datetime(2026, 1, 5, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=1)
+    frame = _mini_frame([t0, t0, t1])
+    table = pl.DataFrame(
+        [
+            {"ts": t1, "strategy": ALL_STRATEGIES[0].value, "bars": 0, "r_multiple": 1.5},
+            {"ts": t0, "strategy": ALL_STRATEGIES[1].value, "bars": 0, "r_multiple": -0.5},
+            {"ts": t0, "strategy": ALL_STRATEGIES[1].value, "bars": 0, "r_multiple": 0.25},
+        ]
+    )
+
+    outcomes = labeling._outcomes_from_table(table, frame)
+
+    # The duplicate t0 stamp resolves to the last feature row, and the two
+    # labels at t0 stay as two separate outcomes in their original order.
+    assert [(strategy, exit_index, reward) for strategy, exit_index, reward in outcomes] == [
+        (ALL_STRATEGIES[0], 2, 1.5),
+        (ALL_STRATEGIES[1], 1, -0.5),
+        (ALL_STRATEGIES[1], 1, 0.25),
+    ]
+
+
+def test_label_join_skips_missing_and_null_stamps_but_rejects_bad_matched_rows():
+    t0 = datetime(2026, 1, 5, tzinfo=UTC)
+    frame = _mini_frame([t0])
+    outside = t0 + timedelta(days=1)
+
+    skipped = pl.DataFrame(
+        [
+            {"ts": None, "strategy": ALL_STRATEGIES[0].value, "bars": 0, "r_multiple": 1.0},
+            {"ts": outside, "strategy": ALL_STRATEGIES[0].value, "bars": 0, "r_multiple": 1.0},
+        ]
+    )
+    assert labeling._outcomes_from_table(skipped, frame) == []
+
+    null_bars = pl.DataFrame(
+        [{"ts": t0, "strategy": ALL_STRATEGIES[0].value, "bars": None, "r_multiple": 1.0}]
+    )
+    with pytest.raises(ValueError, match="null bars/r_multiple"):
+        labeling._outcomes_from_table(null_bars, frame)
+
+    unknown = pl.DataFrame(
+        [{"ts": t0, "strategy": "not_a_strategy", "bars": 0, "r_multiple": 1.0}]
+    )
+    with pytest.raises(ValueError, match="unknown strategy"):
+        labeling._outcomes_from_table(unknown, frame)
