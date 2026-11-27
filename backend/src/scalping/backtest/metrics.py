@@ -18,6 +18,10 @@ Conventions:
 * ``sharpe`` annualises the per-bar equity returns with
   ``sqrt(bars_per_year)`` and returns ``0.0`` when the return series is flat or
   shorter than two returns. The same prefixed series is used.
+* ``sortino`` uses the same prefixed returns but divides by the root-mean-square
+  of the negative returns; a run with no losing bar reads ``0.0`` rather than
+  an infinite ratio. ``calmar`` is the annualised **mean** bar return divided by
+  ``max_drawdown``; a flat or non-positive curve reads ``0.0``.
 * ``cost_ratio`` reports the broker's cost breakdown against gross profit,
   capped at ``1.0``; with no gross profit it is ``0.0``. The breakdown omits
   the exit half-spread on SL/TP fills, so this is not economic cost drag.
@@ -67,6 +71,11 @@ class Metrics:
     total_costs: float
     cost_ratio: float
     avg_bars: float
+    #: Annualised mean return divided by downside deviation. Zero when there is
+    #: no negative return or the curve is too short.
+    sortino: float = 0.0
+    #: Annualised return divided by max drawdown. Zero without a drawdown.
+    calmar: float = 0.0
 
 
 def _profit_factor(gross_profit: float, gross_loss: float) -> float:
@@ -92,6 +101,47 @@ def _sharpe(equity: np.ndarray, bars_per_year: int) -> float:
     if not math.isfinite(std) or std <= 0.0:
         return 0.0
     return float(np.mean(returns) / std * math.sqrt(bars_per_year))
+
+
+def _bar_returns(equity: np.ndarray) -> np.ndarray:
+    if equity.size < 2:
+        return np.zeros(0, dtype=np.float64)
+    previous = equity[:-1]
+    current = equity[1:]
+    valid = np.isfinite(previous) & np.isfinite(current) & (previous > 0.0)
+    if not valid.any():
+        return np.zeros(0, dtype=np.float64)
+    return (current[valid] - previous[valid]) / previous[valid]
+
+
+def _sortino(equity: np.ndarray, bars_per_year: int) -> float:
+    returns = _bar_returns(equity)
+    if returns.size < 2:
+        return 0.0
+    downside = returns[returns < 0.0]
+    if downside.size == 0:
+        return 0.0
+    deviation = float(np.sqrt(np.mean(np.square(downside))))
+    if not math.isfinite(deviation) or deviation <= 0.0:
+        return 0.0
+    return float(np.mean(returns) / deviation * math.sqrt(bars_per_year))
+
+
+def _calmar(equity: np.ndarray, bars_per_year: int) -> float:
+    """Annualised mean bar return over max drawdown.
+
+    The mean-return annualisation is used instead of CAGR so a one-bar curve
+    cannot overflow ``exp``; the number is a scale-free fragility ratio, not a
+    forecast.
+    """
+    returns = _bar_returns(equity)
+    if returns.size < 1:
+        return 0.0
+    drawdown = _max_drawdown(equity)
+    annualised = float(np.mean(returns)) * bars_per_year
+    if not math.isfinite(annualised) or drawdown <= 0.0:
+        return 0.0
+    return annualised / drawdown
 
 
 def _max_drawdown(equity: np.ndarray) -> float:
@@ -183,4 +233,6 @@ def compute(
         total_costs=total_costs,
         cost_ratio=cost_ratio,
         avg_bars=_avg_bars_indexed(trades, ts) if ts is not None else _avg_bars(trades),
+        sortino=_sortino(curve, bars_per_year),
+        calmar=_calmar(curve, bars_per_year),
     )

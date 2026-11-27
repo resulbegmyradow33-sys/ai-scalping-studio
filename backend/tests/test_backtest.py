@@ -357,3 +357,33 @@ def _next_month(value: datetime) -> datetime:
     year, month = (value.year + 1, 1) if value.month == 12 else (value.year, value.month + 1)
     day = min(value.day, calendar.monthrange(year, month)[1])
     return value.replace(year=year, month=month, day=day)
+
+
+def test_sortino_and_calmar_are_risk_adjusted_and_finite():
+    trades = [
+        make_trade(pnl=200.0, costs=20.0, r_multiple=2.0, entry_min=0, exit_min=10),
+        make_trade(pnl=-100.0, costs=10.0, r_multiple=-1.0, entry_min=20, exit_min=26),
+    ]
+    m = compute(
+        trades,
+        equity=np.array([10_000.0, 10_200.0, 10_100.0]),
+        initial_balance=10_000.0,
+        bars_per_year=1,
+    )
+
+    returns = np.array([0.0, 0.02, -100.0 / 10_200.0])
+    downside = returns[returns < 0.0]
+    expected_sortino = float(
+        returns.mean() / np.sqrt(np.mean(np.square(downside))) * math.sqrt(1)
+    )
+    expected_calmar = float(returns.mean()) / (1.0 / 102.0)
+    assert m.sortino == pytest.approx(expected_sortino)
+    assert m.calmar == pytest.approx(expected_calmar)
+
+
+def test_sortino_and_calmar_are_zero_without_risk():
+    flat = compute([], equity=np.array([10_000.0, 10_000.0]), initial_balance=10_000.0)
+    win_only = compute([], equity=np.array([10_000.0, 10_100.0]), initial_balance=10_000.0)
+
+    assert flat.sortino == 0.0 and flat.calmar == 0.0
+    assert win_only.sortino == 0.0 and win_only.calmar == 0.0
