@@ -117,12 +117,16 @@ def _sample_ts(frame: pl.DataFrame, mask: np.ndarray, limit: int) -> tuple[str, 
 def detect_bar_outliers(
     df: pl.DataFrame,
     config: OutlierConfig | None = None,
+    *,
+    gap_threshold_minutes: int | None = None,
 ) -> tuple[Issue, ...]:
     """Return warning issues for extreme returns and volumes.
 
     The checks use the whole slice's median/MAD, so they are retrospective. A
     frame shorter than ``min_rows`` is skipped: a robust scale from a handful of
-    bars is not a scale.
+    bars is not a scale. When ``gap_threshold_minutes`` is given, the first
+    return after a larger timestamp gap is excluded: a weekend/holiday reopen
+    is a real price move, but not a data-quality outlier for the bar before it.
     """
     cfg = OutlierConfig() if config is None else config
     frame = conform_bars(df).sort("ts")
@@ -135,6 +139,12 @@ def detect_bar_outliers(
         dtype=np.float64,
     )
     valid = np.isfinite(returns)
+    if gap_threshold_minutes is not None and gap_threshold_minutes > 0:
+        spacing = np.asarray(
+            frame.select(pl.col("ts").diff().dt.total_minutes()).to_series().to_numpy(),
+            dtype=np.float64,
+        )
+        valid &= ~(np.nan_to_num(spacing, nan=0.0) > gap_threshold_minutes)
     z = np.zeros(frame.height, dtype=np.float64)
     z[valid] = np.abs(robust_z(returns[valid]))
     mask = z >= cfg.return_z
