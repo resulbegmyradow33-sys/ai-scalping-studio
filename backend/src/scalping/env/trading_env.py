@@ -66,6 +66,7 @@ class TradingEnv(gym.Env):
         flow_thr: np.ndarray | None = None,
         flow_obs: bool = False,
         execution_delay: int = 0,
+        fill_price: str = "close",
     ) -> None:
         super().__init__()
         self.sim = Simulator(
@@ -83,6 +84,7 @@ class TradingEnv(gym.Env):
             flow_thr=flow_thr,
             flow_obs=flow_obs,
             execution_delay=execution_delay,
+            fill_price=fill_price,
         )
         self.action_space = spaces.Discrete(N_ACTIONS)
         self.observation_space = spaces.Box(-np.inf, np.inf, (self.sim.obs_dim,), dtype=np.float32)
