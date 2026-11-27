@@ -299,6 +299,15 @@ def train_classifier(
                 )
             if payload["n_features"] != data.feature_count or payload["window"] != data.window:
                 raise TrainError("checkpoint shape does not match the dataset")
+            saved_dataset = payload.get("dataset_id")
+            if saved_dataset and saved_dataset != data.dataset_id:
+                # Resuming across datasets would mix two label/horizon/split
+                # identities in one optimizer state. Refuse instead of silently
+                # continuing on different rows.
+                raise TrainError(
+                    f"checkpoint dataset_id {saved_dataset!r} does not match "
+                    f"the current dataset {data.dataset_id!r}"
+                )
             model.load_state_dict(payload["model_state"])
             optimizer.load_state_dict(payload["optimizer_state"])
             start_epoch = int(payload["epoch"]) + 1
