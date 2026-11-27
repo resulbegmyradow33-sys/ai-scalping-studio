@@ -115,6 +115,14 @@ def test_clean_store_is_ok_with_zero_counts_and_provenance(
 
     assert body["configured"] is True
     assert body["status"] == "ok"
+    assert body["capabilities"] == {
+        "bar_volume": True,
+        "real_quotes": True,
+        "modeled_spread": True,
+        "spread": True,
+        "tick_flow": False,
+        "m1_source": True,
+    }
     assert body["status_rule"] == "clean"
     assert body["rows"] == 60
     assert body["first_ts"] == START.isoformat()
@@ -370,4 +378,24 @@ def _snapshot(root: Path) -> dict[str, tuple[int, str]]:
         )
         for path in sorted(root.rglob("*"))
         if path.is_file()
+    }
+
+
+def test_capabilities_downgrade_bid_only_and_zero_volume(tmp_path: Path, client: TestClient) -> None:
+    frame = bars().with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("bid_close"),
+        pl.lit(None, dtype=pl.Float64).alias("ask_close"),
+        pl.lit(0, dtype=pl.Int64).alias("volume"),
+    )
+    write_store(tmp_path, frame)
+
+    body = quality(client)
+
+    assert body["capabilities"] == {
+        "bar_volume": False,
+        "real_quotes": False,
+        "modeled_spread": True,
+        "spread": True,
+        "tick_flow": False,
+        "m1_source": True,
     }

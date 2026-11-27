@@ -331,6 +331,7 @@ class DataQualityResponse(BaseModel):
     negative_volume: int | None
     outliers: int | None
     outliers_checked: bool
+    capabilities: dict[str, bool] | None = None
     provenance: dict[str, Any] | None
     thresholds: dict[str, Any]
     issues: list[dict[str, Any]]

@@ -249,6 +249,7 @@
         ]
       },
       "properties": {
+        "capabilities": "object | null",
         "configured": "boolean",
         "crossed_quotes": "integer | null",
         "duplicates": "integer | null",
