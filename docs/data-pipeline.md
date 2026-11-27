@@ -48,6 +48,13 @@ need an M1 source; any `flow_*` column is reserved for the tick layer and needs
 names every missing input, so a manifest cannot quietly describe unsupported
 features.
 
+The validator follows the same contract. A bid-only export (null
+`bid_close`/`ask_close`/`spread`) is a `missing_quotes` **warning**, not a
+`null_values` error, and the report carries `capabilities` plus `gap_breakdown`.
+The breakdown separates in-session from session-closed gaps and, for a known
+bar width, estimates `missing_minutes`; the first return after a gap is excluded
+from the robust-z price-outlier pass.
+
 `capabilities_from_frame(frame)` infers volume/quote availability from a raw
 provider frame. CSV exports without quotes are correctly reported as
 `real_quotes=False`, while the allowed spread model keeps `spread_*` usable.
