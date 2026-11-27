@@ -199,9 +199,8 @@ branches; cite them as evidence, not as repository files.
 - [ ] DQN evaluation.
 - [ ] A2C baseline.
 - [ ] Seed ensembles / policy averaging.
-- [ ] PARTIAL: entry latency (`execution_delay=1`: BUY/SELL fill at the
-      next bar's close, CLOSE immediate, protective exits never delayed);
-      delayed closes and next-open fills are still open.
+- [ ] PARTIAL: execution latency (`execution_delay=1`: BUY/SELL and CLOSE fill at
+      the next bar's close; protective exits never delayed); next-open fills are open.
 - [ ] Reward ablation report.
 - [x] `docs/reinforcement-learning.md`.
 
@@ -254,7 +253,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Consecutive-loss pause (blocks new entries, never CLOSE; default off).
 - [x] Max spread points, slippage cap and data-quality entry block (#186).
 - [x] Data-quality trade block (#186).
-- [ ] Rejected-order model.
+- [x] Rejected-order model: delayed price-gap and zero-volume rejects (`RejectionConfig`).
 - [x] Emergency kill switch (equity below a fraction of initial balance; default off).
 - [x] Risk limits cannot be bypassed by a model (frozen at construction, no override).
 - [ ] Purged CV with embargo integrated in evaluation.
@@ -262,7 +261,7 @@ branches; cite them as evidence, not as repository files.
 - [x] Parameter sensitivity (one-axis spread/slippage/commission grid).
 - [ ] Ablation runner.
 - [ ] Regime-specific reports.
-- [ ] Execution delay and rejected-order assumptions.
+- [x] Execution delay (entries and closes) and rejected-order assumptions; next-open fills remain Phase 8 work.
 - [ ] Partial fills only where data supports them.
 - [x] `docs/risk-management.md`, `docs/backtesting-methodology.md`.
 - [x] Tests: kill switch, embargo, Monte Carlo determinism.
