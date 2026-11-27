@@ -56,6 +56,21 @@ it does not prove: that the policy is profitable, out-of-sample-valid or
 promotable. Those require the walk-forward, cost-stress and holdout evidence
 described below.
 
+## Risk-limit ablation
+
+`scalping.backtest.ablation.risk_ablation(policy, features, settings)` reruns
+one policy under the baseline settings and then with **one enabled risk limit
+disabled at a time** (daily/weekly loss, drawdown, consecutive-loss pause,
+spread/slippage caps, emergency floor, data-quality block).
+
+- Only enabled limits become variants; a limit already off is not a no-op row.
+- `daily_loss_pct` is disabled with `1.0` because the risk engine forbids `0`.
+- Each row reports trades, net profit, expectancy, profit factor, drawdown, win
+  rate and the delta versus the baseline; `variant` names the field.
+- The caller's `Settings` is never mutated.
+- Cost multipliers remain in `cost_stress`; this runner is the risk-side
+  counterpart and makes no claim about which setting is better.
+
 ## Monte Carlo trade-sequence analysis
 
 `scalping.backtest.montecarlo` answers one question: given the trades we
