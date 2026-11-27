@@ -31,6 +31,7 @@ from scalping.features.registry import DEFAULT_GROUPS
 from scalping.ml.calibration import calibration_summary, fit_temperature
 from scalping.ml.incremental import incremental_fit, supports_partial_fit
 from scalping.ml.models import build_model
+from scalping.ml.rejection import select_precision_threshold
 
 __all__ = [
     "MLResult",
@@ -62,14 +63,25 @@ class TrainSpec:
     #: ``0`` fits in one batch pass; ``N > 1`` fits N contiguous, ordered
     #: ``partial_fit`` chunks (only models with ``partial_fit`` support it).
     incremental_chunks: int = 0
-
-    def __post_init__(self) -> None:
-        if self.incremental_chunks < 0:
-            raise ValueError("incremental_chunks must be >= 0")
     #: ``"none"`` or ``"temperature"``. Temperature is fitted on validation
     #: rows only; the test split is never used to fit or to report corrected
     #: test metrics.
     calibrate: str = "none"
+    #: Optional validation-fitted precision gate. The threshold is selected on
+    #: the raw validation probabilities and recorded; it is not applied to the
+    #: saved model's predictions automatically.
+    reject_precision: float | None = None
+    reject_min_coverage: float = 0.0
+
+    def __post_init__(self) -> None:
+        if self.incremental_chunks < 0:
+            raise ValueError("incremental_chunks must be >= 0")
+        if self.reject_precision is not None and not 0.0 < self.reject_precision <= 1.0:
+            raise ValueError("reject_precision must be in (0, 1] or None")
+        if not 0.0 <= self.reject_min_coverage <= 1.0:
+            raise ValueError("reject_min_coverage must be in [0, 1]")
+        if self.reject_precision is None and self.reject_min_coverage != 0.0:
+            raise ValueError("reject_min_coverage requires reject_precision")
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +102,10 @@ class MLResult:
     #: headline ``validation`` metrics stay raw so promotion evidence reads the
     #: numbers that were recorded, not a post-hoc view.
     calibration: dict[str, Any] | None = None
+    #: Optional precision-target gate selected on validation probabilities. It
+    #: records ``satisfied=False`` when no threshold met both floors; callers
+    #: must not silently trade an unsatisfied gate.
+    rejection: dict[str, Any] | None = None
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat(timespec="seconds"))
 
     def to_dict(self) -> dict[str, Any]:
@@ -104,6 +120,7 @@ class MLResult:
             "baseline": self.baseline,
             "split_counts": self.split_counts,
             "calibration": self.calibration,
+            "rejection": self.rejection,
             "created_at": self.created_at,
             "spec": asdict(self.spec),
         }
@@ -223,6 +240,20 @@ def train_classifier(
     if spec.calibrate == "temperature":
         fitted = fit_temperature(bundle.y_direction[validation_mask], probabilities, classes)
         calibration = {**fitted.to_dict(), "fitted_on": "validation"}
+    rejection = None
+    if spec.reject_precision is not None:
+        # Select on the raw validation probabilities: that is what the saved
+        # model emits. A fitted temperature is a diagnostic and is not applied
+        # by ``save_result``/``load_model``, so using it here would describe a
+        # gate the deployed model never sees.
+        choice = select_precision_threshold(
+            probabilities,
+            bundle.y_direction[validation_mask],
+            target_precision=spec.reject_precision,
+            min_coverage=spec.reject_min_coverage,
+            classes=classes,
+        )
+        rejection = choice.to_dict()
     test = None
     if spec.evaluate_test and int(test_mask.sum()) > 0:
         test = _metrics(
@@ -248,6 +279,7 @@ def train_classifier(
             "flat_dropped": int(flat.sum()),
         },
         calibration=calibration,
+        rejection=rejection,
     )
 
 
@@ -294,6 +326,10 @@ def load_result(directory: str | Path) -> MLResult:
         include_flat=bool(spec_raw.get("include_flat", False)),
         incremental_chunks=int(spec_raw.get("incremental_chunks", 0)),
         calibrate=str(spec_raw.get("calibrate", "none")),
+        reject_precision=(
+            None if spec_raw.get("reject_precision") is None else float(spec_raw["reject_precision"])
+        ),
+        reject_min_coverage=float(spec_raw.get("reject_min_coverage", 0.0)),
     )
     model, columns = load_model(target / "model.joblib")
     dataset_id = str(metadata["dataset_id"])
@@ -312,5 +348,6 @@ def load_result(directory: str | Path) -> MLResult:
         baseline=metadata["baseline"],
         split_counts=metadata["split_counts"],
         calibration=metadata.get("calibration"),
+        rejection=metadata.get("rejection"),
         created_at=str(metadata["created_at"]),
     )
