@@ -8,12 +8,15 @@ local timing for validation or profitability evidence.
 
 Modules
 -------
+``budget``
+    :class:`RssBudget`, a reusable process-RSS stop signal.
 ``pipeline``
     :func:`measure_stage` and :class:`StageMeasurement`.
 ``suite``
     :func:`run_suite`, the JSON report, and the built-in stage factories.
 """
 
+from scalping.bench.budget import MemoryBudgetError, RssBudget, process_rss_mb
 from scalping.bench.pipeline import StageMeasurement, measure_stage
 from scalping.bench.suite import (
     CLAIMS_SCHEMA,
@@ -32,6 +35,8 @@ from scalping.bench.suite import (
 __all__ = [
     "CLAIMS_SCHEMA",
     "REPORT_SCHEMA",
+    "MemoryBudgetError",
+    "RssBudget",
     "Stage",
     "StageError",
     "StageMeasurement",
@@ -41,6 +46,7 @@ __all__ = [
     "features_build_stage",
     "measure_stage",
     "paper_advance_stage",
+    "process_rss_mb",
     "run_suite",
     "walk_forward_stage",
 ]
