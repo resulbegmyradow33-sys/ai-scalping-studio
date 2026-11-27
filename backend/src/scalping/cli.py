@@ -43,7 +43,7 @@ from scalping.backtest.sensitivity import (
 from scalping.config import Settings
 from scalping.data.csv_provider import CsvProvider, DataError
 from scalping.data.json_provider import JsonProvider
-from scalping.data.provenance import build_provenance, save_provenance
+from scalping.data.provenance import build_provenance, load_provenance, save_provenance
 from scalping.data.registry import TIMEFRAMES, timeframe_rule
 from scalping.data.resample import resample
 from scalping.data.store import ParquetStore
@@ -326,6 +326,29 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
     _print_json(report.to_dict())
     if not report.ok:
         raise _ExitCode(2)
+
+
+def _cmd_data_status(args: argparse.Namespace) -> None:
+    """Print coverage, providers and the provenance sidecar for one slice."""
+    store = ParquetStore(args.root)
+    coverage = store.coverage(args.symbol, args.timeframe)
+    provenance = load_provenance(store.root, args.symbol, args.timeframe)
+    if coverage.rows == 0:
+        providers: list[str] = []
+    else:
+        frame = store.read(args.symbol, args.timeframe)
+        providers = sorted(frame.get_column("provider").unique().to_list())
+    _print_json(
+        {
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "rows": coverage.rows,
+            "first_ts": coverage.first_ts.isoformat() if coverage.first_ts else None,
+            "last_ts": coverage.last_ts.isoformat() if coverage.last_ts else None,
+            "providers": providers,
+            "provenance": None if provenance is None else provenance.to_dict(),
+        }
+    )
 
 
 # --- neural networks ---------------------------------------------------------
@@ -1543,6 +1566,12 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--timeframe", default="M1")
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
     validate.set_defaults(handler=_cmd_data_validate)
+
+    status = sources.add_parser("status", help="print coverage, providers and provenance")
+    status.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    status.add_argument("--timeframe", default="M1")
+    status.add_argument("--root", default=str(DEFAULT_ROOT))
+    status.set_defaults(handler=_cmd_data_status)
 
     ml = commands.add_parser("ml", help="classical machine-learning experiments")
     ml_commands = ml.add_subparsers(dest="ml_command", required=True)

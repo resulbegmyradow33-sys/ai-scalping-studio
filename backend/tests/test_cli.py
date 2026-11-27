@@ -1049,3 +1049,23 @@ def test_backtest_mask_actions_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out.is_file()
     assert "run_id" in json.loads(result.stdout)
+
+
+def test_data_status_prints_coverage_providers_and_provenance(tmp_path):
+    _synth_two_days(tmp_path)
+    r = run(
+        "data",
+        "status",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["rows"] == 2_880
+    assert payload["providers"]
+    assert payload["first_ts"] and payload["last_ts"]
+    assert payload["provenance"] is None or isinstance(payload["provenance"], dict)
