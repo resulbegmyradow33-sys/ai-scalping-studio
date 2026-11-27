@@ -200,7 +200,7 @@ holdout spend, champion, paper run.
 - [ ] A2C baseline.
 - [ ] Seed ensembles / policy averaging.
 - [ ] Execution-delay assumption in the environment.
-- [ ] Reward ablation report.
+- [x] Realized-reward ablation report (`reward_breakdown`); retraining variants remain open.
 - [x] `docs/reinforcement-learning.md`.
 
 ## Phase 9 — Ensemble and confidence
