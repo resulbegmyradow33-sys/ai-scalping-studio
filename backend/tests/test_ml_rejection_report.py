@@ -74,3 +74,26 @@ def test_rejection_spec_guard_rails() -> None:
         _spec(reject_precision=0.6, reject_min_coverage=1.5)
     with pytest.raises(ValueError, match="requires reject_precision"):
         _spec(reject_min_coverage=0.5)
+
+
+def test_evaluation_can_use_the_saved_rejection_gate() -> None:
+    from scalping.config import Settings
+    from scalping.ml.evaluate import evaluate_model
+
+    features = _learnable_frame()
+    result = train_classifier(
+        features, symbol="XAUUSD", timeframe="M1", spec=_spec(reject_precision=0.6)
+    )
+    assert result.rejection is not None and result.rejection["satisfied"] is True
+
+    evaluation = evaluate_model(
+        result,
+        features,
+        Settings(),
+        split="validation",
+        window=60,
+        compute_regime=False,
+        use_rejection_gate=True,
+    )
+
+    assert evaluation.threshold == result.rejection["threshold"]

@@ -181,6 +181,11 @@ saved model does not apply temperature scaling; `satisfied=false` means the
 requested gate could not be met and must not be used silently. Training does not
 apply the gate to its test metrics or to the saved model's `predict_proba`.
 
+`ml evaluate --use-rejection-gate` reuses that saved threshold instead of
+`--threshold`. It refuses a missing/unsatisfied gate and a fitted threshold
+below 0.5 (the policy's directional floor); the evaluation result's `threshold`
+field then shows the value actually used.
+
 ## Commands
 
 ```bash
