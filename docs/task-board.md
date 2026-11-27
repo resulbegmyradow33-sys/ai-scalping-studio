@@ -262,7 +262,7 @@ holdout spend, champion, paper run.
 - [ ] Purged CV with embargo integrated in evaluation.
 - [x] Monte Carlo trade-sequence analysis (shuffle + block bootstrap, ruin, DD).
 - [x] Parameter sensitivity (one-axis spread/slippage/commission grid).
-- [ ] Ablation runner.
+- [x] Ablation runner: risk-limit ablation (`risk_ablation`); cost stress remains separate.
 - [ ] Regime-specific reports.
 - [ ] Execution delay and rejected-order assumptions.
 - [ ] Partial fills only where data supports them.
