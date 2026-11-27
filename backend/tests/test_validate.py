@@ -77,3 +77,23 @@ def test_tick_validation_flags_crossed_book() -> None:
     report = validate_ticks(frame)
     assert not report.ok
     assert any(issue.code == "crossed_quotes" for issue in report.issues)
+
+
+def test_tick_duplicates_are_errors_and_gaps_warn() -> None:
+    start = datetime(2026, 1, 5, tzinfo=UTC)
+    frame = pl.DataFrame(
+        {
+            "ts": [start, start + timedelta(seconds=120), start + timedelta(seconds=120)],
+            "bid": [100.0, 100.0, 100.0],
+            "ask": [100.2, 100.2, 100.2],
+            "bid_volume": [1.0, 1.0, 1.0],
+            "ask_volume": [1.0, 1.0, 1.0],
+        }
+    )
+
+    report = validate_ticks(frame)
+
+    codes = {issue.code for issue in report.issues}
+    assert report.ok is False
+    assert "duplicate_timestamps" in codes
+    assert "tick_gaps" in codes

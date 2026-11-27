@@ -271,8 +271,17 @@ def validate_bars(
     )
 
 
-def validate_ticks(df: pl.DataFrame, *, symbol: str = "") -> ValidationReport:
-    """Validate a tick frame with ``ts, bid, ask, bid_volume, ask_volume``."""
+def validate_ticks(
+    df: pl.DataFrame,
+    *,
+    symbol: str = "",
+    gap_threshold_seconds: int = 60,
+) -> ValidationReport:
+    """Validate a tick frame with ``ts, bid, ask, bid_volume, ask_volume``.
+
+    Duplicate stamps are structural errors. Gaps above ``gap_threshold_seconds``
+    are warnings, like bar gaps: an illiquid minute is not a broken file.
+    """
     issues: list[Issue] = []
     rows = df.height
     if rows == 0:
@@ -295,6 +304,15 @@ def validate_ticks(df: pl.DataFrame, *, symbol: str = "") -> ValidationReport:
             ),
         )
 
+    if df["ts"].dtype != pl.Datetime("us", "UTC"):
+        issues.append(
+            Issue(
+                code="timestamp_dtype",
+                severity="error",
+                count=rows,
+                detail=f"expected Datetime('us','UTC'), got {df['ts'].dtype}",
+            )
+        )
     if not df["ts"].is_sorted():
         issues.append(
             Issue(
@@ -304,6 +322,31 @@ def validate_ticks(df: pl.DataFrame, *, symbol: str = "") -> ValidationReport:
                 detail="ticks are not sorted ascending",
             )
         )
+    duplicates = rows - df["ts"].n_unique()
+    if duplicates:
+        issues.append(
+            Issue(
+                code="duplicate_timestamps",
+                severity="error",
+                count=duplicates,
+                detail=f"{duplicates} duplicate ts values",
+            )
+        )
+    if rows >= 2 and gap_threshold_seconds > 0:
+        spacing = df["ts"].sort().diff().drop_nulls().dt.total_seconds()
+        gaps = spacing.filter(spacing > gap_threshold_seconds)
+        if gaps.len():
+            issues.append(
+                Issue(
+                    code="tick_gaps",
+                    severity="warning",
+                    count=int(gaps.len()),
+                    detail=(
+                        f"{gaps.len()} tick gaps > {gap_threshold_seconds}s; "
+                        f"largest {int(cast(float, gaps.max() or 0.0))}s"
+                    ),
+                )
+            )
     crossed = df.filter(pl.col("ask") < pl.col("bid")).height
     if crossed:
         issues.append(

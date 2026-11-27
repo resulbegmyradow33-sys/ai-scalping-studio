@@ -328,6 +328,37 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
         raise _ExitCode(2)
 
 
+def _cmd_data_coverage(args: argparse.Namespace) -> None:
+    """Print stored row count and first/last timestamp for one slice."""
+    store = ParquetStore(args.root)
+    coverage = store.coverage(args.symbol, args.timeframe)
+    first = coverage.first_ts.isoformat() if coverage.first_ts is not None else None
+    last = coverage.last_ts.isoformat() if coverage.last_ts is not None else None
+    _print_json(
+        {
+            "symbol": args.symbol,
+            "timeframe": args.timeframe,
+            "rows": coverage.rows,
+            "first_ts": first,
+            "last_ts": last,
+        }
+    )
+
+
+def _cmd_dataset_inspect(args: argparse.Namespace) -> None:
+    """Print a saved dataset manifest without rebuilding the arrays."""
+    path = Path(args.manifest)
+    if not path.is_file():
+        raise CliError(f"dataset manifest not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise CliError(f"cannot read dataset manifest {path}: {error}") from error
+    if not isinstance(payload, dict):
+        raise CliError("dataset manifest must be a JSON object")
+    _print_json({"manifest": str(path), **payload})
+
+
 # --- neural networks ---------------------------------------------------------
 def _nn_data(args: argparse.Namespace, *, window: int, clip: float = 5.0):
     """Build windowed tensors for one stored symbol/timeframe."""
@@ -1544,6 +1575,12 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
     validate.set_defaults(handler=_cmd_data_validate)
 
+    coverage = sources.add_parser("coverage", help="print row count and first/last timestamp")
+    coverage.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    coverage.add_argument("--timeframe", default="M1")
+    coverage.add_argument("--root", default=str(DEFAULT_ROOT))
+    coverage.set_defaults(handler=_cmd_data_coverage)
+
     ml = commands.add_parser("ml", help="classical machine-learning experiments")
     ml_commands = ml.add_subparsers(dest="ml_command", required=True)
     ml_train = ml_commands.add_parser("train", help="fit a direction classifier")
@@ -1713,6 +1750,10 @@ def _build_parser() -> argparse.ArgumentParser:
     build.add_argument("--out", required=True, help="manifest JSON path")
     build.add_argument("--no-cache", action="store_true", help=_NO_CACHE_HELP)
     build.set_defaults(handler=_cmd_dataset_build)
+
+    inspect = dataset_commands.add_parser("inspect", help="print a saved manifest")
+    inspect.add_argument("--manifest", required=True, help="manifest JSON path")
+    inspect.set_defaults(handler=_cmd_dataset_inspect)
 
     nn_parser = commands.add_parser("nn", help="train and evaluate sequence models")
     nn_commands = nn_parser.add_subparsers(dest="nn_command", required=True)
