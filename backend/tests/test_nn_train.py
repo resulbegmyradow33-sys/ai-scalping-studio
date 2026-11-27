@@ -227,3 +227,50 @@ def test_early_stopping_stops_when_validation_stalls(tmp_path, monkeypatch) -> N
 )
 def test_explicit_mps_is_selected_when_available() -> None:
     assert select_device("mps").type == "mps"
+
+
+def test_training_does_not_advance_the_global_torch_rng(tmp_path) -> None:
+    state = torch.random.get_rng_state().clone()
+
+    train_classifier(dataset(), config(epochs=1), checkpoint=tmp_path / "rng.pt")
+
+    assert torch.equal(torch.random.get_rng_state(), state)
+
+
+class _CancelAfter(JobControl):
+    """Cancel once the trainer has asked this many times."""
+
+    def __init__(self, checks: int) -> None:
+        super().__init__()
+        self.checks = checks
+
+    def cancelled(self) -> bool:
+        self.checks -= 1
+        if self.checks <= 0:
+            self.cancel()
+        return super().cancelled()
+
+
+def test_cancellation_rewrites_an_existing_checkpoint(tmp_path, monkeypatch) -> None:
+    import scalping.nn.train as train_module
+
+    checkpoint = tmp_path / "cancel.pt"
+    original = train_module._atomic_save
+    saves = 0
+
+    def counting(path, payload):
+        nonlocal saves
+        saves += 1
+        original(path, payload)
+
+    monkeypatch.setattr(train_module, "_atomic_save", counting)
+    # 20 checks complete two epochs (start + 8 batches + end each); the 21st
+    # cancels at the start of epoch 3, after two checkpoints already exist.
+    result = train_classifier(
+        dataset(), config(epochs=5), checkpoint=checkpoint, control=_CancelAfter(21)
+    )
+
+    assert result.stopped == "cancelled"
+    assert result.epochs_run == 2
+    assert saves == 3  # two epoch saves plus the final cancellation save
+    assert load_checkpoint(checkpoint)["epoch"] == 1

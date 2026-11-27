@@ -14,6 +14,7 @@ prediction time, so this is not look-ahead.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Final, Literal
 
 import torch
@@ -62,37 +63,30 @@ MODEL_NAMES: Final[tuple[ModelName, ...]] = (
 )
 
 
+@dataclass(frozen=True, slots=True)
 class ModelSpec:
-    """Shared constructor arguments; kept as a dataclass for readable tests."""
+    """Shared constructor arguments for every model family."""
 
-    def __init__(
-        self,
-        *,
-        n_features: int,
-        window: int = 60,
-        n_classes: int = 3,
-        hidden: int = 64,
-        dropout: float = 0.1,
-        seed: int = 0,
-    ) -> None:
-        if n_features < 1:
+    n_features: int
+    window: int = 60
+    n_classes: int = 3
+    hidden: int = 64
+    dropout: float = 0.1
+    seed: int = 0
+
+    def __post_init__(self) -> None:
+        if self.n_features < 1:
             raise ValueError("n_features must be >= 1")
-        if window < 1:
+        if self.window < 1:
             raise ValueError("window must be >= 1")
-        if n_classes < 2:
+        if self.n_classes < 2:
             raise ValueError("n_classes must be >= 2")
-        if hidden < 1:
+        if self.hidden < 1:
             raise ValueError("hidden must be >= 1")
-        if not 0.0 <= dropout < 1.0:
+        if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
-        if seed < 0:
+        if self.seed < 0:
             raise ValueError("seed must be >= 0")
-        self.n_features = n_features
-        self.window = window
-        self.n_classes = n_classes
-        self.hidden = hidden
-        self.dropout = dropout
-        self.seed = seed
 
 
 def _check_input(x: Tensor, n_features: int) -> None:
@@ -363,16 +357,21 @@ def build_model(
             hidden=spec.hidden,
             dropout=spec.dropout,
         )
-    from scalping.nn.transformers import build_transformer
+    if name in ("transformer", "causal_transformer"):
+        from scalping.nn.transformers import build_transformer
 
-    return build_transformer(
-        n_features=spec.n_features,
-        window=spec.window,
-        n_classes=spec.n_classes,
-        hidden=spec.hidden,
-        dropout=spec.dropout,
-        causal=name == "causal_transformer",
-    )
+        return build_transformer(
+            n_features=spec.n_features,
+            window=spec.window,
+            n_classes=spec.n_classes,
+            hidden=spec.hidden,
+            dropout=spec.dropout,
+            causal=name == "causal_transformer",
+        )
+    # MODEL_NAMES and this dispatch must stay in lockstep. An unknown name was
+    # rejected above; reaching here means a new name was registered without a
+    # branch, and silently returning the last model would hide that bug.
+    raise AssertionError(f"unhandled model {name!r}")
 
 
 def model_names() -> tuple[str, ...]:

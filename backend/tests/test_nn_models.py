@@ -112,3 +112,11 @@ def test_bad_model_spec_is_rejected() -> None:
         ModelSpec(n_features=1, n_classes=1)
     with pytest.raises(ValueError, match="dropout"):
         ModelSpec(n_features=1, dropout=1.0)
+
+
+def test_build_model_fails_closed_when_a_name_has_no_branch(monkeypatch) -> None:
+    from scalping.nn import models
+
+    monkeypatch.setattr(models, "MODEL_NAMES", (*models.MODEL_NAMES, "ghost"))
+    with pytest.raises(AssertionError, match="unhandled model 'ghost'"):
+        models.build_model("ghost", n_features=N_FEATURES, window=WINDOW)  # type: ignore[arg-type]
