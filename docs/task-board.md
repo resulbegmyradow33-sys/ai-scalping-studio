@@ -116,7 +116,7 @@ holdout spend, champion, paper run.
 - [ ] PARTIAL: `log_ret_3` is a documented read-only alias for the log-return
       column and the naming is pinned by tests (#133); consecutive-candle
       features do not exist.
-- [ ] Cumulative volume delta and order-flow features from real ticks.
+- [ ] PARTIAL: `aggregate_flow` computes flow/CVD from tick frames; flow remains a side channel, not a column of the 59-feature matrix.
 
 ## Phase 4 — Market regime engine
 
