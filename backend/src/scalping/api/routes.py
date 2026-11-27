@@ -68,6 +68,7 @@ from scalping.data.quality import OutlierConfig
 from scalping.data.registry import SYMBOLS, TIMEFRAMES
 from scalping.data.synthetic import SyntheticProvider
 from scalping.data.validate import ValidationReport, validate_bars
+from scalping.features.availability import capabilities_from_frame
 from scalping.regime import classify
 from scalping.strategy.calibrate import (
     AUDIT_FILENAME,
@@ -289,6 +290,7 @@ def data_quality(
             negative_volume=None,
             outliers=None,
             outliers_checked=False,
+            capabilities=None,
             provenance=provenance_payload,
             thresholds=thresholds,
             issues=[],
@@ -309,6 +311,15 @@ def data_quality(
         else None
     )
     status, rule, detail = _quality_status(report, provenance_payload)
+    caps = capabilities_from_frame(frame)
+    capabilities = {
+        "bar_volume": caps.bar_volume,
+        "real_quotes": caps.real_quotes,
+        "modeled_spread": caps.modeled_spread,
+        "spread": caps.spread,
+        "tick_flow": caps.tick_flow,
+        "m1_source": caps.m1_source,
+    }
     return DataQualityResponse(
         symbol=symbol,
         timeframe=timeframe,
@@ -327,6 +338,7 @@ def data_quality(
         negative_volume=counts.get("negative_volume", 0),
         outliers=outliers,
         outliers_checked=outliers_checked,
+        capabilities=capabilities,
         provenance=provenance_payload,
         thresholds=thresholds,
         issues=[issue.to_dict() for issue in report.issues],
