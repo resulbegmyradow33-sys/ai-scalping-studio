@@ -227,3 +227,17 @@ def test_early_stopping_stops_when_validation_stalls(tmp_path, monkeypatch) -> N
 )
 def test_explicit_mps_is_selected_when_available() -> None:
     assert select_device("mps").type == "mps"
+
+
+def test_resume_rejects_a_different_dataset_identity(tmp_path) -> None:
+    checkpoint = tmp_path / "model.pt"
+    train_classifier(dataset(), config(epochs=1), checkpoint=checkpoint)
+    other = replace(dataset(), dataset_id="toy:other")
+
+    with pytest.raises(TrainError, match="dataset_id"):
+        train_classifier(
+            other,
+            config(epochs=2),
+            checkpoint=checkpoint,
+            resume_from=checkpoint,
+        )
