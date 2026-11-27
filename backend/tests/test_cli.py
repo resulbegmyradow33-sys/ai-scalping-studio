@@ -1049,3 +1049,47 @@ def test_backtest_mask_actions_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out.is_file()
     assert "run_id" in json.loads(result.stdout)
+
+
+def test_data_reconcile_reports_a_close_mismatch_and_can_tolerate_it(tmp_path):
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    _synth_two_days(primary)
+    _synth_two_days(secondary)
+    store = ParquetStore(secondary)
+    frame = store.read("XAUUSD", "M1").with_columns((pl.col("close") + 1.0).alias("close"))
+    frame.write_parquet(secondary / "XAUUSD" / "M1" / "2026" / "01.parquet")
+
+    strict = run(
+        "data",
+        "reconcile",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--primary-root",
+        str(primary),
+        "--secondary-root",
+        str(secondary),
+    )
+    tolerant = run(
+        "data",
+        "reconcile",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--primary-root",
+        str(primary),
+        "--secondary-root",
+        str(secondary),
+        "--price-tolerance",
+        "2.0",
+    )
+
+    assert strict.returncode == 2
+    strict_report = json.loads(strict.stdout)
+    assert strict_report["ok"] is False
+    assert "close_mismatch" in {issue["code"] for issue in strict_report["issues"]}
+    assert tolerant.returncode == 0, tolerant.stderr
+    assert json.loads(tolerant.stdout)["ok"] is True
