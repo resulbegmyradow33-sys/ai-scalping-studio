@@ -514,6 +514,8 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
         include_flat=args.include_flat,
         incremental_chunks=args.incremental_chunks,
         calibrate=args.calibrate,
+        reject_precision=args.reject_precision,
+        reject_min_coverage=args.reject_min_coverage,
     )
     result = train_classifier(
         features,
@@ -534,6 +536,7 @@ def _cmd_ml_train(args: argparse.Namespace) -> None:
             "validation_metrics": result.validation,
             "baseline": result.baseline,
             "calibration": result.calibration,
+            "rejection": result.rejection,
             "test_metrics": result.test,
             "model_path": str(model_path),
             "metrics_path": str(metrics_path),
@@ -1574,6 +1577,18 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("none", "temperature"),
         default="none",
         help="fit temperature scaling on validation rows (never on test)",
+    )
+    ml_train.add_argument(
+        "--reject-precision",
+        type=float,
+        default=None,
+        help="record the lowest validation threshold meeting this precision",
+    )
+    ml_train.add_argument(
+        "--reject-min-coverage",
+        type=float,
+        default=0.0,
+        help="minimum validation coverage for --reject-precision",
     )
     ml_train.add_argument("--root", default=str(DEFAULT_ROOT))
     ml_train.add_argument("--out", default="runs/ml")

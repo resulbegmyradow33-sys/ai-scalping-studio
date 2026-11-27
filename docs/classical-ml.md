@@ -160,6 +160,27 @@ bundles the threshold with its validation profile.
 This is a selection rule, not evidence: a threshold fitted on validation still
 needs an untouched window, cost stress and a live/paper check.
 
+`ml train --reject-precision 0.60 [--reject-min-coverage 0.02]` runs the gate
+selection after fitting and records a `rejection` object in `metrics.json`:
+
+```json
+{
+  "threshold": 0.58,
+  "precision": 0.63,
+  "coverage": 0.21,
+  "accepted": 930,
+  "total": 4427,
+  "target_precision": 0.6,
+  "min_coverage": 0.02,
+  "satisfied": true
+}
+```
+
+The threshold is selected on the raw validation probabilities, because the
+saved model does not apply temperature scaling; `satisfied=false` means the
+requested gate could not be met and must not be used silently. Training does not
+apply the gate to its test metrics or to the saved model's `predict_proba`.
+
 ## Commands
 
 ```bash
