@@ -1049,3 +1049,42 @@ def test_backtest_mask_actions_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out.is_file()
     assert "run_id" in json.loads(result.stdout)
+
+
+def test_data_coverage_prints_metadata_without_a_full_report(tmp_path):
+    _synth_two_days(tmp_path)
+    r = run(
+        "data",
+        "coverage",
+        "--symbol",
+        "XAUUSD",
+        "--timeframe",
+        "M1",
+        "--root",
+        str(tmp_path),
+    )
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["rows"] == 2_880
+    assert payload["first_ts"] and payload["last_ts"]
+    assert payload["first_ts"] <= payload["last_ts"]
+
+
+def test_dataset_inspect_prints_a_saved_manifest(tmp_path):
+    manifest = tmp_path / "dataset.json"
+    manifest.write_text(
+        json.dumps({"dataset_id": "XAUUSD:M1:h1:abc", "rows": 10}), encoding="utf-8"
+    )
+
+    r = run("dataset", "inspect", "--manifest", str(manifest))
+
+    assert r.returncode == 0, r.stderr
+    payload = json.loads(r.stdout)
+    assert payload["dataset_id"] == "XAUUSD:M1:h1:abc"
+    assert payload["rows"] == 10
+
+
+def test_dataset_inspect_rejects_a_missing_manifest(tmp_path):
+    r = run("dataset", "inspect", "--manifest", str(tmp_path / "absent.json"))
+    assert r.returncode == 2
+    assert "not found" in json.loads(r.stderr)["error"]
