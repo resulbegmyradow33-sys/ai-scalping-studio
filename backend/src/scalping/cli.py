@@ -328,6 +328,31 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
         raise _ExitCode(2)
 
 
+def _cmd_data_reconcile(args: argparse.Namespace) -> None:
+    """Compare one symbol/timeframe across two stores by timestamp."""
+    from scalping.data.quality import ReconcileConfig, reconcile_bars
+
+    primary = ParquetStore(args.primary_root).read(args.symbol, args.timeframe)
+    secondary = ParquetStore(args.secondary_root).read(args.symbol, args.timeframe)
+    if primary.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.primary_root}")
+    if secondary.is_empty():
+        raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.secondary_root}")
+    report = reconcile_bars(
+        primary,
+        secondary,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        config=ReconcileConfig(
+            price_tolerance=args.price_tolerance,
+            spread_tolerance=args.spread_tolerance,
+        ),
+    )
+    _print_json(report.to_dict())
+    if not report.ok:
+        raise _ExitCode(2)
+
+
 # --- neural networks ---------------------------------------------------------
 def _nn_data(args: argparse.Namespace, *, window: int, clip: float = 5.0):
     """Build windowed tensors for one stored symbol/timeframe."""
@@ -1543,6 +1568,15 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--timeframe", default="M1")
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
     validate.set_defaults(handler=_cmd_data_validate)
+
+    reconcile = sources.add_parser("reconcile", help="compare two stores by timestamp")
+    reconcile.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
+    reconcile.add_argument("--timeframe", default="M1")
+    reconcile.add_argument("--primary-root", required=True)
+    reconcile.add_argument("--secondary-root", required=True)
+    reconcile.add_argument("--price-tolerance", type=float, default=0.0)
+    reconcile.add_argument("--spread-tolerance", type=float, default=0.0)
+    reconcile.set_defaults(handler=_cmd_data_reconcile)
 
     ml = commands.add_parser("ml", help="classical machine-learning experiments")
     ml_commands = ml.add_subparsers(dest="ml_command", required=True)
