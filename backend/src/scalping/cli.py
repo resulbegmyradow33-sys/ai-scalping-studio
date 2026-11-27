@@ -322,7 +322,12 @@ def _cmd_data_validate(args: argparse.Namespace) -> None:
     frame = store.read(args.symbol, args.timeframe)
     if frame.is_empty():
         raise CliError(f"no {args.symbol} {args.timeframe} bars under {args.root}")
-    report = validate_bars(frame, symbol=args.symbol, timeframe=args.timeframe)
+    report = validate_bars(
+        frame,
+        symbol=args.symbol,
+        timeframe=args.timeframe,
+        gap_threshold_minutes=args.gap_threshold,
+    )
     _print_json(report.to_dict())
     if not report.ok:
         raise _ExitCode(2)
@@ -1542,6 +1547,12 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--symbol", type=_symbol, default=DEFAULT_SYMBOL)
     validate.add_argument("--timeframe", default="M1")
     validate.add_argument("--root", default=str(DEFAULT_ROOT))
+    validate.add_argument(
+        "--gap-threshold",
+        type=int,
+        default=10,
+        help="minutes between bars before a gap is reported (default 10)",
+    )
     validate.set_defaults(handler=_cmd_data_validate)
 
     ml = commands.add_parser("ml", help="classical machine-learning experiments")

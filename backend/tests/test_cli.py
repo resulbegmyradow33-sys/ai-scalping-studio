@@ -1049,3 +1049,18 @@ def test_backtest_mask_actions_flag(tmp_path):
     assert result.returncode == 0, result.stderr
     assert out.is_file()
     assert "run_id" in json.loads(result.stdout)
+
+
+def test_data_validate_gap_threshold_is_configurable(tmp_path):
+    _synth_two_days(tmp_path)
+    r = run(
+        "data",
+        "validate",
+        "--root",
+        str(tmp_path),
+        "--gap-threshold",
+        "0",
+    )
+    assert r.returncode == 0, r.stderr
+    codes = {issue["code"] for issue in json.loads(r.stdout)["issues"]}
+    assert "time_gaps" in codes
